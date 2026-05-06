@@ -4,10 +4,11 @@
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Get model from environment or use default
-MODEL = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4-20250514")
+MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
 
 
 def main():
@@ -17,11 +18,18 @@ def main():
     from thematic_analysis.pipeline import ExecutionMode
 
     pdf_dir = sys.argv[1] if len(sys.argv) > 1 else "/workspace/project/paper1-pdfs"
-    
+    pattern = sys.argv[2] if len(sys.argv) > 2 else "*.pdf"
+
+    debug_dir = os.environ.get(
+        "THEMATIC_DEBUG_DIR",
+        f"debug/{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+    )
+
     print("=" * 60)
     print("Thematic-LM Analysis")
     print("=" * 60)
-    print(f"PDF Directory: {pdf_dir}")
+    print(f"Directory: {pdf_dir}")
+    print(f"Pattern: {pattern}")
     print(f"Model: {MODEL}")
     print()
 
@@ -46,7 +54,10 @@ def main():
         batch_size=5,  # Process 5 segments at a time
         use_mock_embeddings=False,  # Use real embeddings
         execution_mode=ExecutionMode.SEQUENTIAL,  # Use sequential for stability
+        debug_dir=debug_dir,
     )
+
+    print(f"Debug dumps: {debug_dir}")
 
     pipeline = ThematicLMPipeline(config=config)
 
@@ -55,7 +66,7 @@ def main():
     
     result = pipeline.run_from_directory(
         pdf_dir,
-        pattern="*.pdf",
+        pattern=pattern,
         segmentation="paragraph",
         min_words=30,  # Skip very short paragraphs
     )
@@ -69,7 +80,7 @@ def main():
     # Print themes
     print("THEMES DISCOVERED:")
     print("-" * 40)
-    for i, theme in enumerate(result.themes.final_themes, 1):
+    for i, theme in enumerate(result.themes.themes, 1):
         print(f"\n{i}. {theme.name}")
         print(f"   Description: {theme.description}")
         print(f"   Codes: {', '.join(theme.codes[:5])}{'...' if len(theme.codes) > 5 else ''}")
@@ -78,7 +89,7 @@ def main():
 
     print()
     print("-" * 40)
-    print(f"Total themes: {len(result.themes.final_themes)}")
+    print(f"Total themes: {len(result.themes.themes)}")
     print(f"Total codes in codebook: {len(result.codebook)}")
     print(f"Segments processed: {result.metrics.get('num_segments', 'N/A')}")
 

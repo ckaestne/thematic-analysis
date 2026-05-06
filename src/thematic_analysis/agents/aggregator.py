@@ -111,6 +111,42 @@ Example:
 }}
 ```"""
 
+AGGREGATOR_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "code_aggregation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "merge_groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "merged_code": {"type": "string"},
+                            "original_codes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "rationale": {"type": "string"},
+                        },
+                        "required": ["merged_code", "original_codes", "rationale"],
+                    },
+                },
+                "retain_codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["merge_groups", "retain_codes"],
+        },
+    },
+}
+
+
 AGGREGATOR_USER_PROMPT = """\
 ## Codes to Aggregate:
 {codes_section}
@@ -390,7 +426,11 @@ class CodeAggregatorAgent(BaseAgent):
             similar_groups_section=self._format_similar_groups_section(similar_groups),
         )
 
-        response = self._call_llm(self.get_system_prompt(), user_prompt)
+        response = self._call_llm(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=AGGREGATOR_RESPONSE_SCHEMA,
+        )
         result = self._parse_response(response, code_quotes)
 
         if result is None:

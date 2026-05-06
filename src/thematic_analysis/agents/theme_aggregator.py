@@ -123,6 +123,48 @@ Please analyze these themes and determine which should be merged and which
 should remain separate. Provide your response as JSON."""
 
 
+THEME_AGGREGATOR_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "theme_aggregation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "merge_groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "merged_name": {"type": "string"},
+                            "merged_description": {"type": "string"},
+                            "original_themes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "rationale": {"type": "string"},
+                        },
+                        "required": [
+                            "merged_name",
+                            "merged_description",
+                            "original_themes",
+                            "rationale",
+                        ],
+                    },
+                },
+                "retain_themes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["merge_groups", "retain_themes"],
+        },
+    },
+}
+
+
 class ThemeAggregatorAgent(BaseAgent):
     """Agent that merges and organizes themes from multiple theme coders.
 
@@ -375,8 +417,12 @@ class ThemeAggregatorAgent(BaseAgent):
             similar_groups_section=self._format_similar_groups_section(similar_groups),
         )
 
-        # Call LLM
-        response = self._call_llm(self.get_system_prompt(), user_prompt)
+        # Call LLM with structured-output schema
+        response = self._call_llm(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=THEME_AGGREGATOR_RESPONSE_SCHEMA,
+        )
 
         # Parse response
         return self._parse_response(response, themes)

@@ -73,6 +73,25 @@ Example:
 }}
 ```"""
 
+CODER_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "code_assignment",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "codes": {"type": "array", "items": {"type": "string"}},
+                "rationales": {"type": "array", "items": {"type": "string"}},
+                "is_new": {"type": "array", "items": {"type": "boolean"}},
+            },
+            "required": ["codes", "rationales", "is_new"],
+        },
+    },
+}
+
+
 CODER_USER_PROMPT = """\
 ## Current Codebook:
 {codebook_section}
@@ -299,7 +318,11 @@ responsive to the research questions and aligned with the theoretical framework.
             CodeAssignment with assigned codes.
         """
         user_prompt = self._build_user_prompt(segment_id, text)
-        response = self._call_llm(self.get_system_prompt(), user_prompt)
+        response = self._call_llm(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=CODER_RESPONSE_SCHEMA,
+        )
         return self._process_response(response, segment_id, text)
 
     async def code_segment_async(self, segment_id: str, text: str) -> CodeAssignment:
@@ -313,7 +336,11 @@ responsive to the research questions and aligned with the theoretical framework.
             CodeAssignment with assigned codes.
         """
         user_prompt = self._build_user_prompt(segment_id, text)
-        response = await self._call_llm_async(self.get_system_prompt(), user_prompt)
+        response = await self._call_llm_async(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=CODER_RESPONSE_SCHEMA,
+        )
         return self._process_response(response, segment_id, text)
 
     def code_segments(self, segments: list[tuple[str, str]]) -> list[CodeAssignment]:

@@ -71,6 +71,28 @@ Example:
 }}
 ```"""
 
+REVIEWER_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "code_review_decision",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["merge", "update", "add_new", "skip"],
+                },
+                "target_code": {"type": ["string", "null"]},
+                "rationale": {"type": "string"},
+            },
+            "required": ["decision", "target_code", "rationale"],
+        },
+    },
+}
+
+
 REVIEWER_USER_PROMPT = """\
 ## New Code to Review:
 Code: "{new_code}"
@@ -228,7 +250,11 @@ class ReviewerAgent(BaseAgent):
             ),
         )
 
-        response = self._call_llm(self.get_system_prompt(), user_prompt)
+        response = self._call_llm(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=REVIEWER_RESPONSE_SCHEMA,
+        )
         decision, target_code, rationale = self._parse_response(response)
 
         return ReviewResult(

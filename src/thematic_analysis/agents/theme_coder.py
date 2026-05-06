@@ -110,6 +110,38 @@ Respond with a JSON object containing a list of themes:
 }}
 ```"""
 
+THEME_CODER_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "theme_development",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "themes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "codes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["name", "description", "codes"],
+                    },
+                },
+            },
+            "required": ["themes"],
+        },
+    },
+}
+
+
 THEME_CODER_USER_PROMPT = """\
 ## Codebook Summary:
 Total codes: {total_codes}
@@ -292,7 +324,11 @@ research topic."""
             codes_section=self._format_codes_section(),
         )
 
-        response = self._call_llm(self.get_system_prompt(), user_prompt)
+        response = self._call_llm(
+            self.get_system_prompt(),
+            user_prompt,
+            response_format=THEME_CODER_RESPONSE_SCHEMA,
+        )
         themes = self._parse_response(response)
 
         return ThemeResult(themes=themes)

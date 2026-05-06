@@ -78,35 +78,51 @@ class BaseAgent(ABC):
                 content_parts.append(part.text)
         return "".join(content_parts)
 
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
+    def _call_llm(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_format: dict | None = None,
+    ) -> str:
         """Call the LLM with the given prompts (synchronous).
 
         Args:
             system_prompt: The system prompt with instructions.
             user_prompt: The user prompt with the task.
+            response_format: Optional litellm response_format spec to constrain
+                the model's output (e.g. ``{"type": "json_schema", "json_schema": ...}``).
 
         Returns:
             The LLM response text.
         """
         messages = self._create_messages(system_prompt, user_prompt)
-        response = self.llm.completion(messages=messages)
+        kwargs = {"response_format": response_format} if response_format else {}
+        response = self.llm.completion(messages=messages, **kwargs)
         return self._extract_text(response)
 
-    async def _call_llm_async(self, system_prompt: str, user_prompt: str) -> str:
+    async def _call_llm_async(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_format: dict | None = None,
+    ) -> str:
         """Call the LLM with the given prompts (asynchronous).
 
         Args:
             system_prompt: The system prompt with instructions.
             user_prompt: The user prompt with the task.
+            response_format: Optional litellm response_format spec to constrain
+                the model's output.
 
         Returns:
             The LLM response text.
         """
         messages = self._create_messages(system_prompt, user_prompt)
+        kwargs = {"response_format": response_format} if response_format else {}
         # Run sync completion in thread pool for async compatibility
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
-            None, lambda: self.llm.completion(messages=messages)
+            None, lambda: self.llm.completion(messages=messages, **kwargs)
         )
         return self._extract_text(response)
 

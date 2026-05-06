@@ -147,7 +147,7 @@ Set your LLM API credentials:
 
 ```bash
 export LLM_API_KEY="your-api-key"
-export LLM_MODEL="anthropic/claude-sonnet-4-20250514"  # or other supported model
+export LLM_MODEL="claude-sonnet-4-6"  # or other supported model
 ```
 
 ## Supported File Formats
