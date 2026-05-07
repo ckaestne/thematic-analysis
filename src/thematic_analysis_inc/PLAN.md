@@ -74,6 +74,13 @@ codebook_versions(
   created_at      TEXT NOT NULL                  -- ISO timestamp
 )
 
+-- Coders (registered via add-coder; identity is the persona shown to the agent).
+coders(
+  coder_id    TEXT PRIMARY KEY,
+  identity    TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+)
+
 -- Input data.
 segments(
   segment_id  TEXT PRIMARY KEY,
@@ -82,18 +89,19 @@ segments(
   status      TEXT NOT NULL DEFAULT 'pending'    -- pending|coding|aggregating|reviewing|done
 )
 
--- One row per (coder_idx, segment).
+-- One row per (segment, coder). Created lazily when the coder starts
+-- working on the segment — there is no `pending` state.
 coder_runs(
   id                INTEGER PRIMARY KEY,
   segment_id        TEXT NOT NULL REFERENCES segments,
-  coder_idx         INTEGER NOT NULL,
+  coder_id          TEXT NOT NULL REFERENCES coders,
   codebook_version  INTEGER NOT NULL REFERENCES codebook_versions,
-  status            TEXT NOT NULL DEFAULT 'pending',  -- pending|claimed|done|failed
+  status            TEXT NOT NULL DEFAULT 'running',  -- running|done|failed
   claimed_at        TEXT,
   finished_at       TEXT,
   raw_response      TEXT,                              -- full LLM output (debug)
   error             TEXT,
-  UNIQUE(segment_id, coder_idx)
+  UNIQUE(segment_id, coder_id)
 )
 coder_codes(
   coder_run_id  INTEGER NOT NULL REFERENCES coder_runs,
@@ -118,7 +126,7 @@ aggregated_codes(
   aggregation_id      INTEGER NOT NULL REFERENCES aggregations,
   code                TEXT NOT NULL,
   quotes_json         TEXT NOT NULL,                  -- list of Quote dicts
-  source_coders_json  TEXT NOT NULL                   -- list of coder_idx
+  source_coders_json  TEXT NOT NULL                   -- list of coder_id
 )
 
 -- One decision per aggregated_code.
@@ -136,11 +144,16 @@ review_decisions(
 
 State machine for a segment:
 ```
-pending → coding (≥1 coder_run claimed)
-       → aggregating (all coder_runs done; awaiting aggregation)
+pending → coding (a coder_run row was inserted for this segment)
+       → aggregating (every registered coder has a 'done' coder_run; aggregator
+                      decides this at query time, based on `coders` ⨝ `coder_runs`)
        → reviewing  (aggregation done; some review_decisions pending)
        → done       (all review_decisions applied)
 ```
+
+`segments.status` advances to `coding` automatically when the first
+coder_run is opened. Later transitions are written by the aggregator and
+reviewer steps respectively.
 
 ## CLI surface
 
@@ -182,14 +195,28 @@ ta-stage1 run        --db x.sqlite [--workers K]
 
 ta-stage1 status     --db x.sqlite
     Print:
-      segments:    120 total | 12 pending | 14 coding | 30 aggregating | 8 reviewing | 56 done
-      coder_runs:  360 total | 42 pending | 6 failed
-      aggregations: 78 total | 4 failed
-      reviews:     412 total | 412 applied
-      codebook:    v=37 codes=84
+      segments:         120 total | pending=12 | coding=44 | aggregating=8 | done=56
+      coders:           3
+      coder_runs:       360 total | running=2 | done=352 | failed=6
+      aggregations:     78 total  | done=74 | failed=4
+      review_decisions: 412 total | applied=412
+      codebook:         v=37 codes=84
 
 ta-stage1 export-codebook --db x.sqlite [--version N] -o codebook.json
     Dump the JSON snapshot of the chosen version (default: latest).
+```
+
+### LLM environment
+
+`CoderAgent` (and friends) use `openhands.sdk.LLM.load_from_env()`,
+which reads env vars with the `LLM_` prefix mapped to LLM model fields
+— **not** the `LITELLM_*` / `ANTHROPIC_API_KEY` names. To run real
+coders set at least:
+
+```
+LLM_MODEL=anthropic/claude-sonnet-4-20250514
+LLM_API_KEY=...
+# optional: LLM_BASE_URL=...
 ```
 
 ## Implementation steps
@@ -197,36 +224,41 @@ ta-stage1 export-codebook --db x.sqlite [--version N] -o codebook.json
 Each step is independently shippable. After each, `pytest` should pass and
 `ta-stage1 status` should reflect reality.
 
-### Step 1 — Schema, DAL, and read-only commands
-- `schema.py`: idempotent `create_schema(conn)`; `current_version(conn)`.
-- `store.py`: thin DAL wrappers (no business logic):
-  - `init_db(path)`: open connection with WAL + foreign_keys ON; create schema; write codebook v1 if missing.
-  - `latest_codebook_version(conn) -> (version, snapshot_json)`.
-  - `insert_codebook_version(conn, snapshot_json, parent, created_by) -> version`.
-  - `enqueue_segments(conn, segments, num_coders, batch=None)`.
-  - `claim_next_coder_run(conn) -> row|None` (atomic UPDATE…RETURNING).
-  - `record_coder_result(conn, run_id, codes, raw_response)`.
-  - `record_coder_failure(conn, run_id, error)`.
-  - `next_segment_to_aggregate(conn) -> segment_id|None`.
-  - `record_aggregation(conn, segment_id, merged, retained)`.
-  - `next_aggregated_code_to_review(conn) -> row|None`.
-  - `record_review_decision(conn, agg_code_id, decision, target, rationale, new_version)`.
-  - `status_counts(conn) -> dict`.
-- `cli.py`: `init`, `enqueue`, `status`, `export-codebook`.
-- Register `ta-stage1` script in `pyproject.toml`.
-- Tests: schema is idempotent; enqueue is idempotent on `segment_id`;
-  `status` numbers match what was inserted.
+### Step 1 — Schema, DAL, and bookkeeping commands  ✅ done
+- `schema.py`: idempotent `create_schema(conn)` (also called from
+  `connect()`, so any subcommand can run against a fresh or partially-
+  migrated DB without an explicit `init`).
+- `store.py`: DAL wrappers — `init_db`, `latest_codebook_version`,
+  `get_codebook_version`, `insert_codebook_version`, `add_coder`,
+  `remove_coder`, `get_coder`, `list_coders`, `enqueue_segments`
+  (segments only — no implicit coder_runs), `segments_to_code`,
+  `start_coder_run`, `record_coder_result`, `record_coder_failure`,
+  `reset_unfinished_coder_runs`, `status_counts`.
+- `cli.py`: `init`, `add-coder`, `rm-coder`, `list-coders`, `enqueue`,
+  `add-document`, `status`, `export-codebook`.
+- `pyproject.toml`: registered `ta-stage1`.
+- Tests cover schema idempotence, segment idempotence, coder
+  add/remove (refused while runs exist), `segments_to_code` exclusion
+  semantics, and CLI flows.
 
-### Step 2 — Coder worker
-- `workers.code_one(conn) -> bool` — claim → load codebook for the pinned
-  version → instantiate `CoderAgent` → call → record result. Returns
-  `False` when nothing to claim.
-- LRU-cache `Codebook.from_dict(snapshot_json)` keyed on version (per-
-  process).
-- `cli.py`: `code` subcommand drains in a loop with progress lines and
-  summary. `--workers K` uses `asyncio.gather` over `code_segment_async`.
-- Tests: with a stub LLM, a few segments produce the expected
-  `coder_codes` rows; failures are recorded and retryable.
+### Step 2 — Coder worker  ✅ done
+- `workers.code_one(conn, coder_id)` and `code_one_async`: pick the
+  next segment without a `coder_runs` row for this coder, insert a
+  `running` row pinned to the latest codebook version, instantiate
+  `CoderAgent` with `CoderConfig(identity=coder.identity)`, run, then
+  record `done` (with `coder_codes`) or `failed`.
+- Per-process Codebook cache keyed on `version` (avoids re-embedding
+  across consecutive same-version tasks). `clear_codebook_cache()`
+  available for tests / version bumps.
+- `workers.drain_code_async`: K concurrent coroutines, optional
+  `limit`, calls a per-result `on_event` callback for progress lines.
+- `cli.py code <coder_id> [--limit N] [--workers K] [--retry-failed]
+  [--mock-embeddings]`. `--retry-failed` deletes `failed`/`running`
+  rows for the coder so they get re-coded; `--mock-embeddings` skips
+  the real sentence-transformer load (testing / no-network).
+- Tests: stub-agent factory exercises happy path, failure path,
+  retry-after-clear, and two-coders-independent. CLI test
+  monkeypatches `workers.default_coder_factory`.
 
 ### Step 3 — Aggregator worker
 - `workers.aggregate_one(conn) -> bool` — find a segment whose coder_runs
