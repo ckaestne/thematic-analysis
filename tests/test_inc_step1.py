@@ -75,7 +75,8 @@ def test_add_and_remove_coder(tmp_path: Path) -> None:
     coders = store.list_coders(conn)
     assert [c.coder_id for c in coders] == ["c1"]
     assert coders[0].identity == "feminist scholar"
-    assert store.remove_coder(conn, "c1") is True
+    removed, runs_deleted = store.remove_coder(conn, "c1")
+    assert removed is True and runs_deleted == 0
     assert store.list_coders(conn) == []
 
 
@@ -87,6 +88,11 @@ def test_remove_coder_refuses_when_runs_exist(tmp_path: Path) -> None:
     store.start_coder_run(conn, "seg_0000", "c1", 1)
     with pytest.raises(RuntimeError):
         store.remove_coder(conn, "c1")
+    # force=True cascades: deletes coder_runs (and any coder_codes) then coder.
+    removed, runs_deleted = store.remove_coder(conn, "c1", force=True)
+    assert removed is True and runs_deleted == 1
+    n_runs = conn.execute("SELECT COUNT(*) AS n FROM coder_runs").fetchone()["n"]
+    assert n_runs == 0
 
 
 def test_enqueue_inserts_segments_only(tmp_path: Path) -> None:

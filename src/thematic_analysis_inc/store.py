@@ -119,20 +119,44 @@ def add_coder(conn: sqlite3.Connection, coder_id: str, identity: str) -> bool:
     return cur.rowcount == 1
 
 
-def remove_coder(conn: sqlite3.Connection, coder_id: str) -> bool:
-    """Delete a coder. Returns True if a row was removed.
+def remove_coder(
+    conn: sqlite3.Connection, coder_id: str, *, force: bool = False
+) -> tuple[bool, int]:
+    """Delete a coder. Returns (removed, runs_deleted).
 
-    Refuses if the coder has any coder_runs (caller must clear those first).
+    By default refuses if the coder has any coder_runs. With force=True,
+    cascades and deletes their coder_codes + coder_runs first.
     """
     n = conn.execute(
         "SELECT COUNT(*) AS n FROM coder_runs WHERE coder_id = ?", (coder_id,)
     ).fetchone()["n"]
-    if n > 0:
+    if n > 0 and not force:
         raise RuntimeError(
-            f"coder '{coder_id}' has {n} coder_runs; refuse to remove"
+            f"coder '{coder_id}' has {n} coder_runs; pass force=True to cascade"
         )
-    cur = conn.execute("DELETE FROM coders WHERE coder_id = ?", (coder_id,))
-    return cur.rowcount == 1
+    runs_deleted = 0
+    try:
+        conn.execute("BEGIN")
+        if n > 0:
+            conn.execute(
+                "DELETE FROM coder_codes WHERE coder_run_id IN ("
+                "  SELECT id FROM coder_runs WHERE coder_id = ?"
+                ")",
+                (coder_id,),
+            )
+            cur = conn.execute(
+                "DELETE FROM coder_runs WHERE coder_id = ?", (coder_id,)
+            )
+            runs_deleted = cur.rowcount
+        cur = conn.execute(
+            "DELETE FROM coders WHERE coder_id = ?", (coder_id,)
+        )
+        removed = cur.rowcount == 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return removed, runs_deleted
 
 
 def get_coder(conn: sqlite3.Connection, coder_id: str) -> Coder | None:

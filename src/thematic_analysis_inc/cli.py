@@ -45,17 +45,16 @@ def _cmd_add_coder(args: argparse.Namespace) -> int:
 def _cmd_rm_coder(args: argparse.Namespace) -> int:
     conn = store.connect(args.db)
     try:
-        removed = store.remove_coder(conn, args.coder_id)
+        removed, runs_deleted = store.remove_coder(
+            conn, args.coder_id, force=args.force
+        )
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
-        print(
-            "hint: drop runs with `DELETE FROM coder_runs WHERE coder_id=...` "
-            "first if you really want to remove this coder",
-            file=sys.stderr,
-        )
+        print("hint: pass --force to also drop their coder_runs", file=sys.stderr)
         return 1
     if removed:
-        print(f"removed coder '{args.coder_id}'")
+        suffix = f" (also dropped {runs_deleted} run(s))" if runs_deleted else ""
+        print(f"removed coder '{args.coder_id}'{suffix}")
         return 0
     print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
     return 1
@@ -300,8 +299,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ac.set_defaults(func=_cmd_add_coder)
 
-    p_rc = sub.add_parser("rm-coder", help="remove a coder (must have no runs)")
+    p_rc = sub.add_parser(
+        "rm-coder",
+        help="remove a coder (use --force to also drop their coder_runs)",
+    )
     p_rc.add_argument("coder_id")
+    p_rc.add_argument(
+        "--force",
+        action="store_true",
+        help="also delete this coder's coder_runs and coder_codes",
+    )
     p_rc.set_defaults(func=_cmd_rm_coder)
 
     p_lc = sub.add_parser("list-coders", help="list registered coders")
