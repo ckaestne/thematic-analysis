@@ -297,6 +297,170 @@ def reset_unfinished_coder_runs(
 
 
 # ---------------------------------------------------------------------------
+# Aggregations
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CoderRunResult:
+    coder_id: str
+    codes: list[str]
+    rationales: list[str]
+    is_new: list[bool]
+
+
+def next_segment_to_aggregate(
+    conn: sqlite3.Connection,
+) -> sqlite3.Row | None:
+    """Return the next segment for which every registered coder has a 'done'
+    coder_run, and which has no aggregation row yet. Returns None if there
+    are no coders or no qualifying segment."""
+    n_coders = conn.execute(
+        "SELECT COUNT(*) AS n FROM coders"
+    ).fetchone()["n"]
+    if n_coders == 0:
+        return None
+    return conn.execute(
+        "SELECT s.segment_id, s.text FROM segments s "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM coders c "
+        "  WHERE NOT EXISTS ("
+        "    SELECT 1 FROM coder_runs cr "
+        "    WHERE cr.segment_id = s.segment_id "
+        "      AND cr.coder_id = c.coder_id "
+        "      AND cr.status = 'done'"
+        "  )"
+        ") "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM aggregations a WHERE a.segment_id = s.segment_id"
+        ") "
+        "ORDER BY s.segment_id LIMIT 1"
+    ).fetchone()
+
+
+def load_segment_coder_results(
+    conn: sqlite3.Connection, segment_id: str
+) -> list[CoderRunResult]:
+    """Load each completed coder_run for the segment, with its codes."""
+    runs = conn.execute(
+        "SELECT id, coder_id FROM coder_runs "
+        "WHERE segment_id = ? AND status = 'done' "
+        "ORDER BY coder_id",
+        (segment_id,),
+    ).fetchall()
+    out: list[CoderRunResult] = []
+    for r in runs:
+        rows = conn.execute(
+            "SELECT code, rationale, is_new FROM coder_codes "
+            "WHERE coder_run_id = ? ORDER BY position",
+            (r["id"],),
+        ).fetchall()
+        out.append(
+            CoderRunResult(
+                coder_id=r["coder_id"],
+                codes=[x["code"] for x in rows],
+                rationales=[x["rationale"] or "" for x in rows],
+                is_new=[bool(x["is_new"]) for x in rows],
+            )
+        )
+    return out
+
+
+def start_aggregation(
+    conn: sqlite3.Connection, segment_id: str
+) -> int | None:
+    """Insert a 'pending' aggregations row for a segment. Returns the new id,
+    or None if a row already exists (UNIQUE constraint)."""
+    try:
+        cur = conn.execute(
+            "INSERT INTO aggregations (segment_id, status, created_at) "
+            "VALUES (?, 'pending', ?)",
+            (segment_id, _now()),
+        )
+    except sqlite3.IntegrityError:
+        return None
+    if cur.lastrowid is None:
+        return None
+    conn.execute(
+        "UPDATE segments SET status='aggregating' "
+        "WHERE segment_id = ? AND status IN ('pending', 'coding')",
+        (segment_id,),
+    )
+    return int(cur.lastrowid)
+
+
+@dataclass
+class AggregatedCodeRow:
+    code: str
+    quotes_json: str
+    source_coders_json: str
+
+
+def record_aggregation_result(
+    conn: sqlite3.Connection,
+    *,
+    aggregation_id: int,
+    segment_id: str,
+    rows: list[AggregatedCodeRow],
+) -> None:
+    """Persist aggregated_codes and mark the aggregation 'done'. If any
+    aggregated_codes were produced, transition the segment to 'reviewing';
+    otherwise mark it 'done' (nothing to review)."""
+    try:
+        conn.execute("BEGIN")
+        for r in rows:
+            conn.execute(
+                "INSERT INTO aggregated_codes "
+                "(aggregation_id, code, quotes_json, source_coders_json) "
+                "VALUES (?, ?, ?, ?)",
+                (aggregation_id, r.code, r.quotes_json, r.source_coders_json),
+            )
+        conn.execute(
+            "UPDATE aggregations SET status='done', finished_at=? WHERE id = ?",
+            (_now(), aggregation_id),
+        )
+        next_status = "reviewing" if rows else "done"
+        conn.execute(
+            "UPDATE segments SET status=? WHERE segment_id = ?",
+            (next_status, segment_id),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def record_aggregation_failure(
+    conn: sqlite3.Connection, aggregation_id: int, error: str
+) -> None:
+    conn.execute(
+        "UPDATE aggregations SET status='failed', finished_at=?, error=? "
+        "WHERE id = ?",
+        (_now(), error, aggregation_id),
+    )
+
+
+def reset_unfinished_aggregations(conn: sqlite3.Connection) -> int:
+    """Delete failed/pending aggregations so they will be re-attempted next
+    time `aggregate` runs. Also nukes their aggregated_codes (cascade-by-hand)."""
+    rows = conn.execute(
+        "SELECT id FROM aggregations WHERE status IN ('failed', 'pending')"
+    ).fetchall()
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+    conn.execute(
+        f"DELETE FROM aggregated_codes WHERE aggregation_id IN ({placeholders})",
+        ids,
+    )
+    cur = conn.execute(
+        f"DELETE FROM aggregations WHERE id IN ({placeholders})", ids
+    )
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
 
