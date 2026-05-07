@@ -208,6 +208,50 @@ def _cmd_code(args: argparse.Namespace) -> int:
     return 0
 
 
+# aggregate -------------------------------------------------------------------
+
+
+def _cmd_aggregate(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+
+    if args.retry_failed:
+        n = store.reset_unfinished_aggregations(conn)
+        if n:
+            print(f"[aggregate] cleared {n} failed/pending aggregation(s)")
+
+    print(
+        "[aggregate] starting"
+        + (f" limit={args.limit}" if args.limit else "")
+    )
+
+    def on_event(res: dict, c: dict) -> None:
+        n = c["done"] + c["failed"]
+        if res["ok"]:
+            print(
+                f"[aggregate] {res['segment_id']} in={res['n_in']} "
+                f"merged={res['n_merged']} retained={res['n_retained']} "
+                f"({n} ok={c['done']} failed={c['failed']} "
+                f"{res['elapsed']:.1f}s)"
+            )
+        else:
+            print(
+                f"[aggregate] {res['segment_id']} FAILED: {res['error']}",
+                file=sys.stderr,
+            )
+
+    counters = workers.drain_aggregate(
+        conn,
+        limit=args.limit,
+        use_mock_embeddings=args.mock_embeddings,
+        on_event=on_event,
+    )
+    print(
+        f"[aggregate] done: {counters['done']} ok, "
+        f"{counters['failed']} failed"
+    )
+    return 0
+
+
 # status / export -------------------------------------------------------------
 
 
@@ -297,6 +341,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="use deterministic mock embeddings (testing / no-network)",
     )
     p_code.set_defaults(func=_cmd_code)
+
+    p_agg = sub.add_parser(
+        "aggregate", help="aggregate codes for ready segments"
+    )
+    p_agg.add_argument("--limit", type=int, default=None)
+    p_agg.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="delete failed/pending aggregation rows before starting",
+    )
+    p_agg.add_argument(
+        "--mock-embeddings",
+        action="store_true",
+        help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_agg.set_defaults(func=_cmd_aggregate)
 
     p_st = sub.add_parser("status", help="print pipeline counts")
     p_st.set_defaults(func=_cmd_status)

@@ -8,11 +8,16 @@ row, calls the LLM, then writes 'done' (with codes) or 'failed'.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from typing import Any, Callable
 
-from thematic_analysis.agents.coder import CoderAgent, CoderConfig
+from thematic_analysis.agents.aggregator import (
+    AggregatorConfig,
+    CodeAggregatorAgent,
+)
+from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
 from thematic_analysis.codebook import Codebook
 
 from thematic_analysis_inc import store
@@ -224,4 +229,155 @@ async def drain_code_async(
                 on_event(res, counters)
 
     await asyncio.gather(*[loop() for _ in range(max(1, workers))])
+    return counters
+
+
+# Aggregator ------------------------------------------------------------------
+
+AggregatorFactory = Callable[[Codebook], Any]
+
+
+def default_aggregator_factory(codebook: Codebook) -> CodeAggregatorAgent:
+    return CodeAggregatorAgent(config=AggregatorConfig(), codebook=codebook)
+
+
+def _build_assignments(
+    segment_id: str, text: str, runs: list[store.CoderRunResult]
+) -> list[CodeAssignment]:
+    return [
+        CodeAssignment(
+            segment_id=segment_id,
+            segment_text=text,
+            codes=list(r.codes),
+            rationales=list(r.rationales),
+            is_new_code=list(r.is_new),
+        )
+        for r in runs
+    ]
+
+
+def _source_coders_for(
+    original_codes: list[str], code_to_coders: dict[str, list[str]]
+) -> list[str]:
+    seen: list[str] = []
+    for c in original_codes:
+        for coder_id in code_to_coders.get(c, ()):
+            if coder_id not in seen:
+                seen.append(coder_id)
+    return seen
+
+
+def _build_rows(
+    result, code_to_coders: dict[str, list[str]]
+) -> list[store.AggregatedCodeRow]:
+    rows: list[store.AggregatedCodeRow] = []
+    for mc in result.all_codes():
+        quotes = [{"quote_id": q.quote_id, "text": q.text} for q in mc.quotes]
+        sources = _source_coders_for(mc.original_codes, code_to_coders)
+        rows.append(
+            store.AggregatedCodeRow(
+                code=mc.code,
+                quotes_json=json.dumps(quotes),
+                source_coders_json=json.dumps(sources),
+            )
+        )
+    return rows
+
+
+def aggregate_one(
+    conn: sqlite3.Connection,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AggregatorFactory | None = None,
+) -> dict | None:
+    """Aggregate codes for one ready segment. Returns None when nothing is
+    ready to aggregate."""
+    row = store.next_segment_to_aggregate(conn)
+    if row is None:
+        return None
+    segment_id = row["segment_id"]
+    text = row["text"]
+
+    agg_id = store.start_aggregation(conn, segment_id)
+    if agg_id is None:
+        # Race: someone else already started this segment. Treat as "no work
+        # claimed this round" but signal we should keep looping.
+        return {
+            "ok": False,
+            "segment_id": segment_id,
+            "error": "aggregation row already exists (race)",
+            "skipped": True,
+        }
+
+    runs = store.load_segment_coder_results(conn, segment_id)
+    code_to_coders: dict[str, list[str]] = {}
+    for r in runs:
+        for code in r.codes:
+            code_to_coders.setdefault(code, []).append(r.coder_id)
+
+    n_in = sum(len(r.codes) for r in runs)
+    try:
+        codebook = Codebook(use_mock_embeddings=use_mock_embeddings)
+        factory = agent_factory or default_aggregator_factory
+        agent = factory(codebook)
+        t0 = time.monotonic()
+        assignments = _build_assignments(segment_id, text, runs)
+        result = agent.aggregate(assignments)
+        rows = _build_rows(result, code_to_coders)
+        store.record_aggregation_result(
+            conn,
+            aggregation_id=agg_id,
+            segment_id=segment_id,
+            rows=rows,
+        )
+        return {
+            "ok": True,
+            "aggregation_id": agg_id,
+            "segment_id": segment_id,
+            "n_in": n_in,
+            "n_merged": len(result.merged_codes),
+            "n_retained": len(result.retained_codes),
+            "elapsed": time.monotonic() - t0,
+        }
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        store.record_aggregation_failure(conn, agg_id, msg)
+        return {
+            "ok": False,
+            "aggregation_id": agg_id,
+            "segment_id": segment_id,
+            "error": msg,
+        }
+
+
+def drain_aggregate(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    use_mock_embeddings: bool = False,
+    agent_factory: AggregatorFactory | None = None,
+    on_event: Callable[[dict, dict], None] | None = None,
+) -> dict:
+    """Drain the aggregation queue serially. Stops when there is nothing
+    left or the optional limit is reached."""
+    counters = {"done": 0, "failed": 0}
+    while True:
+        if limit is not None and counters["done"] + counters["failed"] >= limit:
+            break
+        res = aggregate_one(
+            conn,
+            use_mock_embeddings=use_mock_embeddings,
+            agent_factory=agent_factory,
+        )
+        if res is None:
+            break
+        if res.get("skipped"):
+            # Another worker grabbed this segment; loop to find another.
+            continue
+        if res["ok"]:
+            counters["done"] += 1
+        else:
+            counters["failed"] += 1
+        if on_event is not None:
+            on_event(res, counters)
     return counters
