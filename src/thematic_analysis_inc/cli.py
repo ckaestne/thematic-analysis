@@ -1,0 +1,319 @@
+"""Single-entry CLI for the incremental Stage 1 pipeline.
+
+Subcommands:
+    init, add-coder, rm-coder, list-coders,
+    enqueue, add-document, code, status, export-codebook
+The remaining worker subcommands (aggregate, review, run) are added in
+later steps.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+from thematic_analysis_inc import store, workers
+
+
+# init ------------------------------------------------------------------------
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    conn = store.init_db(args.db)
+    latest = store.latest_codebook_version(conn)
+    assert latest is not None
+    print(f"initialized {args.db} (codebook v{latest.version}, 0 codes)")
+    return 0
+
+
+# coders ----------------------------------------------------------------------
+
+
+def _cmd_add_coder(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    inserted = store.add_coder(conn, args.coder_id, args.identity)
+    if inserted:
+        print(f"added coder '{args.coder_id}' (identity: {args.identity!r})")
+    else:
+        print(f"coder '{args.coder_id}' already exists; not modified")
+    return 0
+
+
+def _cmd_rm_coder(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    try:
+        removed = store.remove_coder(conn, args.coder_id)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        print(
+            "hint: drop runs with `DELETE FROM coder_runs WHERE coder_id=...` "
+            "first if you really want to remove this coder",
+            file=sys.stderr,
+        )
+        return 1
+    if removed:
+        print(f"removed coder '{args.coder_id}'")
+        return 0
+    print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
+    return 1
+
+
+def _cmd_list_coders(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    coders = store.list_coders(conn)
+    if not coders:
+        print("(no coders)")
+        return 0
+    for c in coders:
+        print(f"{c.coder_id}\t{c.identity}")
+    return 0
+
+
+# segments --------------------------------------------------------------------
+
+
+def _load_segments_file(path: str) -> list[tuple[str, str]]:
+    p = Path(path)
+    raw = p.read_text(encoding="utf-8").strip()
+    if not raw:
+        return []
+    items: list = []
+    if raw.startswith("["):
+        items = json.loads(raw)
+    else:
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    out: list[tuple[str, str]] = []
+    for it in items:
+        if isinstance(it, dict):
+            out.append((str(it["segment_id"]), str(it["text"])))
+        elif isinstance(it, list | tuple) and len(it) == 2:
+            out.append((str(it[0]), str(it[1])))
+        else:
+            raise ValueError(f"unrecognized segment entry: {it!r}")
+    return out
+
+
+def _cmd_enqueue(args: argparse.Namespace) -> int:
+    segments = _load_segments_file(args.segments)
+    if not segments:
+        print("no segments found in input file", file=sys.stderr)
+        return 1
+    conn = store.connect(args.db)
+    result = store.enqueue_segments(conn, segments, batch=args.batch)
+    print(
+        f"enqueued: inserted={result.inserted_segments} "
+        f"skipped={result.skipped_segments}"
+    )
+    return 0
+
+
+def _cmd_add_document(args: argparse.Namespace) -> int:
+    from thematic_analysis.loaders import load_text_file  # lazy
+
+    paths = [Path(p) for p in args.files]
+    missing = [p for p in paths if not p.exists()]
+    if missing:
+        for p in missing:
+            print(f"file not found: {p}", file=sys.stderr)
+        return 1
+
+    conn = store.connect(args.db)
+    total_files = total_inserted = total_skipped = 0
+    for path in paths:
+        doc = load_text_file(path)
+        segments = doc.segment(
+            method=args.segmentation,
+            min_words=args.min_words,
+            max_words=args.max_words,
+        )
+        if not segments:
+            print(
+                f"[add-document] {path.name}: 0 segments (skipped)",
+                file=sys.stderr,
+            )
+            continue
+        pairs = [(s.segment_id, s.text) for s in segments]
+        result = store.enqueue_segments(conn, pairs, batch=args.batch)
+        total_files += 1
+        total_inserted += result.inserted_segments
+        total_skipped += result.skipped_segments
+        print(
+            f"[add-document] {path.name}: segments={len(segments)} "
+            f"inserted={result.inserted_segments} "
+            f"skipped={result.skipped_segments}"
+        )
+    print(
+        f"done: {total_files} file(s), inserted={total_inserted} "
+        f"skipped={total_skipped}"
+    )
+    return 0
+
+
+# code ------------------------------------------------------------------------
+
+
+def _cmd_code(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    coder = store.get_coder(conn, args.coder_id)
+    if coder is None:
+        print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
+        return 1
+
+    if args.retry_failed:
+        n = store.reset_unfinished_coder_runs(conn, args.coder_id)
+        if n:
+            print(f"[code] cleared {n} failed/running run(s) for retry")
+
+    todo = len(store.segments_to_code(conn, args.coder_id))
+    print(
+        f"[code] coder={args.coder_id} todo={todo} workers={args.workers}"
+        + (f" limit={args.limit}" if args.limit else "")
+    )
+    if todo == 0:
+        return 0
+
+    def on_event(res: dict, c: dict) -> None:
+        n = c["done"] + c["failed"]
+        if res["ok"]:
+            print(
+                f"[code] {res['segment_id']} coder={res['coder_id']} "
+                f"codes={res['n_codes']} v={res['version']} "
+                f"({n}/{todo} ok={c['done']} failed={c['failed']} "
+                f"{res['elapsed']:.1f}s)"
+            )
+        else:
+            print(
+                f"[code] {res['segment_id']} coder={res['coder_id']} "
+                f"FAILED v={res['version']}: {res['error']}",
+                file=sys.stderr,
+            )
+
+    counters = asyncio.run(
+        workers.drain_code_async(
+            conn,
+            args.coder_id,
+            workers=args.workers,
+            limit=args.limit,
+            use_mock_embeddings=args.mock_embeddings,
+            on_event=on_event,
+        )
+    )
+    print(f"[code] done: {counters['done']} ok, {counters['failed']} failed")
+    return 0
+
+
+# status / export -------------------------------------------------------------
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    print(store.status_counts(conn).format())
+    return 0
+
+
+def _cmd_export_codebook(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    if args.version is None:
+        cv = store.latest_codebook_version(conn)
+    else:
+        cv = store.get_codebook_version(conn, args.version)
+    if cv is None:
+        print("no codebook version found", file=sys.stderr)
+        return 1
+    if args.output == "-" or args.output is None:
+        sys.stdout.write(cv.snapshot_json)
+        if not cv.snapshot_json.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        Path(args.output).write_text(cv.snapshot_json, encoding="utf-8")
+        codes = len(json.loads(cv.snapshot_json).get("codes", []))
+        print(f"wrote codebook v{cv.version} ({codes} codes) to {args.output}")
+    return 0
+
+
+# parser ----------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ta-stage1", description=__doc__)
+    p.add_argument("--db", required=True, help="path to the SQLite database")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init", help="create the schema and codebook v1")
+    p_init.set_defaults(func=_cmd_init)
+
+    p_ac = sub.add_parser("add-coder", help="register a coder")
+    p_ac.add_argument("coder_id")
+    p_ac.add_argument(
+        "identity",
+        help="free-text identity/persona shown to the coder agent",
+    )
+    p_ac.set_defaults(func=_cmd_add_coder)
+
+    p_rc = sub.add_parser("rm-coder", help="remove a coder (must have no runs)")
+    p_rc.add_argument("coder_id")
+    p_rc.set_defaults(func=_cmd_rm_coder)
+
+    p_lc = sub.add_parser("list-coders", help="list registered coders")
+    p_lc.set_defaults(func=_cmd_list_coders)
+
+    p_enq = sub.add_parser("enqueue", help="add segments from a JSON/JSONL file")
+    p_enq.add_argument("--segments", required=True)
+    p_enq.add_argument("--batch", type=int, default=None)
+    p_enq.set_defaults(func=_cmd_enqueue)
+
+    p_doc = sub.add_parser(
+        "add-document", help="load .md/.txt files, segment, and add"
+    )
+    p_doc.add_argument("files", nargs="+")
+    p_doc.add_argument(
+        "--segmentation",
+        choices=("paragraph", "sentence", "fixed"),
+        default="paragraph",
+    )
+    p_doc.add_argument("--min-words", type=int, default=20)
+    p_doc.add_argument("--max-words", type=int, default=500)
+    p_doc.add_argument("--batch", type=int, default=None)
+    p_doc.set_defaults(func=_cmd_add_document)
+
+    p_code = sub.add_parser("code", help="code all unprocessed segments for a coder")
+    p_code.add_argument("coder_id")
+    p_code.add_argument("--limit", type=int, default=None)
+    p_code.add_argument("--workers", type=int, default=1)
+    p_code.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="delete failed/running runs for this coder before starting",
+    )
+    p_code.add_argument(
+        "--mock-embeddings",
+        action="store_true",
+        help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_code.set_defaults(func=_cmd_code)
+
+    p_st = sub.add_parser("status", help="print pipeline counts")
+    p_st.set_defaults(func=_cmd_status)
+
+    p_ex = sub.add_parser("export-codebook", help="write codebook snapshot")
+    p_ex.add_argument("--version", type=int, default=None)
+    p_ex.add_argument("-o", "--output", default="-")
+    p_ex.set_defaults(func=_cmd_export_codebook)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

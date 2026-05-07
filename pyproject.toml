@@ -32,9 +32,12 @@ dev = [
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+ta-stage1 = "thematic_analysis_inc.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["thematic_analysis*"]
+include = ["thematic_analysis*", "thematic_analysis_inc*"]
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
