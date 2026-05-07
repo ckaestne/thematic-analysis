@@ -14,8 +14,9 @@ Large-scale Thematic Analysis' (WWW '25)
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 
 from thematic_analysis.agents import (
     AggregationResult,
@@ -41,6 +42,7 @@ from thematic_analysis.iterative import (
     NegotiationStrategy,
     calculate_agreement_rate,
 )
+from thematic_analysis.research_context import ResearchContext
 
 
 class ExecutionMode(Enum):
@@ -109,6 +111,15 @@ class PipelineConfig:
     # HITL settings
     enable_hitl_checkpoints: bool = False
     checkpoint_frequency: int = 5  # Checkpoint every N batches
+
+    # Research context (passed to coder/reviewer/theme_coder to keep
+    # analysis on-topic relative to the research questions)
+    research_context: ResearchContext | None = None
+
+    # If set, the pipeline writes intermediate artifacts (per-coder
+    # assignments, per-segment aggregations, codebook snapshots, per-theme-coder
+    # results, final theme aggregation) under this directory as JSON.
+    debug_dir: str | None = None
 
 
 @dataclass
@@ -237,6 +248,25 @@ class ThematicLMPipeline:
         # HITL checkpoints
         self._checkpoints: list[HITLCheckpoint] = []
 
+        self._debug_root: Path | None = None
+        if self.config.debug_dir:
+            self._debug_root = Path(self.config.debug_dir)
+            self._debug_root.mkdir(parents=True, exist_ok=True)
+
+    def _dump(self, relative_path: str, payload: object) -> None:
+        if self._debug_root is None:
+            return
+        target = self._debug_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if hasattr(payload, "to_dict"):
+            data = payload.to_dict()
+        elif hasattr(payload, "__dataclass_fields__"):
+            data = asdict(payload)
+        else:
+            data = payload
+        with target.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, default=str)
+
     def _init_stage1_agents(self) -> None:
         """Initialize Stage 1 (coding) agents with INDEPENDENT codebook copies."""
         self._coders = []
@@ -255,7 +285,11 @@ class ThematicLMPipeline:
             # CRITICAL: Each coder gets INDEPENDENT codebook copy
             # Per paper: "Each coder often works independently to generate codes"
             coder_codebook = self.codebook.copy()
-            coder = CoderAgent(config=coder_config, codebook=coder_codebook)
+            coder = CoderAgent(
+                config=coder_config,
+                codebook=coder_codebook,
+                research_context=self.config.research_context,
+            )
             self._coders.append(coder)
 
         # Aggregator works with the canonical codebook
@@ -268,6 +302,7 @@ class ThematicLMPipeline:
         self._reviewer = ReviewerAgent(
             config=self.config.reviewer_config,
             codebook=self.codebook,
+            research_context=self.config.research_context,
         )
 
     def _init_stage2_agents(self) -> None:
@@ -289,6 +324,7 @@ class ThematicLMPipeline:
             theme_coder = ThemeCoderAgent(
                 config=theme_config,
                 codebook=self.codebook.copy(),
+                research_context=self.config.research_context,
             )
             self._theme_coders.append(theme_coder)
 
@@ -403,15 +439,30 @@ class ThematicLMPipeline:
         for segment in segments:
             segment_assignments = await self._code_segment_parallel(segment)
             assignments_per_segment.append(segment_assignments)
+            for i, assignment in enumerate(segment_assignments):
+                self._dump(
+                    f"stage1/batch_{batch_number:04d}/segment_{segment.segment_id}/coder_{i}.json",
+                    assignment,
+                )
 
         # Step 2: After ALL coders finish, aggregate ONCE per segment
         assert self._aggregator is not None
         assert self._reviewer is not None
 
-        for segment_assignments in assignments_per_segment:
+        for segment, segment_assignments in zip(
+            segments, assignments_per_segment, strict=True
+        ):
             aggregation = self._aggregator.aggregate(segment_assignments)
             all_aggregations.append(aggregation)
             self._reviewer.process_aggregation_result(aggregation)
+            self._dump(
+                f"stage1/batch_{batch_number:04d}/segment_{segment.segment_id}/aggregation.json",
+                aggregation,
+            )
+
+        self._dump(
+            f"stage1/batch_{batch_number:04d}/codebook.json", self.codebook
+        )
 
         # Calculate and record metrics
         metrics = self._calculate_batch_metrics(assignments_per_segment)
@@ -440,14 +491,29 @@ class ThematicLMPipeline:
         for segment in segments:
             segment_assignments = self._code_segment_sequential(segment)
             assignments_per_segment.append(segment_assignments)
+            for i, assignment in enumerate(segment_assignments):
+                self._dump(
+                    f"stage1/batch_{batch_number:04d}/segment_{segment.segment_id}/coder_{i}.json",
+                    assignment,
+                )
 
         assert self._aggregator is not None
         assert self._reviewer is not None
 
-        for segment_assignments in assignments_per_segment:
+        for segment, segment_assignments in zip(
+            segments, assignments_per_segment, strict=True
+        ):
             aggregation = self._aggregator.aggregate(segment_assignments)
             all_aggregations.append(aggregation)
             self._reviewer.process_aggregation_result(aggregation)
+            self._dump(
+                f"stage1/batch_{batch_number:04d}/segment_{segment.segment_id}/aggregation.json",
+                aggregation,
+            )
+
+        self._dump(
+            f"stage1/batch_{batch_number:04d}/codebook.json", self.codebook
+        )
 
         metrics = self._calculate_batch_metrics(assignments_per_segment)
         self._maybe_checkpoint(batch_number, metrics)
@@ -524,14 +590,19 @@ class ThematicLMPipeline:
 
         self._init_stage2_agents()
 
+        self._dump("stage2/input_codebook.json", self.codebook)
+
         all_theme_results: list[ThemeResult] = []
-        for theme_coder in self._theme_coders:
+        for i, theme_coder in enumerate(self._theme_coders):
             theme_coder.codebook = self.codebook.copy()
             theme_result = theme_coder.develop_themes()
             all_theme_results.append(theme_result)
+            self._dump(f"stage2/theme_coder_{i}.json", theme_result)
 
         assert self._theme_aggregator is not None
-        return self._theme_aggregator.aggregate(all_theme_results)
+        aggregated = self._theme_aggregator.aggregate(all_theme_results)
+        self._dump("stage2/aggregation.json", aggregated)
+        return aggregated
 
     def _run_evaluation(self, result: PipelineResult) -> EvaluationResult:
         """Run configured evaluations.
@@ -598,6 +669,7 @@ class ThematicLMPipeline:
         if self.config.evaluation_config:
             result.evaluation = self._run_evaluation(result)
 
+        self._dump("final_result.json", result)
         return result
 
     async def run_async(self, segments: list[DataSegment]) -> PipelineResult:

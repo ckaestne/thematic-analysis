@@ -41,20 +41,33 @@ class CodeAssignment:
 CODER_SYSTEM_PROMPT = """\
 You are an expert qualitative researcher performing thematic coding.
 Your task is to analyze text segments and assign meaningful codes
-that capture the key concepts, themes, and patterns.
+that capture the key concepts, themes, and patterns **relevant to the
+research focus**.
 
 ## Guidelines for Coding:
 1. **Read carefully**: Understand the full meaning and context of the text
-2. **Identify key concepts**: Look for important ideas, experiences, or patterns
-3. **Create descriptive codes**: Codes should be concise but meaningful labels
-4. **Consider existing codes**: When possible, use or adapt existing codes
-5. **Be consistent**: Apply codes consistently across similar content
+2. **Stay on topic**: Only code content that speaks to the research focus.
+   Source texts often range broadly; ignore unrelated material rather than
+   stretching codes to cover it.
+3. **Identify key concepts**: Look for important ideas, experiences, or
+   patterns relevant to the research questions
+4. **Create descriptive codes**: Codes should be concise but meaningful labels
+5. **Consider existing codes**: When possible, use or adapt existing codes
+6. **Be consistent**: Apply codes consistently across similar content
 
 ## Code Quality Criteria (6 Rs):
 - **Reciprocal**: Codes should relate meaningfully to the data
 - **Recognizable**: Codes should be clear and understandable
 - **Responsive**: Codes should address the research questions
 - **Resourceful**: Codes should capture nuanced meanings
+
+## Off-topic Segments:
+If a segment is wholly unrelated to the research focus, return an empty
+"codes" list and a single rationale starting with "OUT_OF_SCOPE:" briefly
+explaining why. Do NOT invent codes to cover off-topic material.
+If only part of the segment is relevant, code only that part and ignore the
+rest. Codes must be grounded in content that addresses the research focus —
+not in tangential or background material.
 
 {identity_section}
 
@@ -102,8 +115,10 @@ Text: "{segment_text}"
 
 {similar_codes_section}
 
-Please analyze this text segment and assign appropriate codes.
-Provide your response as JSON."""
+First check whether this segment relates to the research focus. If it does
+not, return an empty "codes" list with a single rationale starting with
+"OUT_OF_SCOPE:". Otherwise assign codes only to the parts that address the
+research focus. Provide your response as JSON."""
 
 
 class CoderAgent(BaseAgent):

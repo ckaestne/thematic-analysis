@@ -1,13 +1,19 @@
 """Reviewer agent for maintaining and updating the adaptive codebook."""
 
+from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.aggregator import AggregationResult
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook, CodeEntry, Quote
+
+if TYPE_CHECKING:
+    from thematic_analysis.research_context import ResearchContext
 
 
 class ReviewDecision(Enum):
@@ -54,7 +60,8 @@ existing codes in the codebook.
 - **MERGE**: When codes capture the same concept with different wording
 - **UPDATE**: When a new code is a better label for an existing concept
 - **ADD_NEW**: When the code represents a genuinely new concept
-- **SKIP**: When the code is a duplicate or lacks analytical value
+- **SKIP**: When the code is a duplicate, lacks analytical value, or is
+  off-topic relative to the research focus (if one is provided)
 
 ## Output Format:
 Respond with a JSON object containing:
@@ -118,19 +125,31 @@ class ReviewerAgent(BaseAgent):
         self,
         config: ReviewerConfig | None = None,
         codebook: Codebook | None = None,
+        research_context: ResearchContext | None = None,
     ):
         """Initialize the Reviewer agent.
 
         Args:
             config: Reviewer configuration.
             codebook: Initial codebook to maintain.
+            research_context: Optional research context for scope-aware review.
         """
         super().__init__(config or ReviewerConfig())
         self.reviewer_config: ReviewerConfig = self.config  # type: ignore
         self.codebook = codebook if codebook is not None else Codebook()
+        self.research_context = research_context
 
     def get_system_prompt(self) -> str:
         """Get the system prompt for review."""
+        if self.research_context and not self.research_context.is_empty():
+            research_section = (
+                "## Research Context\n"
+                f"{self.research_context.to_prompt_section()}\n\n"
+                "Use this context to judge whether a code is on-topic. Codes "
+                "that do not address the research focus should be SKIPped, "
+                "even if otherwise well-formed.\n\n"
+            )
+            return research_section + REVIEWER_SYSTEM_PROMPT
         return REVIEWER_SYSTEM_PROMPT
 
     def _format_quotes_section(self, quotes: list[Quote]) -> str:

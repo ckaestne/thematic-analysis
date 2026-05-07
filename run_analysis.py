@@ -1,24 +1,67 @@
 #!/usr/bin/env python3
 """Run thematic analysis on a directory of PDFs."""
 
-import json
+import argparse
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
-# Get model from environment or use default
 MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+
+
+def _load_research_context(path: str):
+    from thematic_analysis.research_context import ResearchContext
+
+    text = Path(path).read_text(encoding="utf-8").strip()
+    if not text:
+        raise ValueError(f"Research question file is empty: {path}")
+    return ResearchContext(
+        title="Research Focus",
+        aim=text,
+        background=text,
+    )
 
 
 def main():
     """Run the thematic analysis pipeline on PDFs."""
     from thematic_analysis import PipelineConfig, ThematicLMPipeline
-    from thematic_analysis.agents import CoderConfig, AggregatorConfig, ThemeCoderConfig
+    from thematic_analysis.agents import (
+        AggregatorConfig,
+        CoderConfig,
+        ThemeCoderConfig,
+    )
     from thematic_analysis.pipeline import ExecutionMode
 
-    pdf_dir = sys.argv[1] if len(sys.argv) > 1 else "/workspace/project/paper1-pdfs"
-    pattern = sys.argv[2] if len(sys.argv) > 2 else "*.pdf"
+    parser = argparse.ArgumentParser(description="Run thematic analysis on PDFs.")
+    parser.add_argument(
+        "pdf_dir",
+        nargs="?",
+        default="/workspace/project/paper1-pdfs",
+        help="Directory of PDFs to analyse.",
+    )
+    parser.add_argument(
+        "pattern",
+        nargs="?",
+        default="*.pdf",
+        help="Glob pattern for files (default: *.pdf).",
+    )
+    parser.add_argument(
+        "--researchquestion",
+        type=str,
+        default=None,
+        help=(
+            "Path to a text file describing the research question / focus. "
+            "Used to keep coding and theme development on-topic."
+        ),
+    )
+    args = parser.parse_args()
+
+    pdf_dir = args.pdf_dir
+    pattern = args.pattern
+
+    research_context = None
+    if args.researchquestion:
+        research_context = _load_research_context(args.researchquestion)
 
     debug_dir = os.environ.get(
         "THEMATIC_DEBUG_DIR",
@@ -31,9 +74,14 @@ def main():
     print(f"Directory: {pdf_dir}")
     print(f"Pattern: {pattern}")
     print(f"Model: {MODEL}")
+    if research_context:
+        print(f"Research focus: {args.researchquestion}")
+        preview = research_context.aim.replace("\n", " ")
+        if len(preview) > 200:
+            preview = preview[:200] + "..."
+        print(f"  > {preview}")
     print()
 
-    # Configure pipeline with real LLM
     config = PipelineConfig(
         num_coders=3,
         num_theme_coders=2,
@@ -51,10 +99,11 @@ def main():
             max_themes=10,
             min_codes_per_theme=2,
         ),
-        batch_size=5,  # Process 5 segments at a time
-        use_mock_embeddings=False,  # Use real embeddings
-        execution_mode=ExecutionMode.SEQUENTIAL,  # Use sequential for stability
+        batch_size=5,
+        use_mock_embeddings=False,
+        execution_mode=ExecutionMode.SEQUENTIAL,
         debug_dir=debug_dir,
+        research_context=research_context,
     )
 
     print(f"Debug dumps: {debug_dir}")
@@ -63,12 +112,12 @@ def main():
 
     print("Running thematic analysis...")
     print("-" * 60)
-    
+
     result = pipeline.run_from_directory(
         pdf_dir,
         pattern=pattern,
         segmentation="paragraph",
-        min_words=30,  # Skip very short paragraphs
+        min_words=30,
     )
 
     print()
@@ -76,8 +125,7 @@ def main():
     print("ANALYSIS COMPLETE")
     print("=" * 60)
     print()
-    
-    # Print themes
+
     print("THEMES DISCOVERED:")
     print("-" * 40)
     for i, theme in enumerate(result.themes.themes, 1):
@@ -93,7 +141,6 @@ def main():
     print(f"Total codes in codebook: {len(result.codebook)}")
     print(f"Segments processed: {result.metrics.get('num_segments', 'N/A')}")
 
-    # Save results
     output_path = Path("analysis_results.json")
     output_path.write_text(result.to_json())
     print(f"\nResults saved to: {output_path}")
