@@ -30,6 +30,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
+    create_schema(conn)
     return conn
 
 
