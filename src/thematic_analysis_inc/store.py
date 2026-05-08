@@ -624,3 +624,385 @@ def status_counts(conn: sqlite3.Connection) -> StatusCounts:
         codebook_version=codebook_version,
         codebook_codes=codebook_codes,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — theme coders
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ThemeCoder:
+    theme_coder_id: str
+    identity: str
+    created_at: str
+
+
+def add_theme_coder(conn: sqlite3.Connection, theme_coder_id: str, identity: str) -> bool:
+    """Insert a theme coder. Returns True if newly inserted, False if id existed."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO theme_coders (theme_coder_id, identity, created_at) "
+        "VALUES (?, ?, ?)",
+        (theme_coder_id, identity, _now()),
+    )
+    return cur.rowcount == 1
+
+
+def remove_theme_coder(
+    conn: sqlite3.Connection, theme_coder_id: str, *, force: bool = False
+) -> tuple[bool, int]:
+    """Delete a theme coder. Returns (removed, runs_deleted).
+
+    By default refuses if the coder has any theme_coder_runs. With force=True,
+    cascades and deletes their runs first.
+    """
+    n = conn.execute(
+        "SELECT COUNT(*) AS n FROM theme_coder_runs WHERE theme_coder_id = ?",
+        (theme_coder_id,),
+    ).fetchone()["n"]
+    if n > 0 and not force:
+        raise RuntimeError(
+            f"theme_coder '{theme_coder_id}' has {n} run(s); pass force=True to cascade"
+        )
+    runs_deleted = 0
+    try:
+        conn.execute("BEGIN")
+        if n > 0:
+            conn.execute(
+                "DELETE FROM theme_aggregation_inputs WHERE theme_coder_run_id IN ("
+                "  SELECT id FROM theme_coder_runs WHERE theme_coder_id = ?"
+                ")",
+                (theme_coder_id,),
+            )
+            cur = conn.execute(
+                "DELETE FROM theme_coder_runs WHERE theme_coder_id = ?",
+                (theme_coder_id,),
+            )
+            runs_deleted = cur.rowcount
+        cur = conn.execute(
+            "DELETE FROM theme_coders WHERE theme_coder_id = ?", (theme_coder_id,)
+        )
+        removed = cur.rowcount == 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return removed, runs_deleted
+
+
+def get_theme_coder(conn: sqlite3.Connection, theme_coder_id: str) -> ThemeCoder | None:
+    row = conn.execute(
+        "SELECT theme_coder_id, identity, created_at "
+        "FROM theme_coders WHERE theme_coder_id = ?",
+        (theme_coder_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return ThemeCoder(**dict(row))
+
+
+def list_theme_coders(conn: sqlite3.Connection) -> list[ThemeCoder]:
+    rows = conn.execute(
+        "SELECT theme_coder_id, identity, created_at "
+        "FROM theme_coders ORDER BY theme_coder_id"
+    ).fetchall()
+    return [ThemeCoder(**dict(r)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — theme coder runs
+# ---------------------------------------------------------------------------
+
+
+def theme_coders_to_run(
+    conn: sqlite3.Connection, codebook_version: int
+) -> list[sqlite3.Row]:
+    """Theme coders that don't yet have a 'done' run for this codebook version."""
+    return conn.execute(
+        "SELECT tc.theme_coder_id, tc.identity "
+        "FROM theme_coders tc "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM theme_coder_runs tcr "
+        "  WHERE tcr.theme_coder_id = tc.theme_coder_id "
+        "    AND tcr.codebook_version = ? "
+        "    AND tcr.status = 'done'"
+        ") "
+        "ORDER BY tc.theme_coder_id",
+        (codebook_version,),
+    ).fetchall()
+
+
+def start_theme_coder_run(
+    conn: sqlite3.Connection,
+    theme_coder_id: str,
+    codebook_version: int,
+) -> int | None:
+    """Insert a 'running' theme_coder_run. Returns the new id, or None on race."""
+    try:
+        cur = conn.execute(
+            "INSERT INTO theme_coder_runs "
+            "(theme_coder_id, codebook_version, status, claimed_at) "
+            "VALUES (?, ?, 'running', ?)",
+            (theme_coder_id, codebook_version, _now()),
+        )
+    except sqlite3.IntegrityError:
+        return None
+    return int(cur.lastrowid) if cur.lastrowid else None
+
+
+def record_theme_coder_result(
+    conn: sqlite3.Connection,
+    run_id: int,
+    result_json: str,
+    raw_response: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE theme_coder_runs "
+        "SET status='done', finished_at=?, result_json=?, raw_response=? "
+        "WHERE id = ?",
+        (_now(), result_json, raw_response, run_id),
+    )
+
+
+def record_theme_coder_failure(
+    conn: sqlite3.Connection, run_id: int, error: str
+) -> None:
+    conn.execute(
+        "UPDATE theme_coder_runs SET status='failed', finished_at=?, error=? "
+        "WHERE id = ?",
+        (_now(), error, run_id),
+    )
+
+
+def reset_unfinished_theme_coder_runs(
+    conn: sqlite3.Connection,
+    theme_coder_id: str,
+    codebook_version: int | None = None,
+) -> int:
+    """Delete failed/running rows so they will be re-attempted. Returns rows deleted."""
+    if codebook_version is not None:
+        cur = conn.execute(
+            "DELETE FROM theme_coder_runs "
+            "WHERE theme_coder_id = ? AND codebook_version = ? "
+            "  AND status IN ('failed', 'running')",
+            (theme_coder_id, codebook_version),
+        )
+    else:
+        cur = conn.execute(
+            "DELETE FROM theme_coder_runs "
+            "WHERE theme_coder_id = ? AND status IN ('failed', 'running')",
+            (theme_coder_id,),
+        )
+    return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — theme aggregation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ThemeCoderRunResult:
+    run_id: int
+    theme_coder_id: str
+    result_json: str
+
+
+def all_theme_coders_done(conn: sqlite3.Connection, codebook_version: int) -> bool:
+    """True if every registered theme coder has a 'done' run for this version."""
+    n_coders = conn.execute(
+        "SELECT COUNT(*) AS n FROM theme_coders"
+    ).fetchone()["n"]
+    if n_coders == 0:
+        return False
+    n_pending = conn.execute(
+        "SELECT COUNT(*) AS n FROM theme_coders tc "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM theme_coder_runs tcr "
+        "  WHERE tcr.theme_coder_id = tc.theme_coder_id "
+        "    AND tcr.codebook_version = ? "
+        "    AND tcr.status = 'done'"
+        ")",
+        (codebook_version,),
+    ).fetchone()["n"]
+    return n_pending == 0
+
+
+def load_done_theme_coder_runs(
+    conn: sqlite3.Connection, codebook_version: int
+) -> list[ThemeCoderRunResult]:
+    """Load all 'done' theme_coder_runs for the given codebook version."""
+    rows = conn.execute(
+        "SELECT id, theme_coder_id, result_json "
+        "FROM theme_coder_runs "
+        "WHERE codebook_version = ? AND status = 'done' "
+        "ORDER BY theme_coder_id",
+        (codebook_version,),
+    ).fetchall()
+    return [
+        ThemeCoderRunResult(
+            run_id=r["id"],
+            theme_coder_id=r["theme_coder_id"],
+            result_json=r["result_json"],
+        )
+        for r in rows
+    ]
+
+
+def start_theme_aggregation(
+    conn: sqlite3.Connection, codebook_version: int
+) -> int | None:
+    """Insert a 'running' theme_aggregation row. Returns new id, or None on race."""
+    try:
+        cur = conn.execute(
+            "INSERT INTO theme_aggregations (codebook_version, status, created_at) "
+            "VALUES (?, 'running', ?)",
+            (codebook_version, _now()),
+        )
+    except sqlite3.IntegrityError:
+        return None
+    return int(cur.lastrowid) if cur.lastrowid else None
+
+
+def record_theme_aggregation_result(
+    conn: sqlite3.Connection,
+    agg_id: int,
+    result_json: str,
+    run_ids: list[int],
+) -> None:
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE theme_aggregations "
+            "SET status='done', finished_at=?, result_json=? WHERE id = ?",
+            (_now(), result_json, agg_id),
+        )
+        for run_id in run_ids:
+            conn.execute(
+                "INSERT INTO theme_aggregation_inputs "
+                "(theme_aggregation_id, theme_coder_run_id) VALUES (?, ?)",
+                (agg_id, run_id),
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def record_theme_aggregation_failure(
+    conn: sqlite3.Connection, agg_id: int, error: str
+) -> None:
+    conn.execute(
+        "UPDATE theme_aggregations SET status='failed', finished_at=?, error=? "
+        "WHERE id = ?",
+        (_now(), error, agg_id),
+    )
+
+
+def reset_unfinished_theme_aggregations(
+    conn: sqlite3.Connection, codebook_version: int
+) -> int:
+    """Delete failed/running aggregation rows so they can be re-attempted."""
+    rows = conn.execute(
+        "SELECT id FROM theme_aggregations "
+        "WHERE codebook_version = ? AND status IN ('failed', 'running')",
+        (codebook_version,),
+    ).fetchall()
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+    conn.execute(
+        f"DELETE FROM theme_aggregation_inputs "
+        f"WHERE theme_aggregation_id IN ({placeholders})",
+        ids,
+    )
+    cur = conn.execute(
+        f"DELETE FROM theme_aggregations WHERE id IN ({placeholders})", ids
+    )
+    return cur.rowcount
+
+
+def latest_theme_aggregation(
+    conn: sqlite3.Connection, codebook_version: int
+) -> sqlite3.Row | None:
+    """Return the most recent theme_aggregation row for this codebook version."""
+    return conn.execute(
+        "SELECT id, codebook_version, status, created_at, finished_at, "
+        "       result_json, error "
+        "FROM theme_aggregations "
+        "WHERE codebook_version = ? ORDER BY id DESC LIMIT 1",
+        (codebook_version,),
+    ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — status
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Stage2StatusCounts:
+    codebook_version: int
+    theme_coders_total: int
+    theme_coder_runs_total: int
+    theme_coder_runs_by_status: dict[str, int]
+    theme_aggregations_total: int
+    theme_aggregations_by_status: dict[str, int]
+    themes_in_result: int
+
+    def format(self) -> str:
+        def by_status(d: dict[str, int]) -> str:
+            if not d:
+                return "(none)"
+            return " | ".join(f"{k}={v}" for k, v in sorted(d.items()))
+
+        lines = [
+            f"codebook version:     v{self.codebook_version}",
+            f"theme_coders:         {self.theme_coders_total}",
+            f"theme_coder_runs:     {self.theme_coder_runs_total} total | "
+            f"{by_status(self.theme_coder_runs_by_status)}",
+            f"theme_aggregations:   {self.theme_aggregations_total} total | "
+            f"{by_status(self.theme_aggregations_by_status)}",
+            f"themes in result:     {self.themes_in_result}",
+        ]
+        return "\n".join(lines)
+
+
+def stage2_status_counts(
+    conn: sqlite3.Connection, codebook_version: int
+) -> Stage2StatusCounts:
+    tc_total = conn.execute(
+        "SELECT COUNT(*) AS n FROM theme_coders"
+    ).fetchone()["n"]
+
+    tcr_rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM theme_coder_runs "
+        "WHERE codebook_version = ? GROUP BY status",
+        (codebook_version,),
+    ).fetchall()
+    tcr_by = {r["status"]: r["n"] for r in tcr_rows}
+    tcr_total = sum(tcr_by.values())
+
+    ta_rows = conn.execute(
+        "SELECT status, COUNT(*) AS n FROM theme_aggregations "
+        "WHERE codebook_version = ? GROUP BY status",
+        (codebook_version,),
+    ).fetchall()
+    ta_by = {r["status"]: r["n"] for r in ta_rows}
+    ta_total = sum(ta_by.values())
+
+    themes_in_result = 0
+    agg = latest_theme_aggregation(conn, codebook_version)
+    if agg is not None and agg["result_json"]:
+        themes_in_result = len(json.loads(agg["result_json"]).get("themes", []))
+
+    return Stage2StatusCounts(
+        codebook_version=codebook_version,
+        theme_coders_total=tc_total,
+        theme_coder_runs_total=tcr_total,
+        theme_coder_runs_by_status=tcr_by,
+        theme_aggregations_total=ta_total,
+        theme_aggregations_by_status=ta_by,
+        themes_in_result=themes_in_result,
+    )

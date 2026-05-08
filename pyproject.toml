@@ -34,6 +34,7 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 ta-stage1 = "thematic_analysis_inc.cli:main"
+ta-stage2 = "thematic_analysis_inc.cli_stage2:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
