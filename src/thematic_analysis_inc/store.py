@@ -461,6 +461,58 @@ def reset_unfinished_aggregations(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Review decisions
+# ---------------------------------------------------------------------------
+
+
+def next_aggregated_code_to_review(
+    conn: sqlite3.Connection,
+) -> sqlite3.Row | None:
+    """Return the next aggregated_code row (with its segment_id) that has no
+    review_decision yet. Returns None if all codes are reviewed."""
+    return conn.execute(
+        "SELECT ac.id, ac.aggregation_id, ac.code, ac.quotes_json, "
+        "       ac.source_coders_json, a.segment_id "
+        "FROM aggregated_codes ac "
+        "JOIN aggregations a ON a.id = ac.aggregation_id "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 FROM review_decisions rd "
+        "  WHERE rd.aggregated_code_id = ac.id"
+        ") "
+        "ORDER BY ac.id LIMIT 1"
+    ).fetchone()
+
+
+def record_review_decision(
+    conn: sqlite3.Connection,
+    *,
+    aggregated_code_id: int,
+    decision: str,
+    target_code: str | None,
+    rationale: str,
+    applied: int,
+    resulting_version: int | None,
+) -> int:
+    """Insert a review_decision row. Returns the new id."""
+    cur = conn.execute(
+        "INSERT INTO review_decisions "
+        "(aggregated_code_id, decision, target_code, rationale, applied, "
+        " resulting_version, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            aggregated_code_id,
+            decision,
+            target_code,
+            rationale,
+            applied,
+            resulting_version,
+            _now(),
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+# ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
 

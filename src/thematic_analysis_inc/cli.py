@@ -252,6 +252,40 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+# review ----------------------------------------------------------------------
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+
+    print(
+        "[review] starting"
+        + (f" limit={args.limit}" if args.limit else "")
+    )
+
+    def on_event(res: dict, c: dict) -> None:
+        n = c["done"] + c["failed"]
+        v_str = f"v→{res['new_version']}" if res.get("new_version") else "skip"
+        print(
+            f"[review] {res['segment_id']} code={res['code']!r} "
+            f"decision={res['decision']} {v_str} "
+            f"({n} ok={c['done']} failed={c['failed']} "
+            f"{res['elapsed']:.1f}s)"
+        )
+
+    counters = workers.drain_review(
+        conn,
+        limit=args.limit,
+        use_mock_embeddings=args.mock_embeddings,
+        on_event=on_event,
+    )
+    print(
+        f"[review] done: {counters['done']} ok, "
+        f"{counters['failed']} failed"
+    )
+    return 0
+
+
 # status / export -------------------------------------------------------------
 
 
@@ -357,6 +391,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="use deterministic mock embeddings (testing / no-network)",
     )
     p_agg.set_defaults(func=_cmd_aggregate)
+
+    p_rev = sub.add_parser(
+        "review", help="review aggregated codes and update the codebook"
+    )
+    p_rev.add_argument("--limit", type=int, default=None)
+    p_rev.add_argument(
+        "--mock-embeddings",
+        action="store_true",
+        help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_rev.set_defaults(func=_cmd_review)
 
     p_st = sub.add_parser("status", help="print pipeline counts")
     p_st.set_defaults(func=_cmd_status)
