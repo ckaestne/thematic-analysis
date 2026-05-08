@@ -82,6 +82,14 @@ def get_codebook_version(
     return CodebookVersion(**dict(row))
 
 
+def list_codebook_versions(conn: sqlite3.Connection) -> list[CodebookVersion]:
+    rows = conn.execute(
+        "SELECT version, parent_version, snapshot_json, created_by, created_at "
+        "FROM codebook_versions ORDER BY version ASC"
+    ).fetchall()
+    return [CodebookVersion(**dict(r)) for r in rows]
+
+
 def insert_codebook_version(
     conn: sqlite3.Connection,
     snapshot_json: str,

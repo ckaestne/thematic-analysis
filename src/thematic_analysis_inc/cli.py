@@ -337,6 +337,65 @@ def _cmd_export_codebook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list_codebooks(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    versions = store.list_codebook_versions(conn)
+    if not versions:
+        print("(no codebook versions)")
+        return 0
+    print(f"{'version':>7}  {'parent':>6}  {'codes':>5}  {'created_by':<20}  created_at")
+    for cv in versions:
+        n_codes = len(json.loads(cv.snapshot_json).get("codes", []))
+        parent = "-" if cv.parent_version is None else str(cv.parent_version)
+        print(
+            f"{cv.version:>7}  {parent:>6}  {n_codes:>5}  "
+            f"{cv.created_by:<20}  {cv.created_at}"
+        )
+    return 0
+
+
+def _cmd_show_codebook(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    if args.version is None:
+        cv = store.latest_codebook_version(conn)
+    else:
+        cv = store.get_codebook_version(conn, args.version)
+    if cv is None:
+        msg = (
+            f"no codebook version {args.version}"
+            if args.version is not None
+            else "no codebook versions found"
+        )
+        print(msg, file=sys.stderr)
+        return 1
+    data = json.loads(cv.snapshot_json)
+    codes = data.get("codes", [])
+    parent = "-" if cv.parent_version is None else str(cv.parent_version)
+    print(
+        f"Codebook v{cv.version} (parent={parent}, "
+        f"created_by={cv.created_by}, created_at={cv.created_at})"
+    )
+    print(f"{len(codes)} code(s)")
+    print()
+    if not codes:
+        print("(empty)")
+        return 0
+    for i, entry in enumerate(codes, 1):
+        code = entry.get("code", "")
+        quotes = entry.get("quotes", [])
+        print(f"{i}. {code}")
+        if quotes:
+            print(f"   quotes ({len(quotes)}):")
+            for q in quotes:
+                qid = q.get("quote_id", "")
+                text = q.get("text", "").replace("\n", " ").strip()
+                if len(text) > 200:
+                    text = text[:197] + "..."
+                print(f"     - [{qid}] {text}")
+        print()
+    return 0
+
+
 # parser ----------------------------------------------------------------------
 
 
@@ -435,6 +494,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_st = sub.add_parser("status", help="print pipeline counts")
     p_st.set_defaults(func=_cmd_status)
+
+    p_lcb = sub.add_parser(
+        "list-codebooks", help="list all codebook versions"
+    )
+    p_lcb.set_defaults(func=_cmd_list_codebooks)
+
+    p_scb = sub.add_parser(
+        "show-codebook",
+        help="print a codebook version in a human-readable format",
+    )
+    p_scb.add_argument(
+        "--version",
+        type=int,
+        default=None,
+        help="codebook version (default: latest)",
+    )
+    p_scb.set_defaults(func=_cmd_show_codebook)
 
     p_ex = sub.add_parser("export-codebook", help="write codebook snapshot")
     p_ex.add_argument("--version", type=int, default=None)
