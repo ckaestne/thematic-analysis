@@ -12,10 +12,33 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 
-from thematic_analysis_inc import store, workers
+
+# Quiet down noisy ML deps before anything imports them. The Coder/Reviewer
+# embed codes via sentence-transformers, which by default streams a
+# rich-formatted load report, a BERT load table, and per-encode tqdm bars
+# to stdout/stderr. We don't need any of that in the CLI.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+for _name in ("sentence_transformers", "transformers", "huggingface_hub"):
+    logging.getLogger(_name).setLevel(logging.ERROR)
+try:
+    from functools import partialmethod
+
+    from tqdm import tqdm as _tqdm
+    from tqdm.auto import tqdm as _tqdm_auto
+
+    _tqdm.__init__ = partialmethod(_tqdm.__init__, disable=True)  # type: ignore[method-assign]
+    _tqdm_auto.__init__ = partialmethod(_tqdm_auto.__init__, disable=True)  # type: ignore[method-assign]
+except ImportError:
+    pass
+
+from thematic_analysis_inc import store, workers  # noqa: E402
 
 
 # init ------------------------------------------------------------------------
