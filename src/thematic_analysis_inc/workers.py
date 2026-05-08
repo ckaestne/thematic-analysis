@@ -18,7 +18,9 @@ from thematic_analysis.agents.aggregator import (
     CodeAggregatorAgent,
 )
 from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
+from thematic_analysis.agents.reviewer import ReviewDecision, ReviewerAgent, ReviewerConfig
 from thematic_analysis.codebook import Codebook
+from thematic_analysis.codebook.codebook import Quote
 
 from thematic_analysis_inc import store
 
@@ -378,6 +380,137 @@ def drain_aggregate(
             counters["done"] += 1
         else:
             counters["failed"] += 1
+        if on_event is not None:
+            on_event(res, counters)
+    return counters
+
+
+# Reviewer --------------------------------------------------------------------
+
+ReviewerFactory = Callable[[Codebook], Any]
+
+
+def default_reviewer_factory(codebook: Codebook) -> ReviewerAgent:
+    return ReviewerAgent(config=ReviewerConfig(), codebook=codebook)
+
+
+def review_one(
+    conn: sqlite3.Connection,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: ReviewerFactory | None = None,
+) -> dict | None:
+    """Review one un-reviewed aggregated_code. Opens an IMMEDIATE transaction
+    (single-writer). Returns None when nothing is ready to review."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = store.next_aggregated_code_to_review(conn)
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+
+        agg_code_id: int = row["id"]
+        code: str = row["code"]
+        segment_id: str = row["segment_id"]
+        quotes = [
+            Quote(quote_id=q["quote_id"], text=q["text"])
+            for q in json.loads(row["quotes_json"])
+        ]
+
+        latest = store.latest_codebook_version(conn)
+        if latest is None:
+            conn.execute("ROLLBACK")
+            raise RuntimeError("no codebook version exists; run init first")
+
+        codebook = _get_codebook(conn, latest.version, use_mock_embeddings)
+
+        factory = agent_factory or default_reviewer_factory
+        agent = factory(codebook)
+
+        t0 = time.monotonic()
+        result = agent.review_code(code, quotes)
+        agent.apply_review(result)
+
+        # apply_review modifies codebook in-place; evict the cache entry so
+        # the next call loads the freshly-serialized version instead.
+        _codebook_cache.pop(latest.version, None)
+
+        new_version: int | None = None
+        if result.decision != ReviewDecision.SKIP:
+            new_version = store.insert_codebook_version(
+                conn,
+                codebook.to_json(),
+                parent=latest.version,
+                created_by="reviewer",
+            )
+
+        store.record_review_decision(
+            conn,
+            aggregated_code_id=agg_code_id,
+            decision=result.decision.value,
+            target_code=result.target_code,
+            rationale=result.rationale,
+            applied=1,
+            resulting_version=new_version,
+        )
+
+        # If no un-reviewed codes remain for this segment, mark it done.
+        n_remaining = conn.execute(
+            "SELECT COUNT(*) AS n FROM aggregated_codes ac "
+            "WHERE ac.aggregation_id IN ("
+            "  SELECT id FROM aggregations WHERE segment_id = ?"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM review_decisions rd "
+            "  WHERE rd.aggregated_code_id = ac.id"
+            ")",
+            (segment_id,),
+        ).fetchone()["n"]
+
+        if n_remaining == 0:
+            conn.execute(
+                "UPDATE segments SET status='done' WHERE segment_id = ?",
+                (segment_id,),
+            )
+
+        conn.execute("COMMIT")
+        return {
+            "ok": True,
+            "aggregated_code_id": agg_code_id,
+            "segment_id": segment_id,
+            "code": code,
+            "decision": result.decision.value,
+            "target_code": result.target_code,
+            "new_version": new_version,
+            "elapsed": time.monotonic() - t0,
+        }
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def drain_review(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    use_mock_embeddings: bool = False,
+    agent_factory: ReviewerFactory | None = None,
+    on_event: Callable[[dict, dict], None] | None = None,
+) -> dict:
+    """Drain the review queue serially. Stops when there is nothing left or
+    the optional limit is reached."""
+    counters = {"done": 0, "failed": 0}
+    while True:
+        if limit is not None and counters["done"] + counters["failed"] >= limit:
+            break
+        res = review_one(
+            conn,
+            use_mock_embeddings=use_mock_embeddings,
+            agent_factory=agent_factory,
+        )
+        if res is None:
+            break
+        counters["done"] += 1
         if on_event is not None:
             on_event(res, counters)
     return counters
