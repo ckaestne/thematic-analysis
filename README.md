@@ -166,6 +166,16 @@ The pipeline uses a multi-agent architecture:
 4. **Theme Coders**: Group codes into higher-level themes
 5. **Theme Aggregator**: Produces final consolidated themes
 
+---
+
+## Incremental Pipeline (`ta-stage1` / `ta-stage2`)
+
+A SQLite-backed alternative that stores every intermediate result so each
+step can be run separately, resumed after failure, and rerun without
+redoing finished work. See
+[`src/thematic_analysis_inc/README.md`](src/thematic_analysis_inc/README.md)
+for the full usage guide.
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) for details.
