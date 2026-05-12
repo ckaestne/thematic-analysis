@@ -1,12 +1,18 @@
 """Theme Aggregator agent for merging themes from multiple theme coders."""
 
+from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.theme_coder import Theme, ThemeResult
 from thematic_analysis.codebook import EmbeddingService, Quote
+
+if TYPE_CHECKING:
+    from thematic_analysis.research_context import ResearchContext
 
 
 @dataclass
@@ -177,19 +183,37 @@ class ThemeAggregatorAgent(BaseAgent):
         self,
         config: ThemeAggregatorConfig | None = None,
         embedding_service: EmbeddingService | None = None,
+        research_context: "ResearchContext | None" = None,
     ):
         """Initialize the Theme Aggregator agent.
 
         Args:
             config: Theme aggregator configuration.
             embedding_service: Service for computing theme similarity.
+            research_context: Research context to keep aggregation
+                aligned with the research question / framework.
         """
         super().__init__(config or ThemeAggregatorConfig())
         self.aggregator_config: ThemeAggregatorConfig = self.config  # type: ignore
         self.embedding_service = embedding_service or EmbeddingService()
+        self.research_context = research_context
+
+    def set_research_context(self, context: "ResearchContext") -> None:
+        self.research_context = context
 
     def get_system_prompt(self) -> str:
         """Get the system prompt for aggregation."""
+        if self.research_context and not self.research_context.is_empty():
+            research_section = (
+                "## Research Context\n"
+                f"{self.research_context.to_prompt_section()}\n\n"
+                "Aggregate themes so that the final set directly addresses the "
+                "research questions and stays consistent with the theoretical "
+                "framework. Prefer merges and labels that surface the patterns "
+                "most relevant to the research question; demote or drop themes "
+                "that drift away from it.\n\n"
+            )
+            return research_section + THEME_AGGREGATOR_SYSTEM_PROMPT
         return THEME_AGGREGATOR_SYSTEM_PROMPT
 
     def _collect_all_themes(self, theme_results: list[ThemeResult]) -> dict[str, Theme]:

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from thematic_analysis.research_context import ResearchContext
 from thematic_analysis_inc.schema import create_schema
 
 
@@ -43,6 +44,73 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             conn, EMPTY_CODEBOOK_JSON, parent=None, created_by="init"
         )
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Research context
+# ---------------------------------------------------------------------------
+
+
+def _research_context_to_json(ctx: ResearchContext) -> str:
+    return json.dumps(
+        {
+            "title": ctx.title,
+            "aim": ctx.aim,
+            "research_questions": list(ctx.research_questions),
+            "theoretical_framework": ctx.theoretical_framework,
+            "paradigm": ctx.paradigm,
+            "methodology": ctx.methodology,
+            "domain": ctx.domain,
+            "background": ctx.background,
+            "keywords": list(ctx.keywords),
+        },
+        indent=2,
+    )
+
+
+def _research_context_from_json(raw: str) -> ResearchContext:
+    data = json.loads(raw)
+    return ResearchContext(
+        title=data.get("title", ""),
+        aim=data.get("aim", ""),
+        research_questions=list(data.get("research_questions", [])),
+        theoretical_framework=data.get("theoretical_framework", ""),
+        paradigm=data.get("paradigm", ""),
+        methodology=data.get("methodology", "thematic_analysis"),
+        domain=data.get("domain", ""),
+        background=data.get("background", ""),
+        keywords=list(data.get("keywords", [])),
+    )
+
+
+def set_research_context(
+    conn: sqlite3.Connection, context: ResearchContext
+) -> None:
+    """Upsert the singleton research context row."""
+    conn.execute(
+        "INSERT INTO research_context (id, context_json, updated_at) "
+        "VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "  context_json = excluded.context_json, "
+        "  updated_at = excluded.updated_at",
+        (_research_context_to_json(context), _now()),
+    )
+
+
+def get_research_context(conn: sqlite3.Connection) -> ResearchContext | None:
+    """Return the stored research context, or None if not set."""
+    row = conn.execute(
+        "SELECT context_json FROM research_context WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        return None
+    return _research_context_from_json(row["context_json"])
+
+
+def clear_research_context(conn: sqlite3.Connection) -> bool:
+    """Delete the stored research context. Returns True if a row was removed."""
+    cur = conn.execute("DELETE FROM research_context WHERE id = 1")
+    return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

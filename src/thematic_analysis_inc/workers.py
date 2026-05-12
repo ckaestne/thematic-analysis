@@ -45,6 +45,22 @@ def clear_codebook_cache() -> None:
     _codebook_cache.clear()
 
 
+def _apply_research_context(conn: sqlite3.Connection, agent: Any) -> None:
+    """Attach the stored research context to an agent, if one is set.
+
+    Agents that accept a research context expose it as a `research_context`
+    attribute (CoderAgent, ReviewerAgent, ThemeCoderAgent, ThemeAggregatorAgent).
+    Setting it after construction keeps factory signatures stable and lets
+    user-supplied factories opt in automatically.
+    """
+    if not hasattr(agent, "research_context"):
+        return
+    ctx = store.get_research_context(conn)
+    if ctx is None or ctx.is_empty():
+        return
+    agent.research_context = ctx
+
+
 def _get_codebook(
     conn: sqlite3.Connection, version: int, use_mock_embeddings: bool
 ) -> Codebook:
@@ -163,6 +179,7 @@ def code_one(
     try:
         codebook = _get_codebook(conn, version, use_mock_embeddings)
         agent = factory(codebook, coder)
+        _apply_research_context(conn, agent)
         t0 = time.monotonic()
         assignment = agent.code_segment(segment_id, text)
         return _persist(
@@ -437,6 +454,7 @@ def review_one(
 
         factory = agent_factory or default_reviewer_factory
         agent = factory(codebook)
+        _apply_research_context(conn, agent)
 
         t0 = time.monotonic()
         result = agent.review_code(code, quotes)
@@ -594,6 +612,7 @@ def theme_code_one(
     try:
         codebook = _get_codebook(conn, codebook_version, use_mock_embeddings)
         agent = factory(codebook, theme_coder)
+        _apply_research_context(conn, agent)
         t0 = time.monotonic()
         result = agent.develop_themes()
         result_json = result.to_json()
@@ -712,6 +731,7 @@ def theme_aggregate_one(
     factory = agent_factory or default_theme_aggregator_factory
     try:
         agent = factory()
+        _apply_research_context(conn, agent)
         t0 = time.monotonic()
         result: ThemeAggregationResult = agent.aggregate(theme_results)
         result_json = result.to_json()

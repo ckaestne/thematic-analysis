@@ -166,6 +166,24 @@ ta-stage1 --db analysis.sqlite export-codebook --version 30 -o codebook_v30.json
 Stage 2 reads the codebook built by Stage 1 from the same database and
 develops higher-level themes. Run it after Stage 1 `review` is complete.
 
+### 0. (Recommended) Set the research context
+
+Without a research context, theme coders and the aggregator have nothing
+to anchor on and produce themes that drift away from the research
+question. Set it once on the database — it is shared with Stage 1 too:
+
+```bash
+ta-stage2 --db analysis.sqlite set-research-context \
+    --aim "Understand how lay users justify climate-policy skepticism" \
+    --research-question "What rhetorical strategies do skeptics use to justify inaction?" \
+    --domain "climate change" \
+    --theoretical-framework "critical discourse analysis"
+
+ta-stage2 --db analysis.sqlite show-research-context
+```
+
+You can also pass `--file context.json` with the same field names.
+
 ### 1. Register theme coders
 
 ```bash

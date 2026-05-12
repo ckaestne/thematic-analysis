@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass
 
-from thematic_analysis_inc import store, workers  # noqa: E402
+from thematic_analysis_inc import research_context_cli, store, workers  # noqa: E402
 
 
 # init ------------------------------------------------------------------------
@@ -516,6 +516,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ex.add_argument("--version", type=int, default=None)
     p_ex.add_argument("-o", "--output", default="-")
     p_ex.set_defaults(func=_cmd_export_codebook)
+
+    research_context_cli.register(sub)
 
     return p
 
