@@ -34,7 +34,7 @@ try:
 except ImportError:
     pass
 
-from thematic_analysis_inc import store, workers  # noqa: E402
+from thematic_analysis_inc import research_context_cli, store, workers  # noqa: E402
 from thematic_analysis_inc.html_report import render_themes_html_from_json  # noqa: E402
 
 
@@ -419,6 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="output HTML file (default: stdout)",
     )
     p_eh.set_defaults(func=_cmd_export_themes_html)
+
+    research_context_cli.register(sub)
 
     return p
 

@@ -10,6 +10,14 @@ import sqlite3
 
 
 SCHEMA_SQL = """
+-- ── Research context (singleton row) ─────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS research_context (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    context_json TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
 -- ── Stage 1 ──────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS codebook_versions (
