@@ -2,7 +2,7 @@
 
 Subcommands:
     init, add-theme-coder, rm-theme-coder, list-theme-coders,
-    theme-code, theme-aggregate, status, export-themes
+    theme-code, theme-aggregate, status, export-themes, export-themes-html
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ except ImportError:
     pass
 
 from thematic_analysis_inc import research_context_cli, store, workers  # noqa: E402
+from thematic_analysis_inc.html_report import render_themes_html_from_json  # noqa: E402
 
 
 # init ------------------------------------------------------------------------
@@ -274,6 +275,37 @@ def _cmd_export_themes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_themes_html(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+
+    agg = store.latest_theme_aggregation(conn, version)
+    if agg is None or agg["status"] != "done" or not agg["result_json"]:
+        print(
+            f"no completed theme aggregation for codebook v{version}; "
+            "run theme-aggregate first",
+            file=sys.stderr,
+        )
+        return 1
+
+    html_doc = render_themes_html_from_json(agg["result_json"], version)
+
+    if args.output == "-" or args.output is None:
+        sys.stdout.write(html_doc)
+        if not html_doc.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        Path(args.output).write_text(html_doc, encoding="utf-8")
+        n_themes = len(json.loads(agg["result_json"]).get("themes", []))
+        print(
+            f"wrote HTML report for {n_themes} theme(s) from codebook v{version} "
+            f"to {args.output}"
+        )
+    return 0
+
+
 # parser ----------------------------------------------------------------------
 
 
@@ -369,6 +401,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ex.add_argument("-o", "--output", default="-")
     p_ex.set_defaults(func=_cmd_export_themes)
+
+    p_eh = sub.add_parser(
+        "export-themes-html",
+        help="write theme aggregation result as a human-readable HTML report",
+    )
+    p_eh.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version (default: latest)",
+    )
+    p_eh.add_argument(
+        "-o",
+        "--output",
+        default="-",
+        help="output HTML file (default: stdout)",
+    )
+    p_eh.set_defaults(func=_cmd_export_themes_html)
 
     research_context_cli.register(sub)
 

@@ -466,6 +466,22 @@ def test_cli_theme_code_and_aggregate(tmp_path: Path, monkeypatch) -> None:
     assert len(data["themes"]) == 1
     assert data["themes"][0]["name"] == "T1"
 
+    html_file = str(tmp_path / "themes.html")
+    rc = cli_stage2.main(["--db", db, "export-themes-html", "-o", html_file])
+    assert rc == 0
+    html_text = Path(html_file).read_text()
+    assert "<!DOCTYPE html>" in html_text
+    assert "T1" in html_text
+    assert "bulma" in html_text.lower()
+    assert "theme-card" in html_text
+
+
+def test_cli_export_themes_html_requires_aggregation(tmp_path: Path) -> None:
+    db = str(tmp_path / "x.sqlite")
+    cli_stage2.main(["--db", db, "init"])
+    rc = cli_stage2.main(["--db", db, "export-themes-html"])
+    assert rc != 0
+
 
 def test_cli_theme_aggregate_fails_when_coders_not_done(
     tmp_path: Path, capsys

@@ -243,6 +243,14 @@ ta-stage2 --db analysis.sqlite export-themes -o themes.json
 ta-stage2 --db analysis.sqlite export-themes --codebook-version 30 -o themes_v30.json
 ```
 
+For a human-readable, interactive report, export to HTML instead. The output is
+a self-contained page (Bulma is loaded from CDN) with a live search filter and
+collapsible theme cards — just open it in a browser:
+
+```bash
+ta-stage2 --db analysis.sqlite export-themes-html -o themes.html
+```
+
 The output is a JSON object:
 
 ```json
@@ -308,5 +316,6 @@ ta-stage2 --db DB theme-code        [--codebook-version N] [--workers K] [--limi
 ta-stage2 --db DB theme-aggregate   [--codebook-version N] [--retry-failed]
                                     [--mock-embeddings]
 ta-stage2 --db DB status            [--codebook-version N]
-ta-stage2 --db DB export-themes     [--codebook-version N] [-o FILE]
+ta-stage2 --db DB export-themes        [--codebook-version N] [-o FILE]
+ta-stage2 --db DB export-themes-html   [--codebook-version N] [-o FILE]
 ```
