@@ -1,4 +1,4 @@
-"""Worker functions for the incremental Stage 1 pipeline.
+"""Worker functions for the incremental Stage 1 and Stage 2 pipelines.
 
 Coders are first-class rows (id + identity). `code_one` picks the next
 segment that this coder hasn't yet coded, opens a `running` coder_run
@@ -19,6 +19,17 @@ from thematic_analysis.agents.aggregator import (
 )
 from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
 from thematic_analysis.agents.reviewer import ReviewDecision, ReviewerAgent, ReviewerConfig
+from thematic_analysis.agents.theme_aggregator import (
+    ThemeAggregatorAgent,
+    ThemeAggregatorConfig,
+    ThemeAggregationResult,
+)
+from thematic_analysis.agents.theme_coder import (
+    Theme,
+    ThemeCoderAgent,
+    ThemeCoderConfig,
+    ThemeResult,
+)
 from thematic_analysis.codebook import Codebook
 from thematic_analysis.codebook.codebook import Quote
 
@@ -514,3 +525,211 @@ def drain_review(
         if on_event is not None:
             on_event(res, counters)
     return counters
+
+
+# ── Stage 2 helpers ───────────────────────────────────────────────────────────
+
+
+def _theme_result_from_json(json_str: str) -> ThemeResult:
+    """Reconstruct a ThemeResult from its stored JSON."""
+    data = json.loads(json_str)
+    themes = [
+        Theme(
+            name=t["name"],
+            description=t["description"],
+            codes=t.get("codes", []),
+            quotes=[
+                Quote(quote_id=q["quote_id"], text=q["text"])
+                for q in t.get("quotes", [])
+            ],
+        )
+        for t in data.get("themes", [])
+    ]
+    return ThemeResult(themes=themes)
+
+
+# ── Stage 2 theme-coder worker ────────────────────────────────────────────────
+
+ThemeCoderFactory = Callable[[Codebook, "store.ThemeCoder"], Any]
+
+
+def default_theme_coder_factory(
+    codebook: Codebook, theme_coder: "store.ThemeCoder"
+) -> ThemeCoderAgent:
+    return ThemeCoderAgent(
+        config=ThemeCoderConfig(identity=theme_coder.identity),
+        codebook=codebook,
+    )
+
+
+def theme_code_one(
+    conn: sqlite3.Connection,
+    theme_coder_id: str,
+    codebook_version: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: ThemeCoderFactory | None = None,
+) -> dict | None:
+    """Run one theme coder against the given codebook version. Returns None if
+    this coder already has a 'done' run for that version (nothing to do)."""
+    theme_coder = store.get_theme_coder(conn, theme_coder_id)
+    if theme_coder is None:
+        raise ValueError(f"unknown theme_coder_id: {theme_coder_id!r}")
+
+    # Check whether there's already a done run (idempotent guard)
+    existing = conn.execute(
+        "SELECT status FROM theme_coder_runs "
+        "WHERE theme_coder_id = ? AND codebook_version = ?",
+        (theme_coder_id, codebook_version),
+    ).fetchone()
+    if existing is not None and existing["status"] == "done":
+        return None
+
+    run_id = store.start_theme_coder_run(conn, theme_coder_id, codebook_version)
+    if run_id is None:
+        # Race: another worker already claimed this slot; signal "no work".
+        return None
+
+    factory = agent_factory or default_theme_coder_factory
+    try:
+        codebook = _get_codebook(conn, codebook_version, use_mock_embeddings)
+        agent = factory(codebook, theme_coder)
+        t0 = time.monotonic()
+        result = agent.develop_themes()
+        result_json = result.to_json()
+        store.record_theme_coder_result(conn, run_id, result_json)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "theme_coder_id": theme_coder_id,
+            "codebook_version": codebook_version,
+            "n_themes": len(result.themes),
+            "elapsed": time.monotonic() - t0,
+        }
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        store.record_theme_coder_failure(conn, run_id, msg)
+        return {
+            "ok": False,
+            "run_id": run_id,
+            "theme_coder_id": theme_coder_id,
+            "codebook_version": codebook_version,
+            "error": msg,
+        }
+
+
+async def theme_code_one_async(
+    conn: sqlite3.Connection,
+    theme_coder_id: str,
+    codebook_version: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: ThemeCoderFactory | None = None,
+) -> dict | None:
+    return theme_code_one(
+        conn,
+        theme_coder_id,
+        codebook_version,
+        use_mock_embeddings=use_mock_embeddings,
+        agent_factory=agent_factory,
+    )
+
+
+async def drain_theme_code_async(
+    conn: sqlite3.Connection,
+    codebook_version: int,
+    *,
+    workers: int = 1,
+    limit: int | None = None,
+    use_mock_embeddings: bool = False,
+    agent_factory: ThemeCoderFactory | None = None,
+    on_event: Callable[[dict, dict], None] | None = None,
+) -> dict:
+    """Run all pending theme coders against codebook_version, up to `workers`
+    concurrently. Each coder runs at most once."""
+    pending = [
+        r["theme_coder_id"]
+        for r in store.theme_coders_to_run(conn, codebook_version)
+    ]
+    if limit is not None:
+        pending = pending[:limit]
+
+    counters: dict[str, int] = {"done": 0, "failed": 0}
+    sem = asyncio.Semaphore(max(1, workers))
+
+    async def run_one(coder_id: str) -> None:
+        async with sem:
+            res = await theme_code_one_async(
+                conn,
+                coder_id,
+                codebook_version,
+                use_mock_embeddings=use_mock_embeddings,
+                agent_factory=agent_factory,
+            )
+            if res is None:
+                return
+            if res["ok"]:
+                counters["done"] += 1
+            else:
+                counters["failed"] += 1
+            if on_event is not None:
+                on_event(res, counters)
+
+    await asyncio.gather(*[run_one(cid) for cid in pending])
+    return counters
+
+
+# ── Stage 2 theme-aggregator worker ──────────────────────────────────────────
+
+ThemeAggregatorFactory = Callable[[], Any]
+
+
+def default_theme_aggregator_factory() -> ThemeAggregatorAgent:
+    return ThemeAggregatorAgent(config=ThemeAggregatorConfig())
+
+
+def theme_aggregate_one(
+    conn: sqlite3.Connection,
+    codebook_version: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: ThemeAggregatorFactory | None = None,
+) -> dict | None:
+    """Aggregate theme results for codebook_version. Returns None if not all
+    theme coders are done yet, or if an aggregation already exists."""
+    if not store.all_theme_coders_done(conn, codebook_version):
+        return None
+
+    agg_id = store.start_theme_aggregation(conn, codebook_version)
+    if agg_id is None:
+        # Already running or done.
+        return None
+
+    runs = store.load_done_theme_coder_runs(conn, codebook_version)
+    theme_results = [_theme_result_from_json(r.result_json) for r in runs]
+    run_ids = [r.run_id for r in runs]
+
+    factory = agent_factory or default_theme_aggregator_factory
+    try:
+        agent = factory()
+        t0 = time.monotonic()
+        result: ThemeAggregationResult = agent.aggregate(theme_results)
+        result_json = result.to_json()
+        store.record_theme_aggregation_result(conn, agg_id, result_json, run_ids)
+        return {
+            "ok": True,
+            "aggregation_id": agg_id,
+            "codebook_version": codebook_version,
+            "n_input_results": len(theme_results),
+            "n_themes": len(result.themes),
+            "elapsed": time.monotonic() - t0,
+        }
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        store.record_theme_aggregation_failure(conn, agg_id, msg)
+        return {
+            "ok": False,
+            "aggregation_id": agg_id,
+            "codebook_version": codebook_version,
+            "error": msg,
+        }
