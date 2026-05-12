@@ -24,6 +24,25 @@ cd thematic-analysis
 pip install -e .
 ```
 
+`pip install -e .` registers the `ta-stage1` and `ta-stage2` console
+scripts into your active Python environment. After that you can call them
+directly:
+
+```bash
+ta-stage1 --help
+ta-stage2 --help
+```
+
+If the commands are not found, check that the environment's `bin/` (or
+`Scripts/` on Windows) is on your `PATH`. With a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .
+ta-stage1 --help
+```
+
 ## Environment variables
 
 The agents call an LLM via the OpenHands SDK. Set at minimum:
