@@ -1,13 +1,17 @@
-"""Tests for the Stage 1 refinement step (RefiningCoderAgent).
+"""Tests for the Stage 1 adversarial refinement step.
 
 Covers:
-- two-turn flow: first response + challenge prompt + refined response
-- caching-friendliness: the prefix of the second call equals the messages
-  of the first call followed by the assistant's first reply
-- empty first response (OUT_OF_SCOPE) short-circuits — no second LLM call
+- three-call flow: code → critic (separate chat) → refine (coder chat continues)
+- the critic chat has *only* segment text + codes (no codebook, no
+  identity, no research context)
+- caching-friendliness: the coder chat reuses its prefix for calls 1
+  and 3
+- empty first response (OUT_OF_SCOPE) short-circuits both critic and
+  refinement calls
+- async path mirrors sync behaviour
 - worker integration: default_coder_factory wraps CoderAgent in
   RefiningCoderAgent
-- async path mirrors sync behaviour
+- end-to-end persistence picks up the refined codes
 """
 
 from __future__ import annotations
@@ -24,9 +28,11 @@ from openhands.sdk import Message, TextContent
 
 from thematic_analysis.agents.coder import CoderAgent
 from thematic_analysis.codebook import Codebook
+from thematic_analysis.research_context import ResearchContext
 from thematic_analysis_inc import store, workers
 from thematic_analysis_inc.refinement import (
-    REFINEMENT_USER_PROMPT,
+    CRITIC_SYSTEM_PROMPT,
+    Critic,
     RefiningCoderAgent,
     wrap_with_refinement,
 )
@@ -48,112 +54,191 @@ def _make_response(text: str) -> Any:
 def _json_response(codes, rationales=None, is_new=None) -> str:
     rationales = rationales or [""] * len(codes)
     is_new = is_new if is_new is not None else [True] * len(codes)
-    return json.dumps({"codes": codes, "rationales": rationales, "is_new": is_new})
+    return json.dumps(
+        {"codes": codes, "rationales": rationales, "is_new": is_new}
+    )
 
 
 @dataclass
 class _Call:
     messages: list[Message]
+    response_format: Any
 
 
-def _make_coder_with_recorded_llm(responses: list[str]) -> tuple[CoderAgent, list[_Call]]:
-    """Return a CoderAgent whose .llm.completion records each call and
-    returns the next preset response text."""
-    coder = CoderAgent(codebook=Codebook(use_mock_embeddings=True))
+def _fake_llm(responses: list[str]) -> tuple[MagicMock, list[_Call]]:
     calls: list[_Call] = []
     iter_responses = iter(responses)
 
     def fake_completion(messages, **kwargs):
-        calls.append(_Call(messages=list(messages)))
+        calls.append(
+            _Call(
+                messages=list(messages),
+                response_format=kwargs.get("response_format"),
+            )
+        )
         return _make_response(next(iter_responses))
 
-    fake_llm = MagicMock()
-    fake_llm.completion.side_effect = fake_completion
-    coder._llm = fake_llm
-    return coder, calls
+    llm = MagicMock()
+    llm.completion.side_effect = fake_completion
+    return llm, calls
+
+
+def _coder_with_llm(llm: MagicMock) -> CoderAgent:
+    coder = CoderAgent(codebook=Codebook(use_mock_embeddings=True))
+    coder._llm = llm
+    return coder
+
+
+class TestCritic:
+    def test_critic_messages_contain_only_text_and_codes(self):
+        llm, calls = _fake_llm(["these codes are shallow"])
+        critic = Critic(llm)
+        out = critic.critique(
+            "The interviewee said X.",
+            ["shallow", "another"],
+            ["restates the line", "vague"],
+        )
+
+        assert out == "these codes are shallow"
+        assert len(calls) == 1
+        msgs = calls[0].messages
+        assert [m.role for m in msgs] == ["system", "user"]
+        assert msgs[0].content[0].text == CRITIC_SYSTEM_PROMPT
+
+        user_text = msgs[1].content[0].text
+        assert "The interviewee said X." in user_text
+        assert "shallow" in user_text
+        assert "another" in user_text
+        assert "restates the line" in user_text
+        # No coder scaffolding should leak in.
+        assert "Current Codebook" not in user_text
+        assert "Your Perspective" not in user_text
+        assert "Research Context" not in user_text
+        assert "Similar Existing Codes" not in user_text
+
+    def test_critic_call_has_no_json_schema(self):
+        """Critique is free-form prose, not JSON."""
+        llm, calls = _fake_llm(["critique text"])
+        Critic(llm).critique("text", ["c"], ["r"])
+        assert calls[0].response_format is None
+
+    @pytest.mark.asyncio
+    async def test_critic_async(self):
+        llm, calls = _fake_llm(["async critique"])
+        out = await Critic(llm).critique_async("text", ["c"], ["r"])
+        assert out == "async critique"
+        assert len(calls) == 1
 
 
 class TestRefiningCoderAgent:
-    def test_two_turn_flow_uses_shared_prefix(self):
-        first = _json_response(["shallow code"], ["restates the line"], [True])
-        refined = _json_response(
-            ["analytic concept"], ["captures recurring concept"], [True]
-        )
-        coder, calls = _make_coder_with_recorded_llm([first, refined])
+    def test_three_call_flow_with_separate_critic_chat(self):
+        first = _json_response(["shallow"], ["restates"], [True])
+        critique = "These codes just paraphrase the segment. Sharpen them."
+        refined = _json_response(["analytic-concept"], ["captures recurring concept"], [True])
 
+        llm, calls = _fake_llm([first, critique, refined])
+        coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
+
         result = agent.code_segment("seg_0001", "The interviewee said X.")
 
-        assert result.codes == ["analytic concept"]
+        assert result.codes == ["analytic-concept"]
         assert result.segment_id == "seg_0001"
         assert result.segment_text == "The interviewee said X."
+        assert len(calls) == 3
 
-        assert len(calls) == 2, "refinement must make a second LLM call"
+        coder1, critic_call, coder2 = calls
 
-        first_msgs = calls[0].messages
-        second_msgs = calls[1].messages
-
-        # Same prefix → cacheable.
-        assert len(first_msgs) == 2
-        assert first_msgs[0].role == "system"
-        assert first_msgs[1].role == "user"
-        assert len(second_msgs) == 4
-        assert [m.role for m in second_msgs] == [
+        # Coder calls 1 and 3 share the prefix (cacheable).
+        assert [m.role for m in coder1.messages] == ["system", "user"]
+        assert [m.role for m in coder2.messages] == [
             "system",
             "user",
             "assistant",
             "user",
         ]
-        assert second_msgs[0] == first_msgs[0]
-        assert second_msgs[1] == first_msgs[1]
+        assert coder2.messages[0] == coder1.messages[0]
+        assert coder2.messages[1] == coder1.messages[1]
+        assert coder2.messages[2].content[0].text == first
 
-        # Assistant turn carries the first response verbatim.
-        assistant_text = second_msgs[2].content[0].text
-        assert assistant_text == first
+        # Critic chat is fully separate: own system prompt, no
+        # leakage of coder context, no JSON schema enforcement.
+        assert [m.role for m in critic_call.messages] == ["system", "user"]
+        assert critic_call.messages[0].content[0].text == CRITIC_SYSTEM_PROMPT
+        assert critic_call.response_format is None
 
-        # Final user turn is the challenge prompt.
-        challenge_text = second_msgs[3].content[0].text
-        assert challenge_text == REFINEMENT_USER_PROMPT
+        # The critique is fed back into the coder chat as the final user turn.
+        refine_user_text = coder2.messages[3].content[0].text
+        assert critique in refine_user_text
+        assert "independent reviewer" in refine_user_text.lower()
 
-    def test_empty_first_pass_skips_refinement(self):
-        """OUT_OF_SCOPE-style empty assignment must not trigger another LLM call."""
-        first = _json_response([], [], [])
-        coder, calls = _make_coder_with_recorded_llm([first])
+        # Coder calls still use the JSON schema.
+        assert coder1.response_format is not None
+        assert coder2.response_format is not None
+        assert coder1.response_format["type"] == "json_schema"
+        assert coder2.response_format["type"] == "json_schema"
 
+    def test_empty_first_pass_skips_critic_and_refinement(self):
+        """OUT_OF_SCOPE: only the first call should be made."""
+        llm, calls = _fake_llm([_json_response([], [], [])])
+        coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
+
         result = agent.code_segment("seg_x", "off-topic chatter")
 
         assert result.codes == []
         assert len(calls) == 1
 
     def test_refined_response_replaces_first(self):
-        first = _json_response(["A", "B", "C", "D"])
-        refined = _json_response(["merged-AB", "C"])
-        coder, calls = _make_coder_with_recorded_llm([first, refined])
-
-        agent = RefiningCoderAgent(coder)
-        result = agent.code_segment("seg_1", "text")
-
-        assert result.codes == ["merged-AB", "C"]
-        assert len(calls) == 2
-
-    def test_refinement_response_uses_coder_schema(self):
-        coder, calls = _make_coder_with_recorded_llm(
-            [_json_response(["x"]), _json_response(["x-refined"])]
+        llm, calls = _fake_llm(
+            [
+                _json_response(["A", "B", "C", "D"]),
+                "merge A and B; C is fine; D is a paraphrase",
+                _json_response(["merged-AB", "C"]),
+            ]
         )
-        agent = RefiningCoderAgent(coder)
-        agent.code_segment("seg_1", "text")
+        agent = RefiningCoderAgent(_coder_with_llm(llm))
+        result = agent.code_segment("seg_1", "text")
+        assert result.codes == ["merged-AB", "C"]
+        assert len(calls) == 3
 
-        # Both LLM calls go through with the CoderAgent's response_format.
-        for call in coder._llm.completion.call_args_list:
-            kwargs = call.kwargs
-            assert "response_format" in kwargs
-            assert kwargs["response_format"]["type"] == "json_schema"
+    def test_critic_chat_does_not_see_codebook_or_identity(self):
+        """Even with a fully-populated coder context, the critic chat
+        must not receive it."""
+        from thematic_analysis.agents.coder import CoderConfig
+        from thematic_analysis.codebook import Quote
+
+        codebook = Codebook(use_mock_embeddings=True)
+        codebook.add_code("existing-code", [Quote("q1", "some quote")])
+        coder = CoderAgent(
+            config=CoderConfig(identity="feminist scholar"),
+            codebook=codebook,
+            research_context=ResearchContext(
+                title="t", aim="study gendered narratives"
+            ),
+        )
+        llm, calls = _fake_llm(
+            [
+                _json_response(["x"], ["r"], [True]),
+                "weak code",
+                _json_response(["x-refined"]),
+            ]
+        )
+        coder._llm = llm
+
+        agent = RefiningCoderAgent(coder)
+        agent.code_segment("seg_1", "the actual segment text")
+
+        critic_user = calls[1].messages[1].content[0].text
+        assert "existing-code" not in critic_user
+        assert "feminist scholar" not in critic_user
+        assert "gendered narratives" not in critic_user
+        assert "the actual segment text" in critic_user
+        assert "x" in critic_user
 
     def test_research_context_passthrough(self):
-        from thematic_analysis.research_context import ResearchContext
-
-        coder, _ = _make_coder_with_recorded_llm([_json_response([])])
+        llm, _ = _fake_llm([_json_response([])])
+        coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
 
         ctx = ResearchContext(title="t", aim="a")
@@ -163,21 +248,42 @@ class TestRefiningCoderAgent:
 
     @pytest.mark.asyncio
     async def test_async_flow_mirrors_sync(self):
-        first = _json_response(["shallow"], ["paraphrase"], [True])
-        refined = _json_response(["deeper"], ["concept"], [True])
-        coder, calls = _make_coder_with_recorded_llm([first, refined])
-
-        agent = RefiningCoderAgent(coder)
+        llm, calls = _fake_llm(
+            [
+                _json_response(["shallow"], ["paraphrase"], [True]),
+                "critique",
+                _json_response(["deeper"], ["concept"], [True]),
+            ]
+        )
+        agent = RefiningCoderAgent(_coder_with_llm(llm))
         result = await agent.code_segment_async("seg_1", "text")
 
         assert result.codes == ["deeper"]
-        assert len(calls) == 2
-        assert [m.role for m in calls[1].messages] == [
+        assert len(calls) == 3
+        assert [m.role for m in calls[2].messages] == [
             "system",
             "user",
             "assistant",
             "user",
         ]
+
+    def test_custom_critic_is_used(self):
+        """If a Critic is supplied explicitly, it's used instead of the
+        default. Lets users plug in a different LLM for the critic."""
+        coder_llm, coder_calls = _fake_llm(
+            [_json_response(["c"], ["r"], [True]), _json_response(["c'"])]
+        )
+        critic_llm, critic_calls = _fake_llm(["explicit critic spoke"])
+        coder = _coder_with_llm(coder_llm)
+        agent = RefiningCoderAgent(coder, critic=Critic(critic_llm))
+        agent.code_segment("s", "t")
+
+        # Coder LLM took two calls, critic LLM took one.
+        assert len(coder_calls) == 2
+        assert len(critic_calls) == 1
+        # Critique text reached the refinement turn.
+        refine_text = coder_calls[1].messages[3].content[0].text
+        assert "explicit critic spoke" in refine_text
 
 
 class TestWrapWithRefinement:
@@ -199,41 +305,31 @@ class TestWorkerDefaultFactory:
         agent = workers.default_coder_factory(codebook, coder_row)
         assert isinstance(agent, RefiningCoderAgent)
         assert isinstance(agent.coder, CoderAgent)
-        # Identity flows into the wrapped agent.
         assert agent.coder.config.identity == "x"
 
 
 class TestWorkerEndToEnd:
-    """End-to-end: workers.code_one drives RefiningCoderAgent and persists
-    the *refined* codes, not the first pass."""
+    """workers.code_one drives RefiningCoderAgent and persists the
+    *refined* codes, not the first pass."""
 
-    def test_code_one_persists_refined_codes(self, tmp_path: Path, monkeypatch):
+    def test_code_one_persists_refined_codes(self, tmp_path: Path):
         db = tmp_path / "x.sqlite"
         conn = store.init_db(db)
         store.add_coder(conn, "c1", "id1")
         store.enqueue_segments(conn, _segments(1))
 
-        def fake_completion_factory():
-            responses = iter(
-                [
-                    _json_response(["shallow"], ["paraphrase"], [True]),
-                    _json_response(["deeper-concept"], ["analytic"], [True]),
-                ]
-            )
-
-            def fake_completion(messages, **kwargs):
-                return _make_response(next(responses))
-
-            return fake_completion
+        llm, _ = _fake_llm(
+            [
+                _json_response(["shallow"], ["paraphrase"], [True]),
+                "the codes are too shallow",
+                _json_response(["deeper-concept"], ["analytic"], [True]),
+            ]
+        )
 
         def factory(codebook, coder):
-            base = CoderAgent(
-                codebook=codebook,
-            )
+            base = CoderAgent(codebook=codebook)
             base.coder_config.identity = coder.identity
-            fake_llm = MagicMock()
-            fake_llm.completion.side_effect = fake_completion_factory()
-            base._llm = fake_llm
+            base._llm = llm
             return wrap_with_refinement(base)
 
         res = workers.code_one(

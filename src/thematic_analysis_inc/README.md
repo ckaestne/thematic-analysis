@@ -111,12 +111,24 @@ ta-stage1 --db analysis.sqlite code alice --retry-failed
 ta-stage1 --db analysis.sqlite code alice --limit 10
 ```
 
-Each segment is coded in two turns within a single chat session: the
-first pass produces an initial set of codes, and a second prompt
-challenges those codes (depth, relevance, grounding, granularity,
-coverage) and asks the model to refine them if needed. The shared
-session lets the provider cache the common prefix. If the first pass
-returns OUT_OF_SCOPE / no codes, the refinement turn is skipped.
+Each segment goes through an adversarial refinement loop:
+
+1. **Code** in the coder chat (full context: codebook, identity,
+   research context, similar-codes hints).
+2. **Critique** in a separate critic chat that sees *only* the segment
+   text and the codes the coder just produced — no codebook, no
+   identity, no research context. The stripped-down view lets the
+   critic push back hard on shallow paraphrase, over-reach, missed
+   content, conflation, and vagueness.
+3. **Refine** by returning to the coder chat, appending the critique
+   as a user turn, and asking for a revised code set. The coder still
+   has all its context, so it can accept the critic's valid points
+   and defend its choices when the critic is wrong.
+
+The coder chat reuses the same prefix (`system + initial user +
+assistant`) for the refinement turn, so provider-side prompt caching
+applies. If the first pass returns OUT_OF_SCOPE / no codes, both the
+critic and refinement turns are skipped.
 
 ### 5. Aggregate codes
 
