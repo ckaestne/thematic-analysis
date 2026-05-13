@@ -119,13 +119,15 @@ Each segment goes through an adversarial refinement loop:
    the codes the coder just produced, and (if set) the research
    context — the critic needs the research context to judge relevance.
    It does **not** see the codebook, the coder's identity, or
-   similar-codes hints, so it can push back hard on shallow paraphrase,
-   over-reach, missed content, conflation, and vagueness without being
-   anchored to the coder's framing.
+   similar-codes hints. The critic is told to push back on relevance
+   to the research focus, shallow paraphrase vs analytic themes, and
+   grounding — and to recommend dropping codes (or all codes) when
+   the segment isn't actually about the research question.
 3. **Refine** by returning to the coder chat, appending the critique
-   as a user turn, and asking for a revised code set. The coder still
-   has all its context, so it can accept the critic's valid points
-   and defend its choices when the critic is wrong.
+   as a user turn, and asking for a stronger code set. The coder may
+   drop, rename, split, merge, or add codes; an empty `codes` list is
+   a valid answer when nothing in the segment speaks to the research
+   focus.
 
 The coder chat reuses the same prefix (`system + initial user +
 assistant`) for the refinement turn, so provider-side prompt caching

@@ -148,6 +148,21 @@ class TestCritic:
         Critic(llm).critique("text", ["c"], ["r"])
         assert calls[0].response_format is None
 
+    def test_critic_prompt_emphasises_relevance_and_no_escape(self):
+        """Lock in the PR feedback: critic must headline relevance to
+        the research focus, accept "this segment isn't relevant" as a
+        valid critique, and explicitly forbid a "codes are fine" escape."""
+        import re
+
+        flat = re.sub(r"\s+", " ", CRITIC_SYSTEM_PROMPT.lower())
+        assert "research focus" in flat
+        assert "not relevant" in flat or "irrelevant" in flat
+        # Prompt explicitly forbids the "codes are fine as-is" escape.
+        assert "never say the codes are fine" in flat
+        # Conflation/vagueness criteria were dropped (PR feedback).
+        assert "conflation" not in flat
+        assert "vagueness" not in flat
+
     @pytest.mark.asyncio
     async def test_critic_async(self):
         llm, calls = _fake_llm(["async critique"])
@@ -157,6 +172,20 @@ class TestCritic:
 
 
 class TestRefiningCoderAgent:
+    def test_refinement_prompt_asks_for_improvement_no_keep_unchanged(self):
+        """Lock in the PR feedback: the refinement prompt should push
+        the model to improve, not offer 'keep your original choice'."""
+        from thematic_analysis_inc.refinement import (
+            _build_refinement_user_prompt,
+        )
+
+        text = _build_refinement_user_prompt("some critique").lower()
+        assert "stronger" in text
+        assert "keep your original" not in text
+        # Allows the coder to drop codes entirely if the segment turns
+        # out to be irrelevant.
+        assert "empty" in text and "valid" in text
+
     def test_three_call_flow_with_separate_critic_chat(self):
         first = _json_response(["shallow"], ["restates"], [True])
         critique = "These codes just paraphrase the segment. Sharpen them."

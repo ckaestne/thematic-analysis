@@ -7,11 +7,11 @@ Three LLM calls per segment, in two separate chat sessions:
    returns an initial set of codes.
 
 2. **Critic chat (call 2).** A fresh chat session with a minimal,
-   adversarial system prompt. The critic sees *only* the original
-   segment and the codes the coder just produced; it does **not** see
-   the codebook, the coder's identity, similar-codes hints, or the
-   research context. Stripping that scaffolding lets the critic push
-   back hard without being anchored to the coder's framing.
+   adversarial system prompt. The critic sees the segment, the codes
+   the coder just produced, and the research context (so it can judge
+   relevance). It does **not** see the codebook, the coder's identity,
+   or similar-codes hints, so it can push back hard without being
+   anchored to the coder's framing.
 
 3. **Coder chat (call 3).** We return to the coder's original session
    and append the critique as a user turn, asking the coder to revise.
@@ -42,42 +42,28 @@ if TYPE_CHECKING:
 
 
 CRITIC_SYSTEM_PROMPT = """\
-You are a tough, sceptical reviewer of qualitative coding. Another
-researcher has produced codes for a single text segment, and your job
-is to push back on their work, not to compliment it. Assume the codes
-are weaker than they should be unless the segment plainly justifies
-them.
+You are a sceptical reviewer of qualitative coding. Another researcher
+has produced codes for a single text segment. Push back on their work
+and make the codes sharper — do not ratify them.
 
-Attack the codes specifically on:
+Focus on:
 
-1. **Shallow paraphrase.** Are the codes just restating what the
-   segment literally says, rather than naming an analytic concept
-   that could re-occur across other texts?
-2. **Over-reach.** Did the coder generalise beyond what the segment
-   actually supports? Quote the text (or note its absence) when you
-   make this point.
-3. **Missed content.** Is there meaningful content in the segment
-   that the codes ignore?
-4. **Conflation or overlap.** Do two of the codes name the same
-   concept? Is one code lumping together two distinct ideas that
-   should be split?
-5. **Vagueness.** Are the labels so generic they would apply to
-   almost any text?
+1. **Relevance to the research focus.** Codes must speak to the
+   research questions, not just describe the segment. Many segments
+   (or parts of segments) are simply not relevant to the research
+   focus and should not be coded at all — if that is the case here,
+   say so and recommend dropping those codes.
+2. **Themes over summary.** Are the codes naming analytic themes that
+   could re-occur across texts, or just paraphrasing what this segment
+   says? Push for themes.
+3. **Grounding.** Did the coder generalise beyond what the segment
+   supports, or miss content that does address the research focus?
 
-Be specific and quote the segment when you object. If, after looking
-hard for problems, you genuinely think the codes are good, say so
-plainly and explain why — but only after you have looked.
+Be specific and quote the segment when you object. Always end with
+concrete suggestions for how the codes should change — never say the
+codes are fine as they are.
 
-Output a short critique in plain prose addressed to the coder. No
-JSON, no headers, no checklist — just the critique."""
-
-
-CRITIC_RESEARCH_CONTEXT_GUIDANCE = """\
-Use the research context above to judge whether the codes are actually
-relevant to the research focus. A code that fairly describes the segment
-but speaks to something outside the research focus should be challenged —
-codes must be responsive to the research questions, not just locally
-accurate."""
+Output a short critique in plain prose. No JSON, no headers."""
 
 
 def _build_critic_user_prompt(
@@ -101,21 +87,22 @@ def _build_critic_user_prompt(
 
 def _build_refinement_user_prompt(critique: str) -> str:
     return (
-        "An independent reviewer was given only this segment and the codes "
-        "you produced — no codebook, no perspective notes, no other "
-        "context — and raised the following critique:\n"
+        "An independent reviewer was given only this segment, your codes, "
+        "and the research context — no codebook, no perspective notes — "
+        "and raised the following critique:\n"
         "\n"
         "-----\n"
         f"{critique.strip()}\n"
         "-----\n"
         "\n"
-        "Re-examine your codes in light of this critique. Where the "
-        "reviewer is right, revise: rename, drop, split, merge, or add "
-        "codes as appropriate. Where the reviewer is wrong, keep your "
-        "original choice but make sure you have a defensible reason. "
-        "Return the final code set as JSON using the same schema "
-        "(`codes`, `rationales`, `is_new`). No commentary outside the "
-        "JSON object."
+        "Use this critique to produce a stronger set of codes. Drop, "
+        "rename, split, merge, or add codes as needed. If the reviewer "
+        "argues that the segment (or part of it) is not relevant to the "
+        "research focus, drop those codes — an empty `codes` list is a "
+        "valid answer when nothing in the segment speaks to the research "
+        "question. Return the final code set as JSON using the same "
+        "schema (`codes`, `rationales`, `is_new`). No commentary outside "
+        "the JSON object."
     )
 
 
@@ -145,8 +132,6 @@ class Critic:
             CRITIC_SYSTEM_PROMPT
             + "\n\n## Research Context\n"
             + ctx.to_prompt_section()
-            + "\n\n"
-            + CRITIC_RESEARCH_CONTEXT_GUIDANCE
         )
 
     def _messages(
