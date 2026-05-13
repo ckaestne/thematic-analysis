@@ -34,6 +34,7 @@ from thematic_analysis.codebook import Codebook
 from thematic_analysis.codebook.codebook import Quote
 
 from thematic_analysis_inc import store
+from thematic_analysis_inc.refinement import wrap_with_refinement
 
 
 # Codebook cache --------------------------------------------------------------
@@ -80,10 +81,18 @@ def _get_codebook(
 AgentFactory = Callable[[Codebook, "store.Coder"], Any]
 
 
-def default_coder_factory(codebook: Codebook, coder: "store.Coder") -> CoderAgent:
-    return CoderAgent(
+def default_coder_factory(codebook: Codebook, coder: "store.Coder") -> Any:
+    """Build the standard coder agent for a coder row.
+
+    Wraps the ``CoderAgent`` in a ``RefiningCoderAgent`` so each segment
+    gets a critical second pass that challenges shallow first-pass codes
+    and refines them if needed. Both passes share one chat session so
+    the prefix is cacheable.
+    """
+    base = CoderAgent(
         config=CoderConfig(identity=coder.identity), codebook=codebook
     )
+    return wrap_with_refinement(base)
 
 
 # Result helpers --------------------------------------------------------------

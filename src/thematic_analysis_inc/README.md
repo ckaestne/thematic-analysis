@@ -111,6 +111,13 @@ ta-stage1 --db analysis.sqlite code alice --retry-failed
 ta-stage1 --db analysis.sqlite code alice --limit 10
 ```
 
+Each segment is coded in two turns within a single chat session: the
+first pass produces an initial set of codes, and a second prompt
+challenges those codes (depth, relevance, grounding, granularity,
+coverage) and asks the model to refine them if needed. The shared
+session lets the provider cache the common prefix. If the first pass
+returns OUT_OF_SCOPE / no codes, the refinement turn is skipped.
+
 ### 5. Aggregate codes
 
 Merges codes from all coders for each segment. Runs serially; safe to
