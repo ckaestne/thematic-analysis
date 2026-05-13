@@ -111,6 +111,29 @@ ta-stage1 --db analysis.sqlite code alice --retry-failed
 ta-stage1 --db analysis.sqlite code alice --limit 10
 ```
 
+Each segment goes through an adversarial refinement loop:
+
+1. **Code** in the coder chat (full context: codebook, identity,
+   research context, similar-codes hints).
+2. **Critique** in a separate critic chat that sees the segment text,
+   the codes the coder just produced, and (if set) the research
+   context — the critic needs the research context to judge relevance.
+   It does **not** see the codebook, the coder's identity, or
+   similar-codes hints. The critic is told to push back on relevance
+   to the research focus, shallow paraphrase vs analytic themes, and
+   grounding — and to recommend dropping codes (or all codes) when
+   the segment isn't actually about the research question.
+3. **Refine** by returning to the coder chat, appending the critique
+   as a user turn, and asking for a stronger code set. The coder may
+   drop, rename, split, merge, or add codes; an empty `codes` list is
+   a valid answer when nothing in the segment speaks to the research
+   focus.
+
+The coder chat reuses the same prefix (`system + initial user +
+assistant`) for the refinement turn, so provider-side prompt caching
+applies. If the first pass returns OUT_OF_SCOPE / no codes, both the
+critic and refinement turns are skipped.
+
 ### 5. Aggregate codes
 
 Merges codes from all coders for each segment. Runs serially; safe to
