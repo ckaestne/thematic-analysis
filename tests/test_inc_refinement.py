@@ -103,6 +103,7 @@ class TestCritic:
         assert len(calls) == 1
         msgs = calls[0].messages
         assert [m.role for m in msgs] == ["system", "user"]
+        # Without research context, the system prompt is exactly the base.
         assert msgs[0].content[0].text == CRITIC_SYSTEM_PROMPT
 
         user_text = msgs[1].content[0].text
@@ -110,11 +111,36 @@ class TestCritic:
         assert "shallow" in user_text
         assert "another" in user_text
         assert "restates the line" in user_text
-        # No coder scaffolding should leak in.
+        # No coder scaffolding should leak into the user message.
         assert "Current Codebook" not in user_text
         assert "Your Perspective" not in user_text
         assert "Research Context" not in user_text
         assert "Similar Existing Codes" not in user_text
+
+    def test_critic_system_prompt_includes_research_context(self):
+        llm, calls = _fake_llm(["critique"])
+        ctx = ResearchContext(
+            title="Climate skepticism",
+            aim="understand rhetorical strategies of inaction",
+            research_questions=["What rhetorical moves justify inaction?"],
+        )
+        Critic(llm, research_context=ctx).critique("text", ["c"], ["r"])
+        sys_prompt = calls[0].messages[0].content[0].text
+        # Base prompt is still there, plus the research-context block.
+        assert sys_prompt.startswith(CRITIC_SYSTEM_PROMPT)
+        assert "## Research Context" in sys_prompt
+        assert "Climate skepticism" in sys_prompt
+        assert "rhetorical strategies of inaction" in sys_prompt
+        assert "rhetorical moves justify inaction" in sys_prompt
+        # And a directive telling the critic to use it for relevance.
+        assert "relevant" in sys_prompt.lower()
+
+    def test_critic_ignores_empty_research_context(self):
+        llm, calls = _fake_llm(["critique"])
+        Critic(llm, research_context=ResearchContext()).critique(
+            "text", ["c"], ["r"]
+        )
+        assert calls[0].messages[0].content[0].text == CRITIC_SYSTEM_PROMPT
 
     def test_critic_call_has_no_json_schema(self):
         """Critique is free-form prose, not JSON."""
@@ -202,9 +228,10 @@ class TestRefiningCoderAgent:
         assert result.codes == ["merged-AB", "C"]
         assert len(calls) == 3
 
-    def test_critic_chat_does_not_see_codebook_or_identity(self):
-        """Even with a fully-populated coder context, the critic chat
-        must not receive it."""
+    def test_critic_chat_excludes_codebook_and_identity(self):
+        """The critic must not see codebook or identity in any turn.
+        Research context IS allowed (it goes into the critic's system
+        prompt so it can judge relevance)."""
         from thematic_analysis.agents.coder import CoderConfig
         from thematic_analysis.codebook import Quote
 
@@ -229,12 +256,53 @@ class TestRefiningCoderAgent:
         agent = RefiningCoderAgent(coder)
         agent.code_segment("seg_1", "the actual segment text")
 
+        critic_sys = calls[1].messages[0].content[0].text
         critic_user = calls[1].messages[1].content[0].text
-        assert "existing-code" not in critic_user
-        assert "feminist scholar" not in critic_user
-        assert "gendered narratives" not in critic_user
+        full_critic_chat = critic_sys + "\n" + critic_user
+
+        # Codebook contents and identity must not leak anywhere.
+        assert "existing-code" not in full_critic_chat
+        assert "feminist scholar" not in full_critic_chat
+
+        # The segment text and the codes do reach the critic.
         assert "the actual segment text" in critic_user
         assert "x" in critic_user
+
+        # Research context shows up in the critic's system prompt.
+        assert "gendered narratives" in critic_sys
+
+    def test_research_context_set_via_wrapper_reaches_critic(self):
+        """Worker layer sets agent.research_context after construction.
+        That update must reach an already-created critic."""
+        llm, calls = _fake_llm(
+            [_json_response(["c"], ["r"], [True]), "critique", _json_response(["c'"])]
+        )
+        agent = RefiningCoderAgent(_coder_with_llm(llm))
+        # Force critic creation now (before research context is set).
+        _ = agent.critic
+
+        ctx = ResearchContext(title="Late context", aim="set after construction")
+        agent.research_context = ctx
+        assert agent.critic.research_context is ctx
+
+        agent.code_segment("seg", "text")
+        critic_sys = calls[1].messages[0].content[0].text
+        assert "Late context" in critic_sys
+
+    def test_research_context_set_before_critic_creation(self):
+        """Set on the wrapper before first use → lazy-created critic
+        picks it up from the coder."""
+        llm, calls = _fake_llm(
+            [_json_response(["c"], ["r"], [True]), "critique", _json_response(["c'"])]
+        )
+        agent = RefiningCoderAgent(_coder_with_llm(llm))
+        ctx = ResearchContext(title="Early context", aim="set before construction")
+        agent.research_context = ctx
+        assert agent._critic is None  # still lazy
+
+        agent.code_segment("seg", "text")
+        critic_sys = calls[1].messages[0].content[0].text
+        assert "Early context" in critic_sys
 
     def test_research_context_passthrough(self):
         llm, _ = _fake_llm([_json_response([])])

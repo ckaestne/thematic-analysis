@@ -115,11 +115,13 @@ Each segment goes through an adversarial refinement loop:
 
 1. **Code** in the coder chat (full context: codebook, identity,
    research context, similar-codes hints).
-2. **Critique** in a separate critic chat that sees *only* the segment
-   text and the codes the coder just produced — no codebook, no
-   identity, no research context. The stripped-down view lets the
-   critic push back hard on shallow paraphrase, over-reach, missed
-   content, conflation, and vagueness.
+2. **Critique** in a separate critic chat that sees the segment text,
+   the codes the coder just produced, and (if set) the research
+   context — the critic needs the research context to judge relevance.
+   It does **not** see the codebook, the coder's identity, or
+   similar-codes hints, so it can push back hard on shallow paraphrase,
+   over-reach, missed content, conflation, and vagueness without being
+   anchored to the coder's framing.
 3. **Refine** by returning to the coder chat, appending the critique
    as a user turn, and asking for a revised code set. The coder still
    has all its context, so it can accept the critic's valid points

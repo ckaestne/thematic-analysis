@@ -26,7 +26,7 @@ refinement turns are skipped — there is nothing to critique.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openhands.sdk import LLM, Message, TextContent
 
@@ -35,6 +35,10 @@ from thematic_analysis.agents.coder import (
     CodeAssignment,
     CoderAgent,
 )
+
+
+if TYPE_CHECKING:
+    from thematic_analysis.research_context import ResearchContext
 
 
 CRITIC_SYSTEM_PROMPT = """\
@@ -66,6 +70,14 @@ plainly and explain why — but only after you have looked.
 
 Output a short critique in plain prose addressed to the coder. No
 JSON, no headers, no checklist — just the critique."""
+
+
+CRITIC_RESEARCH_CONTEXT_GUIDANCE = """\
+Use the research context above to judge whether the codes are actually
+relevant to the research focus. A code that fairly describes the segment
+but speaks to something outside the research focus should be challenged —
+codes must be responsive to the research questions, not just locally
+accurate."""
 
 
 def _build_critic_user_prompt(
@@ -110,22 +122,40 @@ def _build_refinement_user_prompt(critique: str) -> str:
 class Critic:
     """Adversarial reviewer in a fresh chat session.
 
-    Sees only the segment text and the codes (with rationales). No
-    codebook, no identity, no research context — so it can't be anchored
-    by the coder's framing.
+    Sees the segment text, the codes (with rationales), and — if set —
+    the research context, which it needs in order to judge relevance.
+    Deliberately does **not** see the codebook, the coder's identity,
+    or similar-codes hints, so it can't be anchored by the coder's
+    framing.
     """
 
-    def __init__(self, llm: LLM):
+    def __init__(
+        self,
+        llm: LLM,
+        research_context: "ResearchContext | None" = None,
+    ):
         self.llm = llm
+        self.research_context = research_context
 
-    @staticmethod
+    def _system_prompt(self) -> str:
+        ctx = self.research_context
+        if ctx is None or ctx.is_empty():
+            return CRITIC_SYSTEM_PROMPT
+        return (
+            CRITIC_SYSTEM_PROMPT
+            + "\n\n## Research Context\n"
+            + ctx.to_prompt_section()
+            + "\n\n"
+            + CRITIC_RESEARCH_CONTEXT_GUIDANCE
+        )
+
     def _messages(
-        segment_text: str, codes: list[str], rationales: list[str]
+        self, segment_text: str, codes: list[str], rationales: list[str]
     ) -> list[Message]:
         return [
             Message(
                 role="system",
-                content=[TextContent(text=CRITIC_SYSTEM_PROMPT)],
+                content=[TextContent(text=self._system_prompt())],
             ),
             Message(
                 role="user",
@@ -186,19 +216,32 @@ class RefiningCoderAgent:
     @property
     def critic(self) -> Critic:
         """The adversarial critic. Created lazily so wrapping a coder
-        whose LLM isn't configured yet doesn't trigger env lookup."""
+        whose LLM isn't configured yet doesn't trigger env lookup.
+        Inherits the coder's current research context at creation."""
         if self._critic is None:
-            self._critic = Critic(self.coder.llm)
+            self._critic = Critic(
+                self.coder.llm,
+                research_context=self.coder.research_context,
+            )
         return self._critic
 
     # Duck-typed attributes the worker layer reads/writes.
     @property
-    def research_context(self):  # pragma: no cover - trivial delegation
+    def research_context(self):
         return self.coder.research_context
 
     @research_context.setter
-    def research_context(self, value) -> None:  # pragma: no cover - trivial
+    def research_context(self, value) -> None:
+        """Propagate research context to both the coder and the critic.
+
+        The worker layer sets this on the wrapper before each coding
+        call, so the critic needs to pick it up too — without the
+        research context the critic can't judge whether codes are
+        responsive to the research question.
+        """
         self.coder.research_context = value
+        if self._critic is not None:
+            self._critic.research_context = value
 
     @property
     def codebook(self):  # pragma: no cover - trivial delegation
