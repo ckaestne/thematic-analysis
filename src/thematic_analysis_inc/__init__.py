@@ -1,6 +1,5 @@
-"""Incremental, SQLite-backed reimplementation of Stage 1.
+"""SQLite-backed thematic-analysis pipeline (Stage 1 + Stage 2).
 
-See PLAN.md for design and roadmap. This package is intentionally
-side-by-side with the original `thematic_analysis` package — nothing here
-modifies the original.
+The two CLI entry points `ta-stage1` and `ta-stage2` orchestrate the agents
+defined in the `thematic_analysis` library package.
 """

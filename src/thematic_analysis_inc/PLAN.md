@@ -1,8 +1,13 @@
 # Stage 1 — incremental, SQLite-backed rewrite
 
+> **Status:** historical design doc. The rewrite landed (Stage 1 + Stage 2),
+> the old in-memory `ThematicLMPipeline` has been removed, and the remaining
+> `thematic_analysis` package is now a library of agents, prompts, codebook
+> data structures, loaders, and research-context primitives that this
+> package consumes. See `README.md` for current usage.
+
 A side-by-side reimplementation of the Stage 1 pipeline (Coder → Aggregator
-→ Reviewer) using SQLite as the bus between actors. The existing
-`thematic_analysis` package stays untouched.
+→ Reviewer) using SQLite as the bus between actors.
 
 ## Goals
 

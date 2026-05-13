@@ -13,7 +13,13 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from thematic_analysis.pipeline import DataSegment
+
+@dataclass
+class DataSegment:
+    """A segment of data to be coded."""
+
+    segment_id: str
+    text: str
 
 
 @dataclass
