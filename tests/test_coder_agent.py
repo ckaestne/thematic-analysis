@@ -7,9 +7,16 @@ import pytest
 
 from thematic_analysis.agents import CodeAssignment, CoderAgent, CoderConfig
 from thematic_analysis.codebook import Codebook, Quote
-from thematic_analysis.research_context import (
-    ResearchContext,
-    create_climate_research_context,
+from thematic_analysis.research_context import ResearchContext
+
+
+CLIMATE_DESCRIPTION = (
+    "Climate Change Perceptions Study. "
+    "Aim: understand public perceptions, attitudes, and emotional "
+    "responses to climate change.\n\n"
+    "Research questions:\n"
+    "1. How do people perceive and make sense of climate change?\n"
+    "2. What emotional responses does climate change evoke?\n"
 )
 
 
@@ -243,39 +250,49 @@ class TestCoderAgentResearchContext:
 
     def test_initialization_with_research_context(self):
         """Test agent initialization with research context."""
-        ctx = create_climate_research_context()
+        ctx = ResearchContext(description=CLIMATE_DESCRIPTION)
         agent = CoderAgent(research_context=ctx)
 
         assert agent.research_context is not None
-        assert "Climate" in agent.research_context.title
+        assert "Climate" in agent.research_context.description
 
     def test_set_research_context(self):
         """Test setting research context after initialization."""
         agent = CoderAgent()
         assert agent.research_context is None
 
-        ctx = ResearchContext(title="Test Study", aim="To test")
+        ctx = ResearchContext(description="Test Study. To test.")
         agent.set_research_context(ctx)
 
         assert agent.research_context is not None
-        assert agent.research_context.title == "Test Study"
+        assert "Test Study" in agent.research_context.description
 
     def test_system_prompt_includes_research_context(self):
         """Test that system prompt includes research context."""
         ctx = ResearchContext(
-            title="Climate Study",
-            aim="To understand climate perceptions",
-            research_questions=["How do people perceive climate change?"],
-            theoretical_framework="Social constructionism",
+            description=(
+                "Climate Study. To understand climate perceptions through "
+                "the lens of social constructionism. Research question: "
+                "How do people perceive climate change?"
+            ),
         )
         agent = CoderAgent(research_context=ctx)
         prompt = agent.get_system_prompt()
 
         assert "## Research Context" in prompt
         assert "Climate Study" in prompt
-        assert "To understand climate perceptions" in prompt
         assert "How do people perceive climate change?" in prompt
-        assert "Social constructionism" in prompt
+        assert "social constructionism" in prompt
+
+    def test_system_prompt_uses_tailored_prompt_for_coder(self):
+        ctx = ResearchContext(
+            description="raw description",
+            tailored_prompts={"coder": "## Tailored coder section\nDo X."},
+        )
+        agent = CoderAgent(research_context=ctx)
+        prompt = agent.get_system_prompt()
+        assert "Tailored coder section" in prompt
+        assert "raw description" not in prompt
 
     def test_system_prompt_without_research_context(self):
         """Test that system prompt works without research context."""
@@ -296,15 +313,14 @@ class TestCoderAgentResearchContext:
     def test_system_prompt_with_identity_and_research_context(self):
         """Test combining identity with research context."""
         ctx = ResearchContext(
-            title="Healthcare Study",
-            aim="To understand patient experiences",
+            description="Healthcare Study. To understand patient experiences."
         )
         config = CoderConfig(identity="patient advocate")
         agent = CoderAgent(config=config, research_context=ctx)
         prompt = agent.get_system_prompt()
 
         # Should have both sections
-        assert "## Research Context" in prompt
+        assert "Research Context" in prompt
         assert "Healthcare Study" in prompt
         assert "Your Perspective" in prompt
         assert "patient advocate" in prompt
@@ -329,7 +345,7 @@ class TestCoderAgentResearchContext:
             }
         )
 
-        ctx = create_climate_research_context()
+        ctx = ResearchContext(description=CLIMATE_DESCRIPTION)
         agent = CoderAgent(research_context=ctx)
         result = agent.code_segment("seg1", "I worry about the future of our planet.")
 

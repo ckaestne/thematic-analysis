@@ -130,8 +130,8 @@ class Critic:
             return CRITIC_SYSTEM_PROMPT
         return (
             CRITIC_SYSTEM_PROMPT
-            + "\n\n## Research Context\n"
-            + ctx.to_prompt_section()
+            + "\n\n"
+            + ctx.to_prompt_section(role="reviewer")
         )
 
     def _messages(

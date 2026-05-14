@@ -27,15 +27,12 @@ from thematic_analysis.prompts import (
     get_prompt_config,
 )
 from thematic_analysis.research_context import (
+    AGENT_ROLES,
     CODE_6RS,
     CONCEPTUALIZATION_GUIDANCE,
     KEYWORD_6RS,
     THEME_DEVELOPMENT_GUIDANCE,
     ResearchContext,
-    ResearchParadigm,
-    TheoreticalFramework,
-    create_climate_research_context,
-    create_healthcare_research_context,
     create_methodology_prompt,
 )
 
@@ -45,11 +42,8 @@ __all__ = [
     "__version__",
     # Research context
     "ResearchContext",
-    "ResearchParadigm",
-    "TheoreticalFramework",
+    "AGENT_ROLES",
     "create_methodology_prompt",
-    "create_climate_research_context",
-    "create_healthcare_research_context",
     "KEYWORD_6RS",
     "CODE_6RS",
     "THEME_DEVELOPMENT_GUIDANCE",

@@ -204,16 +204,10 @@ class ThemeAggregatorAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         """Get the system prompt for aggregation."""
         if self.research_context and not self.research_context.is_empty():
-            research_section = (
-                "## Research Context\n"
-                f"{self.research_context.to_prompt_section()}\n\n"
-                "Aggregate themes so that the final set directly addresses the "
-                "research questions and stays consistent with the theoretical "
-                "framework. Prefer merges and labels that surface the patterns "
-                "most relevant to the research question; demote or drop themes "
-                "that drift away from it.\n\n"
+            section = self.research_context.to_prompt_section(
+                role="theme_aggregator"
             )
-            return research_section + THEME_AGGREGATOR_SYSTEM_PROMPT
+            return section + "\n\n" + THEME_AGGREGATOR_SYSTEM_PROMPT
         return THEME_AGGREGATOR_SYSTEM_PROMPT
 
     def _collect_all_themes(self, theme_results: list[ThemeResult]) -> dict[str, Theme]:

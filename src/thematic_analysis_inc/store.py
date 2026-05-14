@@ -54,33 +54,63 @@ def init_db(path: str | Path) -> sqlite3.Connection:
 def _research_context_to_json(ctx: ResearchContext) -> str:
     return json.dumps(
         {
-            "title": ctx.title,
-            "aim": ctx.aim,
-            "research_questions": list(ctx.research_questions),
-            "theoretical_framework": ctx.theoretical_framework,
-            "paradigm": ctx.paradigm,
-            "methodology": ctx.methodology,
-            "domain": ctx.domain,
-            "background": ctx.background,
-            "keywords": list(ctx.keywords),
+            "description": ctx.description,
+            "tailored_prompts": dict(ctx.tailored_prompts),
         },
         indent=2,
     )
 
 
+_LEGACY_FIELD_LABELS: list[tuple[str, str]] = [
+    ("title", "Title"),
+    ("aim", "Aim"),
+    ("research_questions", "Research questions"),
+    ("theoretical_framework", "Theoretical framework"),
+    ("paradigm", "Paradigm"),
+    ("domain", "Domain"),
+    ("background", "Background"),
+    ("keywords", "Keywords"),
+]
+
+
+def _legacy_to_description(data: dict) -> str:
+    """Fold a pre-refactor 9-field research_context JSON into a freeform
+    description so existing data is preserved across the schema change."""
+    parts: list[str] = []
+    for key, label in _LEGACY_FIELD_LABELS:
+        val = data.get(key)
+        if not val:
+            continue
+        if isinstance(val, list):
+            cleaned = [str(v).strip() for v in val if str(v).strip()]
+            if not cleaned:
+                continue
+            if key == "research_questions":
+                rendered = "\n".join(f"{i + 1}. {v}" for i, v in enumerate(cleaned))
+            else:
+                rendered = ", ".join(cleaned)
+        else:
+            rendered = str(val).strip()
+            if not rendered:
+                continue
+        parts.append(f"**{label}:** {rendered}")
+    return "\n\n".join(parts)
+
+
 def _research_context_from_json(raw: str) -> ResearchContext:
     data = json.loads(raw)
-    return ResearchContext(
-        title=data.get("title", ""),
-        aim=data.get("aim", ""),
-        research_questions=list(data.get("research_questions", [])),
-        theoretical_framework=data.get("theoretical_framework", ""),
-        paradigm=data.get("paradigm", ""),
-        methodology=data.get("methodology", "thematic_analysis"),
-        domain=data.get("domain", ""),
-        background=data.get("background", ""),
-        keywords=list(data.get("keywords", [])),
-    )
+    if "description" in data or "tailored_prompts" in data:
+        prompts = data.get("tailored_prompts") or {}
+        if not isinstance(prompts, dict):
+            prompts = {}
+        return ResearchContext(
+            description=str(data.get("description", "")),
+            tailored_prompts={
+                str(k): str(v) for k, v in prompts.items() if v
+            },
+        )
+    # Legacy 9-field shape — fold into description so data isn't lost.
+    return ResearchContext(description=_legacy_to_description(data))
 
 
 def set_research_context(
