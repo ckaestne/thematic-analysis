@@ -48,6 +48,25 @@ See [`src/thematic_analysis_inc/README.md`](src/thematic_analysis_inc/README.md)
 for the full usage guide, including all CLI flags, the database schema, and
 the adversarial code-refinement loop.
 
+## Web inspector (`ta-web`)
+
+A React + FastAPI UI for inspecting and editing pipeline state. Install the
+optional `web` extras, then point it at any analysis database:
+
+```bash
+pip install -e '.[web]'
+ta-web --db analysis.sqlite
+# → serving analysis.sqlite at http://127.0.0.1:8765
+```
+
+The UI shows progress at every stage (segments → coder runs → aggregation →
+review → codebook → theme coders → themes), lets you edit code text, and lets
+you delete results so the pipeline re-computes them on the next worker run.
+
+For frontend development, run `npm install && npm run dev` inside `frontend/`
+(it proxies `/api` to `127.0.0.1:8765`). The production build outputs to
+`src/thematic_analysis_inc/web_static/`, which `ta-web` serves directly.
+
 ## Supported File Formats
 
 - **PDF** (`.pdf`) — automatic text extraction
