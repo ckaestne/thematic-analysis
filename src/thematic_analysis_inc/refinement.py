@@ -26,10 +26,16 @@ refinement turns are skipped — there is nothing to critique.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from openhands.sdk import LLM, Message, TextContent
 
+from thematic_analysis.agents.base import (
+    _RETRY_MAX_ATTEMPTS,
+    _backoff_delay,
+    _is_retryable,
+)
 from thematic_analysis.agents.coder import (
     CODER_RESPONSE_SCHEMA,
     CodeAssignment,
@@ -165,22 +171,39 @@ class Critic:
     def critique(
         self, segment_text: str, codes: list[str], rationales: list[str]
     ) -> str:
-        response = self.llm.completion(
-            messages=self._messages(segment_text, codes, rationales)
-        )
-        return self._extract_text(response)
+        msgs = self._messages(segment_text, codes, rationales)
+        last: BaseException | None = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            try:
+                response = self.llm.completion(messages=msgs)
+                return self._extract_text(response)
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    raise
+                last = exc
+                time.sleep(_backoff_delay(attempt, exc))
+        assert last is not None
+        raise last
 
     async def critique_async(
         self, segment_text: str, codes: list[str], rationales: list[str]
     ) -> str:
+        msgs = self._messages(segment_text, codes, rationales)
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.llm.completion(
-                messages=self._messages(segment_text, codes, rationales)
-            ),
-        )
-        return self._extract_text(response)
+        last: BaseException | None = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            try:
+                response = await loop.run_in_executor(
+                    None, lambda: self.llm.completion(messages=msgs)
+                )
+                return self._extract_text(response)
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    raise
+                last = exc
+                await asyncio.sleep(_backoff_delay(attempt, exc))
+        assert last is not None
+        raise last
 
 
 class RefiningCoderAgent:
@@ -251,18 +274,14 @@ class RefiningCoderAgent:
         ]
 
     def _coder_completion(self, messages: list[Message]) -> str:
-        response = self.coder.llm.completion(
-            messages=messages, response_format=CODER_RESPONSE_SCHEMA
+        response = self.coder._completion_with_retry(
+            messages, {"response_format": CODER_RESPONSE_SCHEMA}
         )
         return self.coder._extract_text(response)
 
     async def _coder_completion_async(self, messages: list[Message]) -> str:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.coder.llm.completion(
-                messages=messages, response_format=CODER_RESPONSE_SCHEMA
-            ),
+        response = await self.coder._completion_with_retry_async(
+            messages, {"response_format": CODER_RESPONSE_SCHEMA}
         )
         return self.coder._extract_text(response)
 

@@ -1,10 +1,67 @@
 """Base agent class for all thematic analysis agents."""
 
 import asyncio
+import os
+import random
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from openhands.sdk import LLM, Message, TextContent
+
+# Retry config for transient LLM errors (rate limits, 5xx, connection blips).
+# Tunable via env so ops can crank it up without code changes.
+_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "6"))
+_RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "2.0"))
+_RETRY_MAX_DELAY = float(os.environ.get("LLM_RETRY_MAX_DELAY", "60.0"))
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Match transient litellm errors without a hard import dependency."""
+    name = type(exc).__name__
+    if name in {
+        "RateLimitError",
+        "APIConnectionError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+        "BadGatewayError",
+        "Timeout",
+        "APITimeoutError",
+    }:
+        return True
+    status = getattr(exc, "status_code", None)
+    return status in {408, 429, 500, 502, 503, 504}
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Pull a Retry-After hint from the exception, if the provider gave one."""
+    for attr in ("retry_after", "response"):
+        val = getattr(exc, attr, None)
+        if val is None:
+            continue
+        if isinstance(val, (int, float)):
+            return float(val)
+        headers = getattr(val, "headers", None)
+        if headers is None:
+            continue
+        for key in ("retry-after", "Retry-After", "x-ratelimit-reset"):
+            raw = headers.get(key) if hasattr(headers, "get") else None
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _backoff_delay(attempt: int, exc: BaseException) -> float:
+    hinted = _retry_after_seconds(exc)
+    if hinted is not None:
+        return min(hinted, _RETRY_MAX_DELAY)
+    return min(_RETRY_BASE_DELAY * (2 ** attempt), _RETRY_MAX_DELAY) * (
+        0.5 + random.random()
+    )
 
 
 @dataclass
@@ -97,8 +154,37 @@ class BaseAgent(ABC):
         """
         messages = self._create_messages(system_prompt, user_prompt)
         kwargs = {"response_format": response_format} if response_format else {}
-        response = self.llm.completion(messages=messages, **kwargs)
+        response = self._completion_with_retry(messages, kwargs)
         return self._extract_text(response)
+
+    def _completion_with_retry(self, messages, kwargs):
+        last: BaseException | None = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            try:
+                return self.llm.completion(messages=messages, **kwargs)
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    raise
+                last = exc
+                time.sleep(_backoff_delay(attempt, exc))
+        assert last is not None
+        raise last
+
+    async def _completion_with_retry_async(self, messages, kwargs):
+        loop = asyncio.get_event_loop()
+        last: BaseException | None = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            try:
+                return await loop.run_in_executor(
+                    None, lambda: self.llm.completion(messages=messages, **kwargs)
+                )
+            except Exception as exc:
+                if not _is_retryable(exc) or attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    raise
+                last = exc
+                await asyncio.sleep(_backoff_delay(attempt, exc))
+        assert last is not None
+        raise last
 
     async def _call_llm_async(
         self,
@@ -119,11 +205,7 @@ class BaseAgent(ABC):
         """
         messages = self._create_messages(system_prompt, user_prompt)
         kwargs = {"response_format": response_format} if response_format else {}
-        # Run sync completion in thread pool for async compatibility
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None, lambda: self.llm.completion(messages=messages, **kwargs)
-        )
+        response = await self._completion_with_retry_async(messages, kwargs)
         return self._extract_text(response)
 
     @abstractmethod

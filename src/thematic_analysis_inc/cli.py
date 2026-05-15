@@ -180,6 +180,20 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
 # code ------------------------------------------------------------------------
 
 
+def _resolve_workers(value: str | int) -> int:
+    if isinstance(value, int):
+        return max(1, value)
+    if value != "auto":
+        try:
+            return max(1, int(value))
+        except ValueError:
+            raise SystemExit(f"--workers must be an integer or 'auto', got {value!r}")
+    model = (os.environ.get("LLM_MODEL") or "").lower()
+    if "claude" in model or "anthropic" in model or "sonnet" in model or "opus" in model or "haiku" in model:
+        return 8
+    return 4
+
+
 def _cmd_code(args: argparse.Namespace) -> int:
     conn = store.connect(args.db)
     coder = store.get_coder(conn, args.coder_id)
@@ -192,9 +206,11 @@ def _cmd_code(args: argparse.Namespace) -> int:
         if n:
             print(f"[code] cleared {n} failed/running run(s) for retry")
 
+    n_workers = _resolve_workers(args.workers)
+
     todo = len(store.segments_to_code(conn, args.coder_id))
     print(
-        f"[code] coder={args.coder_id} todo={todo} workers={args.workers}"
+        f"[code] coder={args.coder_id} todo={todo} workers={n_workers}"
         + (f" limit={args.limit}" if args.limit else "")
     )
     if todo == 0:
@@ -216,16 +232,22 @@ def _cmd_code(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-    counters = asyncio.run(
-        workers.drain_code_async(
+    async def _run() -> dict:
+        # Each segment fires up to 3 concurrent LLM calls via the refining
+        # coder; size the thread pool so workers aren't blocked queueing on it.
+        from concurrent.futures import ThreadPoolExecutor
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=max(8, n_workers * 3)))
+        return await workers.drain_code_async(
             conn,
             args.coder_id,
-            workers=args.workers,
+            workers=n_workers,
             limit=args.limit,
             use_mock_embeddings=args.mock_embeddings,
             on_event=on_event,
         )
-    )
+
+    counters = asyncio.run(_run())
     print(f"[code] done: {counters['done']} ok, {counters['failed']} failed")
     return 0
 
@@ -452,7 +474,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_code = sub.add_parser("code", help="code all unprocessed segments for a coder")
     p_code.add_argument("coder_id")
     p_code.add_argument("--limit", type=int, default=None)
-    p_code.add_argument("--workers", type=int, default=1)
+    p_code.add_argument(
+        "--workers",
+        default="auto",
+        help='integer or "auto" (default: auto — 8 for Claude, 4 for Gemini/other)',
+    )
     p_code.add_argument(
         "--retry-failed",
         action="store_true",
