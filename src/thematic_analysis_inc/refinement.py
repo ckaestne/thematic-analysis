@@ -49,25 +49,31 @@ if TYPE_CHECKING:
 
 CRITIC_SYSTEM_PROMPT = """\
 You are a sceptical reviewer of qualitative coding. Another researcher
-has produced codes for a single text segment. Push back on their work
-and make the codes sharper — do not ratify them.
+has produced codes for a single text segment. Your job is to challenge
+those codes against the research focus — not to ratify them, and not
+to invent justifications for keeping them.
 
-Focus on:
+Your priorities, in order:
 
-1. **Relevance to the research focus.** Codes must speak to the
-   research questions, not just describe the segment. Many segments
-   (or parts of segments) are simply not relevant to the research
-   focus and should not be coded at all — if that is the case here,
-   say so and recommend dropping those codes.
-2. **Themes over summary.** Are the codes naming analytic themes that
-   could re-occur across texts, or just paraphrasing what this segment
-   says? Push for themes.
+1. **Relevance to the research focus.** Codes must be directly
+   relevant to the research question(s), not merely describe what the
+   segment is about. Many segments are simply off-topic for this
+   study and should not be coded at all. If this
+   segment (or parts of it) does not address the research focus, say
+   so plainly and recommend dropping the off-topic codes. Recommending
+   that the coder drop *all* codes — leaving the segment uncoded — is
+   a correct and expected outcome when nothing in the segment speaks
+   to the research question.
+2. **Themes over summary.** Among codes that are on-topic, are they
+   naming analytic features that could recur across segments, or just
+   paraphrasing what this segment says? Push for themes.
 3. **Grounding.** Did the coder generalise beyond what the segment
-   supports, or miss content that does address the research focus?
+   supports, or miss on-topic content?
 
-Be specific and quote the segment when you object. Always end with
-concrete suggestions for how the codes should change — never say the
-codes are fine as they are.
+Be specific and quote the segment when you object. End with concrete
+recommendations: which codes to drop as off-topic, which to rename or
+sharpen, and (if appropriate) what on-topic content was missed. Do not
+soften the critique to be polite; if the codes are off-topic, say so.
 
 Output a short critique in plain prose. No JSON, no headers."""
 
@@ -137,7 +143,7 @@ class Critic:
         return (
             CRITIC_SYSTEM_PROMPT
             + "\n\n"
-            + ctx.to_prompt_section(role="reviewer")
+            + ctx.to_prompt_section(role="coding_critic")
         )
 
     def _messages(
@@ -220,6 +226,7 @@ class RefiningCoderAgent:
     def __init__(self, coder: CoderAgent, critic: Critic | None = None):
         self.coder = coder
         self._critic = critic
+        self.last_trace: dict | None = None
 
     @property
     def critic(self) -> Critic:
@@ -288,12 +295,19 @@ class RefiningCoderAgent:
     # ── public API matching CoderAgent ───────────────────────────────────
 
     def code_segment(self, segment_id: str, text: str) -> CodeAssignment:
+        self.last_trace = None
         initial_msgs = self._initial_messages(segment_id, text)
         first_response = self._coder_completion(initial_msgs)
         first_assignment = self.coder._process_response(
             first_response, segment_id, text
         )
         if not first_assignment.codes:
+            self.last_trace = {
+                "segment_text": text,
+                "first": first_assignment,
+                "critique": None,
+                "refined": None,
+            }
             return first_assignment
 
         critique = self.critic.critique(
@@ -307,17 +321,33 @@ class RefiningCoderAgent:
             refined_msgs, "user", _build_refinement_user_prompt(critique)
         )
         refined_response = self._coder_completion(refined_msgs)
-        return self.coder._process_response(refined_response, segment_id, text)
+        refined_assignment = self.coder._process_response(
+            refined_response, segment_id, text
+        )
+        self.last_trace = {
+            "segment_text": text,
+            "first": first_assignment,
+            "critique": critique,
+            "refined": refined_assignment,
+        }
+        return refined_assignment
 
     async def code_segment_async(
         self, segment_id: str, text: str
     ) -> CodeAssignment:
+        self.last_trace = None
         initial_msgs = self._initial_messages(segment_id, text)
         first_response = await self._coder_completion_async(initial_msgs)
         first_assignment = self.coder._process_response(
             first_response, segment_id, text
         )
         if not first_assignment.codes:
+            self.last_trace = {
+                "segment_text": text,
+                "first": first_assignment,
+                "critique": None,
+                "refined": None,
+            }
             return first_assignment
 
         critique = await self.critic.critique_async(
@@ -331,7 +361,16 @@ class RefiningCoderAgent:
             refined_msgs, "user", _build_refinement_user_prompt(critique)
         )
         refined_response = await self._coder_completion_async(refined_msgs)
-        return self.coder._process_response(refined_response, segment_id, text)
+        refined_assignment = self.coder._process_response(
+            refined_response, segment_id, text
+        )
+        self.last_trace = {
+            "segment_text": text,
+            "first": first_assignment,
+            "critique": critique,
+            "refined": refined_assignment,
+        }
+        return refined_assignment
 
 
 def wrap_with_refinement(agent: Any) -> Any:

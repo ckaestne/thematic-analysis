@@ -202,6 +202,55 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
 # code ------------------------------------------------------------------------
 
 
+def _format_codes(assignment) -> str:
+    if assignment is None:
+        return "  (none)"
+    codes = list(getattr(assignment, "codes", []) or [])
+    rationales = list(getattr(assignment, "rationales", []) or [])
+    is_new = list(getattr(assignment, "is_new_code", []) or [])
+    if not codes:
+        return "  (no codes — out of scope / nothing to code)"
+    lines: list[str] = []
+    for i, code in enumerate(codes):
+        rat = rationales[i] if i < len(rationales) else ""
+        new = " [NEW]" if i < len(is_new) and is_new[i] else ""
+        lines.append(f"  {i + 1}. {code}{new}")
+        if rat:
+            lines.append(f"     → {rat}")
+    return "\n".join(lines)
+
+
+def _print_trace(segment_id: str, trace: dict) -> None:
+    bar = "=" * 72
+    sub = "-" * 72
+    text = trace.get("segment_text") or ""
+    snippet = text.strip().replace("\n", " ")
+    if len(snippet) > 400:
+        snippet = snippet[:397] + "..."
+    print()
+    print(bar)
+    print(f"VERBOSE TRACE  segment={segment_id}")
+    print(bar)
+    print("Segment:")
+    print(f"  {snippet}")
+    print(sub)
+    print("First-pass codes (coder):")
+    print(_format_codes(trace.get("first")))
+    print(sub)
+    critique = trace.get("critique")
+    if critique is None:
+        print("Critique: (skipped — first pass produced no codes)")
+    else:
+        print("Critique (challenger):")
+        for line in critique.strip().splitlines() or [""]:
+            print(f"  {line}")
+    print(sub)
+    print("Refined codes (coder after critique):")
+    print(_format_codes(trace.get("refined") or trace.get("first")))
+    print(bar)
+    print()
+
+
 def _resolve_workers(value: str | int) -> int:
     if isinstance(value, int):
         return max(1, value)
@@ -241,6 +290,8 @@ def _cmd_code(args: argparse.Namespace) -> int:
     def on_event(res: dict, c: dict) -> None:
         n = c["done"] + c["failed"]
         if res["ok"]:
+            if args.verbose and res.get("trace") is not None:
+                _print_trace(res["segment_id"], res["trace"])
             print(
                 f"[code] {res['segment_id']} coder={res['coder_id']} "
                 f"codes={res['n_codes']} v={res['version']} "
@@ -520,6 +571,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--mock-embeddings",
         action="store_true",
         help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_code.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print the first-pass codes, critique, and refined codes for each segment",
     )
     p_code.set_defaults(func=_cmd_code)
 

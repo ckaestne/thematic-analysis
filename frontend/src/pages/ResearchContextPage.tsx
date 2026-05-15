@@ -18,12 +18,19 @@ import { ErrorAlert } from "../components/ErrorAlert";
 
 const ROLE_LABELS: Record<string, string> = {
   coder: "Coder",
+  coding_critic: "Coding critic",
   theme_coder: "Theme coder",
   reviewer: "Reviewer",
   theme_aggregator: "Theme aggregator",
 };
 
-const DEFAULT_ROLES = ["coder", "theme_coder", "reviewer", "theme_aggregator"];
+const DEFAULT_ROLES = [
+  "coder",
+  "coding_critic",
+  "theme_coder",
+  "reviewer",
+  "theme_aggregator",
+];
 
 export function ResearchContextPage() {
   const qc = useQueryClient();
