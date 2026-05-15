@@ -272,7 +272,11 @@ def _cmd_code(args: argparse.Namespace) -> int:
         print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
         return 1
 
-    if args.retry_failed:
+    if args.recode:
+        n = store.reset_all_coder_runs(conn, args.coder_id)
+        if n:
+            print(f"[code] cleared {n} existing run(s) for recoding")
+    elif args.retry_failed:
         n = store.reset_unfinished_coder_runs(conn, args.coder_id)
         if n:
             print(f"[code] cleared {n} failed/running run(s) for retry")
@@ -566,6 +570,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help="delete failed/running runs for this coder before starting",
+    )
+    p_code.add_argument(
+        "--recode",
+        action="store_true",
+        help="delete ALL existing runs for this coder (including 'done') "
+        "and re-code every segment from scratch",
     )
     p_code.add_argument(
         "--mock-embeddings",
