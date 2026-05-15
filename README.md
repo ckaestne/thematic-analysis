@@ -7,18 +7,20 @@ Built with the [OpenHands Software Agent SDK](https://github.com/OpenHands/softw
 
 ## Installation
 
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
 ```bash
 git clone https://github.com/ckaestne/thematic-analysis.git
 cd thematic-analysis
-pip install -e .
+uv sync
 ```
 
-`pip install -e .` registers the `ta-stage1` and `ta-stage2` console scripts
-into your active Python environment.
+`uv sync` creates a `.venv/` and installs the project plus its dependencies.
+Run the console scripts via `uv run`:
 
 ```bash
-ta-stage1 --help
-ta-stage2 --help
+uv run ta-stage1 --help
+uv run ta-stage2 --help
 ```
 
 ## Environment Variables
@@ -54,8 +56,8 @@ A React + FastAPI UI for inspecting and editing pipeline state. Install the
 optional `web` extras, then point it at any analysis database:
 
 ```bash
-pip install -e '.[web]'
-ta-web --db analysis.sqlite
+uv sync --extra web
+uv run ta-web --db analysis.sqlite
 # → serving analysis.sqlite at http://127.0.0.1:8765
 ```
 
