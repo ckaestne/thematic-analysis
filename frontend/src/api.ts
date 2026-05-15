@@ -63,8 +63,34 @@ export type Segment = {
   segment_id: string;
   batch: number | null;
   status: string;
+  title: string | null;
+  document_id: number | null;
   preview: string;
   len: number;
+};
+
+export type Document = {
+  document_id: number;
+  filename: string;
+  created_at: string;
+  size_bytes: number;
+  segments_total: number;
+};
+
+export type DocumentSegment = {
+  segment_id: string;
+  title: string | null;
+  status: string;
+  text: string;
+  len: number;
+};
+
+export type DocumentDetail = {
+  document_id: number;
+  filename: string;
+  created_at: string;
+  size_bytes: number;
+  segments: DocumentSegment[];
 };
 
 export type CoderCode = {
@@ -106,6 +132,8 @@ export type AggregatedCode = {
 export type SegmentDetail = {
   segment_id: string;
   text: string;
+  title: string | null;
+  document_id: number | null;
   batch: number | null;
   status: string;
   coder_runs: CoderRun[];
@@ -239,6 +267,11 @@ export const api = {
   segment: (id: string) => jsonFetch<SegmentDetail>(`/api/segments/${id}`),
   deleteSegment: (id: string) =>
     jsonFetch(`/api/segments/${id}`, { method: "DELETE" }),
+
+  documents: () =>
+    jsonFetch<{ items: Document[] }>("/api/documents"),
+  document: (id: number) =>
+    jsonFetch<DocumentDetail>(`/api/documents/${id}`),
 
   coders: () => jsonFetch<Coder[]>("/api/coders"),
   addCoder: (coder_id: string, identity: string) =>

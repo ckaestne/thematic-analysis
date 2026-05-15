@@ -275,7 +275,7 @@ def create_app(db_path: str | Path) -> FastAPI:
                 f"SELECT COUNT(*) AS n FROM segments {clause}", params
             ).fetchone()["n"]
             rows = conn.execute(
-                f"SELECT segment_id, batch, status, "
+                f"SELECT segment_id, batch, status, title, document_id, "
                 f"  substr(text, 1, 240) AS preview, length(text) AS len "
                 f"FROM segments {clause} ORDER BY segment_id "
                 f"LIMIT ? OFFSET ?",
@@ -294,7 +294,8 @@ def create_app(db_path: str | Path) -> FastAPI:
         conn = _conn()
         try:
             seg = conn.execute(
-                "SELECT segment_id, text, batch, status FROM segments WHERE segment_id = ?",
+                "SELECT segment_id, text, title, document_id, batch, status "
+                "FROM segments WHERE segment_id = ?",
                 (segment_id,),
             ).fetchone()
             if seg is None:
@@ -418,6 +419,46 @@ def create_app(db_path: str | Path) -> FastAPI:
         except Exception:
             conn.execute("ROLLBACK")
             raise
+        finally:
+            conn.close()
+
+    # ── documents ─────────────────────────────────────────────────────────
+
+    @app.get("/api/documents")
+    def list_documents() -> dict[str, Any]:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                "SELECT d.document_id, d.filename, d.created_at, "
+                "  length(d.content) AS size_bytes, "
+                "  COUNT(s.segment_id) AS segments_total "
+                "FROM documents d "
+                "LEFT JOIN segments s ON s.document_id = d.document_id "
+                "GROUP BY d.document_id "
+                "ORDER BY d.document_id DESC"
+            ).fetchall()
+            return {"items": _rows_to_dicts(rows)}
+        finally:
+            conn.close()
+
+    @app.get("/api/documents/{document_id}")
+    def get_document(document_id: int) -> dict[str, Any]:
+        conn = _conn()
+        try:
+            doc = conn.execute(
+                "SELECT document_id, filename, created_at, length(content) AS size_bytes "
+                "FROM documents WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if doc is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            segs = conn.execute(
+                "SELECT segment_id, title, status, text, length(text) AS len "
+                "FROM segments WHERE document_id = ? "
+                "ORDER BY position IS NULL, position, segment_id",
+                (document_id,),
+            ).fetchall()
+            return {**dict(doc), "segments": _rows_to_dicts(segs)}
         finally:
             conn.close()
 

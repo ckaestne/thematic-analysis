@@ -7,6 +7,7 @@ import {
   IconClipboardCheck,
   IconCode,
   IconDatabase,
+  IconFile,
   IconFlag,
   IconLayoutDashboard,
   IconStack2,
@@ -19,6 +20,7 @@ import type { ReactNode } from "react";
 const navItems = [
   { to: "/", label: "Overview", icon: IconLayoutDashboard, end: true },
   { to: "/research-context", label: "Research context", icon: IconFlag },
+  { to: "/documents", label: "Documents", icon: IconFile },
   { to: "/segments", label: "Segments", icon: IconDatabase },
   { to: "/coders", label: "Coders", icon: IconUsers },
   { to: "/coder-runs", label: "Coder runs", icon: IconCode },

@@ -175,10 +175,24 @@ export function SegmentDetail() {
       <Group justify="space-between" align="end">
         <Stack gap={2}>
           <Title order={2}>{data.segment_id}</Title>
+          {data.title && (
+            <Text size="sm" c="dimmed" fs="italic">
+              {data.title}
+            </Text>
+          )}
           <Group gap="xs">
             <StatusBadge status={data.status} />
             {data.batch != null && (
               <Badge variant="default">batch {data.batch}</Badge>
+            )}
+            {data.document_id != null && (
+              <Anchor
+                component={Link}
+                to={`/documents/${data.document_id}`}
+                size="sm"
+              >
+                ← source document
+              </Anchor>
             )}
           </Group>
         </Stack>
