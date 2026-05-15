@@ -13,7 +13,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { notifications } from "@mantine/notifications";
-import { api, type ResearchContext } from "../api";
+import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 
 const ROLE_LABELS: Record<string, string> = {
