@@ -107,6 +107,40 @@ def test_enqueue_inserts_segments_only(tmp_path: Path) -> None:
     assert n_runs == 0  # no runs created up front
 
 
+def test_add_document_and_link_segments(tmp_path: Path) -> None:
+    db = tmp_path / "x.sqlite"
+    conn = store.init_db(db)
+    doc_id = store.add_document(conn, "post.md", b"# hello\n\nworld\n")
+    assert doc_id >= 1
+
+    rows = [
+        ("seg_b", "second segment text", "Second", doc_id, 1),
+        ("seg_a", "first segment text", "First", doc_id, 0),
+    ]
+    result = store.enqueue_segments(conn, rows)
+    assert result.inserted_segments == 2
+
+    fetched = conn.execute(
+        "SELECT segment_id, title, document_id, position FROM segments "
+        "WHERE document_id = ? ORDER BY position",
+        (doc_id,),
+    ).fetchall()
+    assert [
+        (r["segment_id"], r["title"], r["document_id"], r["position"])
+        for r in fetched
+    ] == [
+        ("seg_a", "First", doc_id, 0),
+        ("seg_b", "Second", doc_id, 1),
+    ]
+
+    doc = conn.execute(
+        "SELECT filename, content FROM documents WHERE document_id = ?",
+        (doc_id,),
+    ).fetchone()
+    assert doc["filename"] == "post.md"
+    assert bytes(doc["content"]) == b"# hello\n\nworld\n"
+
+
 def test_enqueue_idempotent_on_segment_id(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
     conn = store.init_db(db)

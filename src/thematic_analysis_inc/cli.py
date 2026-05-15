@@ -149,24 +149,46 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
     total_files = total_inserted = total_skipped = 0
     for path in paths:
         doc = load_text_file(path)
-        segments = doc.segment(
-            method=args.segmentation,
-            min_words=args.min_words,
-            max_words=args.max_words,
-        )
-        if not segments:
+        rows: list[tuple[str, str, str | None]]
+        if args.segmentation == "llm":
+            from thematic_analysis_inc.segmenter_llm import segment_by_llm
+
+            titled = segment_by_llm(
+                doc.text,
+                doc_id=path.stem,
+                model=args.model,
+                min_words=args.min_words,
+            )
+            rows = [(s.segment_id, s.text, s.title) for s in titled]
+        else:
+            segments = doc.segment(
+                method=args.segmentation,
+                min_words=args.min_words,
+                max_words=args.max_words,
+            )
+            rows = [(s.segment_id, s.text, None) for s in segments]
+
+        if not rows:
             print(
                 f"[add-document] {path.name}: 0 segments (skipped)",
                 file=sys.stderr,
             )
             continue
-        pairs = [(s.segment_id, s.text) for s in segments]
-        result = store.enqueue_segments(conn, pairs, batch=args.batch)
+
+        document_id = store.add_document(
+            conn, filename=path.name, content=path.read_bytes()
+        )
+        enqueue_rows = [
+            (sid, txt, title, document_id, i)
+            for i, (sid, txt, title) in enumerate(rows)
+        ]
+        result = store.enqueue_segments(conn, enqueue_rows, batch=args.batch)
         total_files += 1
         total_inserted += result.inserted_segments
         total_skipped += result.skipped_segments
         print(
-            f"[add-document] {path.name}: segments={len(segments)} "
+            f"[add-document] {path.name}: doc_id={document_id} "
+            f"segments={len(rows)} "
             f"inserted={result.inserted_segments} "
             f"skipped={result.skipped_segments}"
         )
@@ -463,11 +485,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc.add_argument("files", nargs="+")
     p_doc.add_argument(
         "--segmentation",
-        choices=("paragraph", "sentence", "fixed"),
-        default="paragraph",
+        choices=("llm", "paragraph", "sentence", "fixed"),
+        default="llm",
     )
-    p_doc.add_argument("--min-words", type=int, default=20)
+    p_doc.add_argument(
+        "--min-words",
+        type=int,
+        default=50,
+        help="minimum words per segment (drop for paragraph/sentence; merge for llm)",
+    )
     p_doc.add_argument("--max-words", type=int, default=500)
+    p_doc.add_argument(
+        "--model",
+        default="gemini/gemini-2.5-flash-lite",
+        help="litellm model id for --segmentation llm",
+    )
     p_doc.add_argument("--batch", type=int, default=None)
     p_doc.set_defaults(func=_cmd_add_document)
 

@@ -22,40 +22,38 @@ def _cmd_segment(args: argparse.Namespace) -> int:
 
     doc = load_document(path)
 
-    titles: list[str] | None = None
     if args.method == "llm":
         from thematic_analysis_inc.segmenter_llm import segment_by_llm
 
-        doc_id = path.stem
-        segments, boundaries = segment_by_llm(
+        titled = segment_by_llm(
             doc.text,
-            doc_id=doc_id,
+            doc_id=path.stem,
             model=args.model,
             min_words=args.min_words,
         )
-        # Boundaries may outnumber final segments after merging; align titles
-        # to surviving segment_ids by start_line.
-        by_line = {f"{doc_id}_l{b.start_line}": b.title for b in boundaries}
-        titles = [by_line.get(seg.segment_id, "") for seg in segments]
+        rows: list[tuple[str, str, str]] = [
+            (s.segment_id, s.text, s.title) for s in titled
+        ]
     else:
         segments = doc.segment(
             method=args.method,
             min_words=args.min_words,
             max_words=args.max_words,
         )
+        rows = [(s.segment_id, s.text, "") for s in segments]
 
-    if not segments:
+    if not rows:
         print("(no segments produced)", file=sys.stderr)
         return 1
 
-    for i, seg in enumerate(segments, 1):
-        words = len(seg.text.split())
-        title = f"  — {titles[i - 1]}" if titles and titles[i - 1] else ""
-        print(f"── [{i}/{len(segments)}] {seg.segment_id}  ({words} words){title}")
-        print(seg.text)
+    for i, (seg_id, text, title) in enumerate(rows, 1):
+        words = len(text.split())
+        suffix = f"  — {title}" if title else ""
+        print(f"── [{i}/{len(rows)}] {seg_id}  ({words} words){suffix}")
+        print(text)
         print()
 
-    print(f"── {len(segments)} segment(s) from {path.name}", file=sys.stderr)
+    print(f"── {len(rows)} segment(s) from {path.name}", file=sys.stderr)
     return 0
 
 

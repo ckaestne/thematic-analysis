@@ -2,13 +2,13 @@
 
 from thematic_analysis_inc.segmenter_llm import (
     LLMSegment,
+    TitledSegment,
     _extract_json,
     _merge_short,
     _number_lines,
     _parse_boundaries,
     _slice_segments,
 )
-from thematic_analysis.loaders import DataSegment
 
 
 def test_number_lines_format():
@@ -50,7 +50,7 @@ def test_parse_boundaries_drops_out_of_range_and_dedupes():
     assert [b.start_line for b in out] == [1, 4]
 
 
-def test_slice_segments_covers_all_lines():
+def test_slice_segments_covers_all_lines_with_titles():
     lines = [f"line{i}" for i in range(1, 11)]
     boundaries = [
         LLMSegment(start_line=1, title="A"),
@@ -59,30 +59,33 @@ def test_slice_segments_covers_all_lines():
     ]
     segs = _slice_segments(boundaries, lines, doc_id="doc")
     assert [s.segment_id for s in segs] == ["doc_l1", "doc_l4", "doc_l8"]
+    assert [s.title for s in segs] == ["A", "B", "C"]
     assert segs[0].text == "line1\nline2\nline3"
     assert segs[1].text == "line4\nline5\nline6\nline7"
     assert segs[2].text == "line8\nline9\nline10"
 
 
-def test_merge_short_collapses_under_floor_into_neighbor():
+def test_merge_short_collapses_under_floor_and_keeps_first_title():
     big = " ".join(["w"] * 60)
     small = "tiny"
     segs = [
-        DataSegment(segment_id="a", text=small),  # under floor, merge fwd
-        DataSegment(segment_id="b", text=big),
-        DataSegment(segment_id="c", text=small),  # under floor at tail, merge back
+        TitledSegment(segment_id="a", text=small, title="A"),
+        TitledSegment(segment_id="b", text=big, title="B"),
+        TitledSegment(segment_id="c", text=small, title="C"),
     ]
     merged = _merge_short(segs, min_words=50)
     assert len(merged) == 1
     assert merged[0].segment_id == "a"
+    assert merged[0].title == "A"
     assert "tiny" in merged[0].text and "w w" in merged[0].text
 
 
 def test_merge_short_keeps_already_large():
     big = " ".join(["w"] * 60)
     segs = [
-        DataSegment(segment_id="a", text=big),
-        DataSegment(segment_id="b", text=big),
+        TitledSegment(segment_id="a", text=big, title="A"),
+        TitledSegment(segment_id="b", text=big, title="B"),
     ]
     merged = _merge_short(segs, min_words=50)
     assert len(merged) == 2
+    assert [s.title for s in merged] == ["A", "B"]

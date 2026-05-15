@@ -15,8 +15,6 @@ from dataclasses import dataclass
 
 from openhands.sdk import LLM, Message, TextContent
 
-from thematic_analysis.loaders import DataSegment
-
 
 _SYSTEM_PROMPT = (
     "You segment documents into topical sections for qualitative analysis. "
@@ -113,10 +111,17 @@ def _parse_boundaries(payload: dict, total_lines: int) -> list[LLMSegment]:
     return deduped
 
 
+@dataclass
+class TitledSegment:
+    segment_id: str
+    text: str
+    title: str
+
+
 def _slice_segments(
     boundaries: list[LLMSegment], lines: list[str], doc_id: str
-) -> list[DataSegment]:
-    out: list[DataSegment] = []
+) -> list[TitledSegment]:
+    out: list[TitledSegment] = []
     for idx, b in enumerate(boundaries):
         start = b.start_line - 1
         end = boundaries[idx + 1].start_line - 1 if idx + 1 < len(boundaries) else len(lines)
@@ -124,29 +129,33 @@ def _slice_segments(
         if not chunk:
             continue
         seg_id = f"{doc_id}_l{b.start_line}"
-        out.append(DataSegment(segment_id=seg_id, text=chunk))
+        out.append(TitledSegment(segment_id=seg_id, text=chunk, title=b.title))
     return out
 
 
-def _merge_short(segments: list[DataSegment], min_words: int) -> list[DataSegment]:
+def _merge_short(
+    segments: list[TitledSegment], min_words: int
+) -> list[TitledSegment]:
     if len(segments) <= 1:
         return segments
-    merged: list[DataSegment] = []
+    merged: list[TitledSegment] = []
     for seg in segments:
         if merged and len(merged[-1].text.split()) < min_words:
             prev = merged[-1]
-            merged[-1] = DataSegment(
+            merged[-1] = TitledSegment(
                 segment_id=prev.segment_id,
                 text=prev.text + "\n\n" + seg.text,
+                title=prev.title,
             )
         else:
             merged.append(seg)
     while len(merged) >= 2 and len(merged[-1].text.split()) < min_words:
         tail = merged.pop()
         prev = merged[-1]
-        merged[-1] = DataSegment(
+        merged[-1] = TitledSegment(
             segment_id=prev.segment_id,
             text=prev.text + "\n\n" + tail.text,
+            title=prev.title,
         )
     return merged
 
@@ -156,11 +165,12 @@ def segment_by_llm(
     doc_id: str,
     model: str = "gemini/gemini-2.5-flash-lite",
     min_words: int = 50,
-) -> tuple[list[DataSegment], list[LLMSegment]]:
+) -> list[TitledSegment]:
     """Segment a document via LLM-chosen boundaries.
 
-    Returns (segments, raw_boundaries) so callers can show the model's
-    proposed titles alongside the resulting slices.
+    Returns titled segments sliced from the original text. The model
+    never emits segment text; it only picks boundary line numbers and
+    titles.
     """
     numbered, lines = _number_lines(text)
     llm = LLM(usage_id="segmenter", model=model, temperature=0.0)
@@ -177,5 +187,4 @@ def segment_by_llm(
     payload = _extract_json(raw)
     boundaries = _parse_boundaries(payload, total_lines=len(lines))
     segments = _slice_segments(boundaries, lines, doc_id)
-    segments = _merge_short(segments, min_words=min_words)
-    return segments, boundaries
+    return _merge_short(segments, min_words=min_words)

@@ -263,21 +263,56 @@ class EnqueueResult:
     skipped_segments: int
 
 
+def add_document(
+    conn: sqlite3.Connection,
+    filename: str,
+    content: bytes,
+) -> int:
+    """Insert a source document, returning its rowid."""
+    cur = conn.execute(
+        "INSERT INTO documents (filename, content, created_at) VALUES (?, ?, ?)",
+        (filename, content, _now()),
+    )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
 def enqueue_segments(
     conn: sqlite3.Connection,
-    segments: Iterable[tuple[str, str]],
+    segments: Iterable[
+        tuple[str, str]
+        | tuple[str, str, str | None, int | None]
+        | tuple[str, str, str | None, int | None, int | None]
+    ],
     batch: int | None = None,
 ) -> EnqueueResult:
-    """Insert segments. Idempotent on segment_id. No coder_runs created."""
+    """Insert segments. Idempotent on segment_id. No coder_runs created.
+
+    Each segment is one of:
+        (segment_id, text)
+        (segment_id, text, title, document_id)
+        (segment_id, text, title, document_id, position)
+
+    Missing trailing fields default to NULL.
+    """
     inserted = 0
     skipped = 0
     try:
         conn.execute("BEGIN")
-        for segment_id, text in segments:
+        for entry in segments:
+            if len(entry) == 2:
+                segment_id, text = entry
+                title, document_id, position = None, None, None
+            elif len(entry) == 4:
+                segment_id, text, title, document_id = entry
+                position = None
+            else:
+                segment_id, text, title, document_id, position = entry
             cur = conn.execute(
-                "INSERT OR IGNORE INTO segments (segment_id, text, batch, status) "
-                "VALUES (?, ?, ?, 'pending')",
-                (segment_id, text, batch),
+                "INSERT OR IGNORE INTO segments "
+                "(segment_id, text, title, document_id, position, batch, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (segment_id, text, title, document_id, position, batch),
             )
             if cur.rowcount == 0:
                 skipped += 1

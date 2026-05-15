@@ -35,13 +35,26 @@ CREATE TABLE IF NOT EXISTS coders (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS documents (
+    document_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename     TEXT NOT NULL,
+    content      BLOB NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_documents_filename ON documents(filename);
+
 CREATE TABLE IF NOT EXISTS segments (
-    segment_id  TEXT PRIMARY KEY,
-    text        TEXT NOT NULL,
-    batch       INTEGER,
-    status      TEXT NOT NULL DEFAULT 'pending'
+    segment_id   TEXT PRIMARY KEY,
+    text         TEXT NOT NULL,
+    title        TEXT,
+    document_id  INTEGER,
+    position     INTEGER,
+    batch        INTEGER,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    FOREIGN KEY (document_id) REFERENCES documents(document_id)
 );
 CREATE INDEX IF NOT EXISTS idx_segments_status ON segments(status);
+CREATE INDEX IF NOT EXISTS idx_segments_document ON segments(document_id);
 
 CREATE TABLE IF NOT EXISTS coder_runs (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
