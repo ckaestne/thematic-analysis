@@ -148,6 +148,15 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
     conn = store.connect(args.db)
     total_files = total_inserted = total_skipped = 0
     for path in paths:
+        existing_document_id = store.find_document_id_by_filename(conn, path.name)
+        if existing_document_id is not None:
+            total_skipped += 1
+            print(
+                f"[add-document] {path.name}: already exists "
+                f"(doc_id={existing_document_id}, skipped)"
+            )
+            continue
+
         doc = load_text_file(path)
         rows: list[tuple[str, str, str | None]]
         if args.segmentation == "llm":

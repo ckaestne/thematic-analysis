@@ -348,6 +348,28 @@ def test_cli_add_document_markdown(tmp_path: Path, capsys) -> None:
     assert "alpha.md" in out and "inserted=" in out
 
 
+def test_cli_add_document_skips_existing_filename(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "x.sqlite"
+    md = tmp_path / "alpha.md"
+    md.write_text(
+        ("This is a paragraph that has more than twenty words " * 5)
+        + "\n\n"
+        + ("Another paragraph that also clears the minimum word threshold " * 5)
+    )
+    assert cli.main(["--db", str(db), "init"]) == 0
+    assert cli.main(["--db", str(db), "add-document", str(md)]) == 0
+    capsys.readouterr()
+
+    rc = cli.main(["--db", str(db), "add-document", str(md)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already exists" in out
+
+    conn = store.connect(db)
+    n_docs = conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+    assert n_docs == 1
+
+
 def test_cli_add_document_missing_file(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
