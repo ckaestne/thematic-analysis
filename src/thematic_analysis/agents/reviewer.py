@@ -142,14 +142,8 @@ class ReviewerAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         """Get the system prompt for review."""
         if self.research_context and not self.research_context.is_empty():
-            research_section = (
-                "## Research Context\n"
-                f"{self.research_context.to_prompt_section()}\n\n"
-                "Use this context to judge whether a code is on-topic. Codes "
-                "that do not address the research focus should be SKIPped, "
-                "even if otherwise well-formed.\n\n"
-            )
-            return research_section + REVIEWER_SYSTEM_PROMPT
+            section = self.research_context.to_prompt_section(role="reviewer")
+            return section + "\n\n" + REVIEWER_SYSTEM_PROMPT
         return REVIEWER_SYSTEM_PROMPT
 
     def _format_quotes_section(self, quotes: list[Quote]) -> str:

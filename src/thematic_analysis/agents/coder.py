@@ -170,12 +170,11 @@ analytical rigor and staying grounded in the text."""
         # Add research context if available
         research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            research_section = f"""
-## Research Context
-{self.research_context.to_prompt_section()}
-
-Use this research context to inform your coding decisions. Codes should be
-responsive to the research questions and aligned with the theoretical framework."""
+            research_section = (
+                "\n"
+                + self.research_context.to_prompt_section(role="coder")
+                + "\n"
+            )
 
         # Use custom prompts if provided (Issue #38), otherwise use default
         base_prompt = CODER_SYSTEM_PROMPT

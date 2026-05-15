@@ -1,130 +1,63 @@
-"""Research Context for Qualitative Analysis.
+"""Research context for qualitative analysis.
 
-Implements research context management for thematic analysis as described
-in Naeem et al. (2025). Agents should be familiarized with research context
-before coding, including:
-- Research aim and questions
-- Theoretical framework
-- Methodology and philosophical underpinnings
-- Keyword selection criteria (6 Rs framework)
+A research context is a single freeform statement that names the research
+focus and (typically) the research question(s) driving the analysis. It is
+intentionally unstructured: research questions in inductive thematic
+analysis are often plural and evolve through coding, so forcing them into
+fixed slots distorts the practice.
 
-Based on: Naeem, M., Smith, T., & Thomas, L. (2025). Thematic Analysis and
-Artificial Intelligence: A Step-by-Step Process for Using ChatGPT in
-Thematic Analysis. International Journal of Qualitative Methods, 24, 1-18.
+The context can optionally carry per-agent *tailored prompts* — LLM-derived
+prompt sections that translate the freeform description into a brief
+oriented at one specific agent's job (coder, theme coder, etc.). When
+present they are used in place of the raw description; otherwise the
+description is injected verbatim.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 
 
-class ResearchParadigm(Enum):
-    """Research paradigms/philosophies for qualitative research."""
-
-    INTERPRETIVIST = "interpretivist"
-    CONSTRUCTIVIST = "constructivist"
-    CRITICAL = "critical"
-    PRAGMATIC = "pragmatic"
-    POSITIVIST = "positivist"
-    PHENOMENOLOGICAL = "phenomenological"
-
-
-class TheoreticalFramework(Enum):
-    """Common theoretical frameworks in qualitative research."""
-
-    GROUNDED_THEORY = "grounded_theory"
-    PHENOMENOLOGY = "phenomenology"
-    ETHNOGRAPHY = "ethnography"
-    NARRATIVE = "narrative"
-    CASE_STUDY = "case_study"
-    THEMATIC_ANALYSIS = "thematic_analysis"
-    CONTENT_ANALYSIS = "content_analysis"
-    DISCOURSE_ANALYSIS = "discourse_analysis"
+AGENT_ROLES: tuple[str, ...] = (
+    "coder",
+    "theme_coder",
+    "reviewer",
+    "theme_aggregator",
+)
 
 
 @dataclass
 class ResearchContext:
-    """Research context for guiding thematic analysis.
-
-    Captures the essential elements that should inform coding decisions:
-    - Research aim and questions
-    - Theoretical framework and philosophy
-    - Methodological approach
-    - Domain-specific background
+    """Freeform research context, optionally with per-role tailored prompts.
 
     Attributes:
-        title: Title of the research study.
-        aim: Primary aim or purpose of the research.
-        research_questions: List of specific research questions.
-        theoretical_framework: The theoretical lens guiding analysis.
-        paradigm: Philosophical paradigm (interpretivist, critical, etc.).
-        methodology: Methodological approach being used.
-        domain: The subject domain (e.g., climate change, healthcare).
-        background: Additional background context for the study.
-        keywords: Key terms or concepts relevant to the research.
+        description: Freeform prose describing the research context and
+            research question(s). This is what the user types.
+        tailored_prompts: Optional dict mapping agent role (see
+            ``AGENT_ROLES``) to a tailored prompt section generated from
+            ``description``. Stale on description change; cleared by the
+            storage layer when the description is updated.
     """
 
-    title: str = ""
-    aim: str = ""
-    research_questions: list[str] = field(default_factory=list)
-    theoretical_framework: str = ""
-    paradigm: str = ""
-    methodology: str = "thematic_analysis"
-    domain: str = ""
-    background: str = ""
-    keywords: list[str] = field(default_factory=list)
+    description: str = ""
+    tailored_prompts: dict[str, str] = field(default_factory=dict)
 
-    def to_prompt_section(self) -> str:
-        """Convert research context to a formatted prompt section.
+    def to_prompt_section(self, role: str | None = None) -> str:
+        """Return the prompt section to inject into an agent's system prompt.
 
-        Returns:
-            Formatted string for inclusion in agent prompts.
+        If a tailored prompt exists for ``role``, return it as-is — it is
+        already a fully-formed section authored for that role. Otherwise
+        fall back to the raw description wrapped in a generic header so the
+        system stays usable before tailored prompts have been generated.
         """
-        sections = []
-
-        if self.title:
-            sections.append(f"## Research Study: {self.title}")
-
-        if self.aim:
-            sections.append(f"### Research Aim\n{self.aim}")
-
-        if self.research_questions:
-            rq_list = "\n".join(
-                f"{i + 1}. {q}" for i, q in enumerate(self.research_questions)
-            )
-            sections.append(f"### Research Questions\n{rq_list}")
-
-        if self.theoretical_framework:
-            sections.append(f"### Theoretical Framework\n{self.theoretical_framework}")
-
-        if self.paradigm:
-            sections.append(f"### Research Paradigm\n{self.paradigm}")
-
-        if self.domain:
-            sections.append(f"### Domain Context\n{self.domain}")
-
-        if self.background:
-            sections.append(f"### Background\n{self.background}")
-
-        if self.keywords:
-            kw_list = ", ".join(self.keywords)
-            sections.append(f"### Key Concepts\n{kw_list}")
-
-        return "\n\n".join(sections) if sections else ""
+        if role is not None:
+            tailored = self.tailored_prompts.get(role)
+            if tailored:
+                return tailored.strip()
+        if not self.description.strip():
+            return ""
+        return f"## Research Context\n{self.description.strip()}"
 
     def is_empty(self) -> bool:
-        """Check if the context is essentially empty."""
-        return not any(
-            [
-                self.title,
-                self.aim,
-                self.research_questions,
-                self.theoretical_framework,
-                self.paradigm,
-                self.domain,
-                self.background,
-                self.keywords,
-            ]
-        )
+        return not self.description.strip()
 
 
 # The 6 Rs Framework for Keyword and Code Selection (Naeem et al. 2025)
@@ -217,23 +150,27 @@ def create_methodology_prompt(
     include_6rs_codes: bool = True,
     include_theme_guidance: bool = False,
     include_conceptualization: bool = False,
+    role: str | None = None,
 ) -> str:
-    """Create a comprehensive methodology prompt section.
+    """Create a methodology prompt section.
 
     Args:
-        research_context: The research context to include.
+        research_context: Optional research context to include first.
         include_6rs_keywords: Include keyword selection 6Rs.
         include_6rs_codes: Include code quality 6Rs.
         include_theme_guidance: Include theme development guidance.
         include_conceptualization: Include conceptualization guidance.
+        role: Optional agent role; selects a tailored prompt when present.
 
     Returns:
-        Formatted prompt section with methodology guidance.
+        Formatted prompt section.
     """
-    sections = []
+    sections: list[str] = []
 
-    if research_context and not research_context.is_empty():
-        sections.append(research_context.to_prompt_section())
+    if research_context is not None and not research_context.is_empty():
+        section = research_context.to_prompt_section(role=role)
+        if section:
+            sections.append(section)
 
     if include_6rs_keywords:
         sections.append(KEYWORD_6RS.strip())
@@ -248,110 +185,3 @@ def create_methodology_prompt(
         sections.append(CONCEPTUALIZATION_GUIDANCE.strip())
 
     return "\n\n".join(sections)
-
-
-# Predefined research contexts for common domains
-
-
-def create_climate_research_context(
-    research_questions: list[str] | None = None,
-) -> ResearchContext:
-    """Create a research context for climate change studies.
-
-    Args:
-        research_questions: Specific research questions to include.
-
-    Returns:
-        ResearchContext configured for climate research.
-    """
-    return ResearchContext(
-        title="Climate Change Perceptions Study",
-        aim=(
-            "To understand public perceptions, attitudes, and emotional "
-            "responses to climate change and their implications for "
-            "climate communication and policy"
-        ),
-        research_questions=research_questions
-        or [
-            "How do people perceive and make sense of climate change?",
-            "What emotional responses does climate change evoke?",
-            "How do perceptions vary across different demographic groups?",
-            "What factors influence attitudes toward climate action?",
-        ],
-        theoretical_framework=(
-            "Social constructionism - understanding how people construct "
-            "meaning around climate change through social interaction and "
-            "cultural context"
-        ),
-        paradigm="interpretivist",
-        methodology="thematic_analysis",
-        domain="Climate change, environmental psychology, public opinion",
-        background=(
-            "Climate change is one of the most significant challenges facing "
-            "humanity. Understanding how people perceive and respond to this "
-            "issue is crucial for effective communication and policy-making."
-        ),
-        keywords=[
-            "climate change",
-            "global warming",
-            "environment",
-            "sustainability",
-            "anxiety",
-            "hope",
-            "action",
-            "policy",
-            "future",
-            "responsibility",
-        ],
-    )
-
-
-def create_healthcare_research_context(
-    research_questions: list[str] | None = None,
-) -> ResearchContext:
-    """Create a research context for healthcare studies.
-
-    Args:
-        research_questions: Specific research questions to include.
-
-    Returns:
-        ResearchContext configured for healthcare research.
-    """
-    return ResearchContext(
-        title="Healthcare Experience Study",
-        aim=(
-            "To understand patient experiences, perspectives, and needs "
-            "in healthcare settings to inform patient-centered care"
-        ),
-        research_questions=research_questions
-        or [
-            "How do patients experience healthcare services?",
-            "What factors influence patient satisfaction?",
-            "How do patients navigate the healthcare system?",
-            "What are patients' unmet needs?",
-        ],
-        theoretical_framework=(
-            "Patient-centered care framework - focusing on the individual "
-            "patient's experience, values, and preferences in healthcare"
-        ),
-        paradigm="phenomenological",
-        methodology="thematic_analysis",
-        domain="Healthcare, patient experience, medical sociology",
-        background=(
-            "Understanding patient experiences is essential for improving "
-            "healthcare quality and outcomes. Qualitative research provides "
-            "insights into the lived experiences of patients."
-        ),
-        keywords=[
-            "patient",
-            "care",
-            "experience",
-            "treatment",
-            "communication",
-            "support",
-            "access",
-            "quality",
-            "satisfaction",
-            "needs",
-        ],
-    )

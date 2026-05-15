@@ -201,13 +201,11 @@ while staying grounded in the data."""
         # Add research context for theory-aligned theme development
         research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            research_section = f"""
-## Research Context
-{self.research_context.to_prompt_section()}
-
-Develop themes that address the research questions and align with the theoretical
-framework. Themes should tell a coherent story that advances understanding of the
-research topic."""
+            research_section = (
+                "\n"
+                + self.research_context.to_prompt_section(role="theme_coder")
+                + "\n"
+            )
 
         prompt = THEME_CODER_SYSTEM_PROMPT.format(identity_section=identity_section)
 

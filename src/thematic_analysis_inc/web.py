@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from thematic_analysis.research_context import ResearchContext
+from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
 from thematic_analysis_inc import store
 
 
@@ -55,15 +55,8 @@ def _conn() -> sqlite3.Connection:
 
 
 class ResearchContextIn(BaseModel):
-    title: str = ""
-    aim: str = ""
-    research_questions: list[str] = Field(default_factory=list)
-    theoretical_framework: str = ""
-    paradigm: str = ""
-    methodology: str = "thematic_analysis"
-    domain: str = ""
-    background: str = ""
-    keywords: list[str] = Field(default_factory=list)
+    description: str = ""
+    tailored_prompts: dict[str, str] = Field(default_factory=dict)
 
 
 class CoderIn(BaseModel):
@@ -206,36 +199,41 @@ def create_app(db_path: str | Path) -> FastAPI:
             if ctx is None:
                 return None
             return {
-                "title": ctx.title,
-                "aim": ctx.aim,
-                "research_questions": list(ctx.research_questions),
-                "theoretical_framework": ctx.theoretical_framework,
-                "paradigm": ctx.paradigm,
-                "methodology": ctx.methodology,
-                "domain": ctx.domain,
-                "background": ctx.background,
-                "keywords": list(ctx.keywords),
+                "description": ctx.description,
+                "tailored_prompts": dict(ctx.tailored_prompts),
+                "roles": list(AGENT_ROLES),
             }
         finally:
             conn.close()
 
     @app.put("/api/research-context")
-    def put_research_context(body: ResearchContextIn) -> dict[str, str]:
+    def put_research_context(body: ResearchContextIn) -> dict[str, Any]:
         conn = _conn()
         try:
+            existing = store.get_research_context(conn)
+            tailored = dict(body.tailored_prompts)
+            # If the description changed, drop stored tailored prompts so
+            # they cannot drift out of sync. The user (or the regenerate
+            # endpoint) supplies new ones.
+            if existing is not None and existing.description != body.description:
+                tailored = {
+                    k: v
+                    for k, v in tailored.items()
+                    if k in existing.tailored_prompts
+                    and v == existing.tailored_prompts[k]
+                }
             ctx = ResearchContext(
-                title=body.title,
-                aim=body.aim,
-                research_questions=list(body.research_questions),
-                theoretical_framework=body.theoretical_framework,
-                paradigm=body.paradigm,
-                methodology=body.methodology or "thematic_analysis",
-                domain=body.domain,
-                background=body.background,
-                keywords=list(body.keywords),
+                description=body.description,
+                tailored_prompts={
+                    k: v for k, v in tailored.items() if k in AGENT_ROLES and v
+                },
             )
             store.set_research_context(conn, ctx)
-            return {"status": "ok"}
+            return {
+                "status": "ok",
+                "description": ctx.description,
+                "tailored_prompts": dict(ctx.tailored_prompts),
+            }
         finally:
             conn.close()
 
@@ -244,6 +242,37 @@ def create_app(db_path: str | Path) -> FastAPI:
         conn = _conn()
         try:
             return {"removed": store.clear_research_context(conn)}
+        finally:
+            conn.close()
+
+    @app.post("/api/research-context/regenerate-prompts")
+    def regenerate_tailored_prompts() -> dict[str, Any]:
+        """Generate a tailored prompt section for every agent role from the
+        currently stored research-context description, persist them, and
+        return the new map."""
+        from thematic_analysis.research_context_tailor import (
+            generate_all_tailored_prompts,
+        )
+
+        conn = _conn()
+        try:
+            ctx = store.get_research_context(conn)
+            if ctx is None or ctx.is_empty():
+                raise HTTPException(
+                    status_code=400,
+                    detail="no research context description set",
+                )
+            prompts = generate_all_tailored_prompts(ctx.description)
+            new_ctx = ResearchContext(
+                description=ctx.description,
+                tailored_prompts=prompts,
+            )
+            store.set_research_context(conn, new_ctx)
+            return {
+                "description": new_ctx.description,
+                "tailored_prompts": dict(new_ctx.tailored_prompts),
+                "roles": list(AGENT_ROLES),
+            }
         finally:
             conn.close()
 

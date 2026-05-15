@@ -48,15 +48,9 @@ export type Status = {
 };
 
 export type ResearchContext = {
-  title: string;
-  aim: string;
-  research_questions: string[];
-  theoretical_framework: string;
-  paradigm: string;
-  methodology: string;
-  domain: string;
-  background: string;
-  keywords: string[];
+  description: string;
+  tailored_prompts: Record<string, string>;
+  roles?: string[];
 };
 
 export type Segment = {
@@ -240,11 +234,24 @@ export const api = {
 
   researchContext: () =>
     jsonFetch<ResearchContext | null>("/api/research-context"),
-  putResearchContext: (body: ResearchContext) =>
-    jsonFetch<{ status: string }>("/api/research-context", {
+  putResearchContext: (body: {
+    description: string;
+    tailored_prompts: Record<string, string>;
+  }) =>
+    jsonFetch<{
+      status: string;
+      description: string;
+      tailored_prompts: Record<string, string>;
+    }>("/api/research-context", {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  regenerateTailoredPrompts: () =>
+    jsonFetch<{
+      description: string;
+      tailored_prompts: Record<string, string>;
+      roles: string[];
+    }>("/api/research-context/regenerate-prompts", { method: "POST" }),
 
   segments: (params: {
     status?: string;

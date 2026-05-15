@@ -8,63 +8,54 @@ a singleton row keyed `id = 1` in the `research_context` table.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from thematic_analysis.research_context import ResearchContext
+from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
 from thematic_analysis_inc import store
 
 
-def _load_from_file(path: Path) -> ResearchContext:
-    raw = path.read_text(encoding="utf-8")
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("research-context file must contain a JSON object")
-    return ResearchContext(
-        title=data.get("title", ""),
-        aim=data.get("aim", ""),
-        research_questions=list(data.get("research_questions", [])),
-        theoretical_framework=data.get("theoretical_framework", ""),
-        paradigm=data.get("paradigm", ""),
-        methodology=data.get("methodology", "thematic_analysis"),
-        domain=data.get("domain", ""),
-        background=data.get("background", ""),
-        keywords=list(data.get("keywords", [])),
-    )
-
-
-def _ctx_from_args(args: argparse.Namespace) -> ResearchContext:
-    if args.file:
-        return _load_from_file(Path(args.file))
-    rqs = list(args.research_question or [])
-    kws = list(args.keyword or [])
-    ctx = ResearchContext(
-        title=args.title or "",
-        aim=args.aim or "",
-        research_questions=rqs,
-        theoretical_framework=args.theoretical_framework or "",
-        paradigm=args.paradigm or "",
-        methodology=args.methodology or "thematic_analysis",
-        domain=args.domain or "",
-        background=args.background or "",
-        keywords=kws,
-    )
-    return ctx
+def _load_description(args: argparse.Namespace) -> str:
+    if args.description_file:
+        return Path(args.description_file).read_text(encoding="utf-8")
+    if args.description is not None:
+        return args.description
+    return ""
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    conn = store.connect(args.db)
-    ctx = _ctx_from_args(args)
-    if ctx.is_empty():
+    description = _load_description(args).strip()
+    if not description:
         print(
             "refusing to set an empty research context; "
-            "provide --aim/--research-question/... or --file",
+            "provide --description or --description-file",
             file=sys.stderr,
         )
         return 1
+
+    conn = store.connect(args.db)
+    existing = store.get_research_context(conn)
+    # Preserve tailored prompts only if description is unchanged.
+    if existing is not None and existing.description == description:
+        tailored = dict(existing.tailored_prompts)
+    else:
+        tailored = {}
+    ctx = ResearchContext(description=description, tailored_prompts=tailored)
     store.set_research_context(conn, ctx)
     print("research context saved")
+
+    if args.regenerate_prompts:
+        from thematic_analysis.research_context_tailor import (
+            generate_all_tailored_prompts,
+        )
+
+        print(f"generating tailored prompts for: {', '.join(AGENT_ROLES)} ...")
+        prompts = generate_all_tailored_prompts(description)
+        store.set_research_context(
+            conn,
+            ResearchContext(description=description, tailored_prompts=prompts),
+        )
+        print(f"tailored prompts saved ({len(prompts)} roles)")
     return 0
 
 
@@ -74,8 +65,16 @@ def cmd_show(args: argparse.Namespace) -> int:
     if ctx is None:
         print("(no research context set)")
         return 0
-    section = ctx.to_prompt_section()
-    print(section if section else "(empty research context)")
+    print("# Description")
+    print(ctx.description.strip() or "(empty)")
+    if ctx.tailored_prompts:
+        for role in AGENT_ROLES:
+            section = ctx.tailored_prompts.get(role)
+            if not section:
+                continue
+            print()
+            print(f"# Tailored prompt — {role}")
+            print(section.strip())
     return 0
 
 
@@ -92,35 +91,26 @@ def register(sub: argparse._SubParsersAction) -> None:
         "set-research-context",
         help="store the research context used by Stage 1 + Stage 2 prompts",
     )
-    p_set.add_argument("--title", default=None)
-    p_set.add_argument("--aim", default=None, help="primary research aim")
     p_set.add_argument(
-        "--research-question",
-        action="append",
+        "--description",
         default=None,
-        help="research question (repeatable)",
-    )
-    p_set.add_argument("--theoretical-framework", default=None)
-    p_set.add_argument("--paradigm", default=None)
-    p_set.add_argument("--methodology", default=None)
-    p_set.add_argument("--domain", default=None)
-    p_set.add_argument("--background", default=None)
-    p_set.add_argument(
-        "--keyword",
-        action="append",
-        default=None,
-        help="key concept (repeatable)",
+        help="freeform research context + research question(s) as a single string",
     )
     p_set.add_argument(
-        "--file",
+        "--description-file",
         default=None,
-        help="path to a JSON file with the ResearchContext fields (overrides flags)",
+        help="path to a text file containing the research context description",
+    )
+    p_set.add_argument(
+        "--regenerate-prompts",
+        action="store_true",
+        help="after saving, call the LLM to generate per-agent tailored prompts",
     )
     p_set.set_defaults(func=cmd_set)
 
     p_show = sub.add_parser(
         "show-research-context",
-        help="print the stored research context as it appears in prompts",
+        help="print the stored research context",
     )
     p_show.set_defaults(func=cmd_show)
 

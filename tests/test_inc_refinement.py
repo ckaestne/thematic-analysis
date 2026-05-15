@@ -120,9 +120,11 @@ class TestCritic:
     def test_critic_system_prompt_includes_research_context(self):
         llm, calls = _fake_llm(["critique"])
         ctx = ResearchContext(
-            title="Climate skepticism",
-            aim="understand rhetorical strategies of inaction",
-            research_questions=["What rhetorical moves justify inaction?"],
+            description=(
+                "Climate skepticism. Understand rhetorical strategies of "
+                "inaction. Research question: What rhetorical moves "
+                "justify inaction?"
+            ),
         )
         Critic(llm, research_context=ctx).critique("text", ["c"], ["r"])
         sys_prompt = calls[0].messages[0].content[0].text
@@ -270,7 +272,7 @@ class TestRefiningCoderAgent:
             config=CoderConfig(identity="feminist scholar"),
             codebook=codebook,
             research_context=ResearchContext(
-                title="t", aim="study gendered narratives"
+                description="Study of gendered narratives."
             ),
         )
         llm, calls = _fake_llm(
@@ -310,7 +312,7 @@ class TestRefiningCoderAgent:
         # Force critic creation now (before research context is set).
         _ = agent.critic
 
-        ctx = ResearchContext(title="Late context", aim="set after construction")
+        ctx = ResearchContext(description="Late context. Set after construction.")
         agent.research_context = ctx
         assert agent.critic.research_context is ctx
 
@@ -325,7 +327,7 @@ class TestRefiningCoderAgent:
             [_json_response(["c"], ["r"], [True]), "critique", _json_response(["c'"])]
         )
         agent = RefiningCoderAgent(_coder_with_llm(llm))
-        ctx = ResearchContext(title="Early context", aim="set before construction")
+        ctx = ResearchContext(description="Early context. Set before construction.")
         agent.research_context = ctx
         assert agent._critic is None  # still lazy
 
@@ -338,7 +340,7 @@ class TestRefiningCoderAgent:
         coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
 
-        ctx = ResearchContext(title="t", aim="a")
+        ctx = ResearchContext(description="A study.")
         agent.research_context = ctx
         assert coder.research_context is ctx
         assert agent.research_context is ctx
