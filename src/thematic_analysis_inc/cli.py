@@ -250,6 +250,12 @@ def _format_codes(assignment) -> str:
     return "\n".join(lines)
 
 
+def _print_prompt(label: str, prompt: str) -> None:
+    print(f"{label}:")
+    for line in (prompt or "").splitlines() or [""]:
+        print(f"  {line}")
+
+
 def _print_trace(segment_id: str, trace: dict) -> None:
     bar = "=" * 72
     sub = "-" * 72
@@ -263,6 +269,14 @@ def _print_trace(segment_id: str, trace: dict) -> None:
     print(bar)
     print("Segment:")
     print(f"  {snippet}")
+    coder_system_prompt = trace.get("coder_system_prompt")
+    coder_user_prompt = trace.get("coder_user_prompt")
+    if coder_system_prompt is not None:
+        print(sub)
+        _print_prompt("Coder system prompt", coder_system_prompt)
+    if coder_user_prompt is not None:
+        print(sub)
+        _print_prompt("Coder user prompt", coder_user_prompt)
     print(sub)
     print("First-pass codes (coder):")
     print(_format_codes(trace.get("first")))
@@ -271,9 +285,21 @@ def _print_trace(segment_id: str, trace: dict) -> None:
     if critique is None:
         print("Critique: (skipped — first pass produced no codes)")
     else:
+        critic_system_prompt = trace.get("critic_system_prompt")
+        critic_user_prompt = trace.get("critic_user_prompt")
+        if critic_system_prompt is not None:
+            _print_prompt("Critic system prompt", critic_system_prompt)
+            print(sub)
+        if critic_user_prompt is not None:
+            _print_prompt("Critic user prompt", critic_user_prompt)
+            print(sub)
         print("Critique (challenger):")
         for line in critique.strip().splitlines() or [""]:
             print(f"  {line}")
+        refinement_user_prompt = trace.get("refinement_user_prompt")
+        if refinement_user_prompt is not None:
+            print(sub)
+            _print_prompt("Refinement user prompt", refinement_user_prompt)
     print(sub)
     print("Refined codes (coder after critique):")
     print(_format_codes(trace.get("refined") or trace.get("first")))
@@ -622,7 +648,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_code.add_argument(
         "--verbose",
         action="store_true",
-        help="print the first-pass codes, critique, and refined codes for each segment",
+        help="print the system/user prompts, first-pass codes, critique, and refined codes for each segment",
     )
     p_code.set_defaults(func=_cmd_code)
 
