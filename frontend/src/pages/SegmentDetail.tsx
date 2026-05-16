@@ -262,9 +262,19 @@ export function SegmentDetail() {
                 </Alert>
               )}
               {run.codes.length === 0 ? (
-                <Text size="sm" c="dimmed">
-                  No codes produced (out of scope, or still running).
-                </Text>
+                run.status === "done" ? (
+                  <Text size="sm" c="dimmed">
+                    Coder produced no codes for this segment (e.g. out of scope).
+                  </Text>
+                ) : run.status === "running" ? (
+                  <Text size="sm" c="dimmed">
+                    Coding in progress — no codes recorded yet.
+                  </Text>
+                ) : run.status === "failed" ? null : (
+                  <Text size="sm" c="dimmed">
+                    No codes recorded.
+                  </Text>
+                )
               ) : (
                 <Table verticalSpacing={4}>
                   <Table.Thead>
