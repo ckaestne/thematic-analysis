@@ -41,6 +41,32 @@ except ImportError:
 from thematic_analysis_inc import research_context_cli, store, workers  # noqa: E402
 
 
+def _make_progress(label: str):
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    return Progress(
+        TextColumn(label),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("elapsed"),
+        TimeElapsedColumn(),
+        TextColumn("eta"),
+        TimeRemainingColumn(),
+        console=Console(stderr=True),
+        transient=False,
+    )
+
+
 # init ------------------------------------------------------------------------
 
 
@@ -147,51 +173,55 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
 
     conn = store.connect(args.db)
     total_files = total_inserted = total_skipped = 0
-    for path in paths:
-        doc = load_text_file(path)
-        rows: list[tuple[str, str, str | None]]
-        if args.segmentation == "llm":
-            from thematic_analysis_inc.segmenter_llm import segment_by_llm
+    with _make_progress("[add-document]") as prog:
+        task = prog.add_task("", total=len(paths))
+        for path in paths:
+            doc = load_text_file(path)
+            rows: list[tuple[str, str, str | None]]
+            if args.segmentation == "llm":
+                from thematic_analysis_inc.segmenter_llm import segment_by_llm
 
-            titled = segment_by_llm(
-                doc.text,
-                doc_id=path.stem,
-                model=args.model,
-                min_words=args.min_words,
-            )
-            rows = [(s.segment_id, s.text, s.title) for s in titled]
-        else:
-            segments = doc.segment(
-                method=args.segmentation,
-                min_words=args.min_words,
-                max_words=args.max_words,
-            )
-            rows = [(s.segment_id, s.text, None) for s in segments]
+                titled = segment_by_llm(
+                    doc.text,
+                    doc_id=path.stem,
+                    model=args.model,
+                    min_words=args.min_words,
+                )
+                rows = [(s.segment_id, s.text, s.title) for s in titled]
+            else:
+                segments = doc.segment(
+                    method=args.segmentation,
+                    min_words=args.min_words,
+                    max_words=args.max_words,
+                )
+                rows = [(s.segment_id, s.text, None) for s in segments]
 
-        if not rows:
+            if not rows:
+                print(
+                    f"[add-document] {path.name}: 0 segments (skipped)",
+                    file=sys.stderr,
+                )
+                prog.advance(task)
+                continue
+
+            document_id = store.add_document(
+                conn, filename=path.name, content=path.read_bytes()
+            )
+            enqueue_rows = [
+                (sid, txt, title, document_id, i)
+                for i, (sid, txt, title) in enumerate(rows)
+            ]
+            result = store.enqueue_segments(conn, enqueue_rows, batch=args.batch)
+            total_files += 1
+            total_inserted += result.inserted_segments
+            total_skipped += result.skipped_segments
             print(
-                f"[add-document] {path.name}: 0 segments (skipped)",
-                file=sys.stderr,
+                f"[add-document] {path.name}: doc_id={document_id} "
+                f"segments={len(rows)} "
+                f"inserted={result.inserted_segments} "
+                f"skipped={result.skipped_segments}"
             )
-            continue
-
-        document_id = store.add_document(
-            conn, filename=path.name, content=path.read_bytes()
-        )
-        enqueue_rows = [
-            (sid, txt, title, document_id, i)
-            for i, (sid, txt, title) in enumerate(rows)
-        ]
-        result = store.enqueue_segments(conn, enqueue_rows, batch=args.batch)
-        total_files += 1
-        total_inserted += result.inserted_segments
-        total_skipped += result.skipped_segments
-        print(
-            f"[add-document] {path.name}: doc_id={document_id} "
-            f"segments={len(rows)} "
-            f"inserted={result.inserted_segments} "
-            f"skipped={result.skipped_segments}"
-        )
+            prog.advance(task)
     print(
         f"done: {total_files} file(s), inserted={total_inserted} "
         f"skipped={total_skipped}"
@@ -238,38 +268,45 @@ def _cmd_code(args: argparse.Namespace) -> int:
     if todo == 0:
         return 0
 
-    def on_event(res: dict, c: dict) -> None:
-        n = c["done"] + c["failed"]
-        if res["ok"]:
-            print(
-                f"[code] {res['segment_id']} coder={res['coder_id']} "
-                f"codes={res['n_codes']} v={res['version']} "
-                f"({n}/{todo} ok={c['done']} failed={c['failed']} "
-                f"{res['elapsed']:.1f}s)"
+    bar_total = min(todo, args.limit) if args.limit else todo
+    with _make_progress(f"[code] coder={args.coder_id}") as prog:
+        task = prog.add_task("", total=bar_total)
+
+        def on_event(res: dict, c: dict) -> None:
+            n = c["done"] + c["failed"]
+            if res["ok"]:
+                print(
+                    f"[code] {res['segment_id']} coder={res['coder_id']} "
+                    f"codes={res['n_codes']} v={res['version']} "
+                    f"({n}/{todo} ok={c['done']} failed={c['failed']} "
+                    f"{res['elapsed']:.1f}s)"
+                )
+            else:
+                print(
+                    f"[code] {res['segment_id']} coder={res['coder_id']} "
+                    f"FAILED v={res['version']}: {res['error']}",
+                    file=sys.stderr,
+                )
+            prog.advance(task)
+
+        async def _run() -> dict:
+            # Each segment fires up to 3 concurrent LLM calls via the refining
+            # coder; size the thread pool so workers aren't blocked queueing on it.
+            from concurrent.futures import ThreadPoolExecutor
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
             )
-        else:
-            print(
-                f"[code] {res['segment_id']} coder={res['coder_id']} "
-                f"FAILED v={res['version']}: {res['error']}",
-                file=sys.stderr,
+            return await workers.drain_code_async(
+                conn,
+                args.coder_id,
+                workers=n_workers,
+                limit=args.limit,
+                use_mock_embeddings=args.mock_embeddings,
+                on_event=on_event,
             )
 
-    async def _run() -> dict:
-        # Each segment fires up to 3 concurrent LLM calls via the refining
-        # coder; size the thread pool so workers aren't blocked queueing on it.
-        from concurrent.futures import ThreadPoolExecutor
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=max(8, n_workers * 3)))
-        return await workers.drain_code_async(
-            conn,
-            args.coder_id,
-            workers=n_workers,
-            limit=args.limit,
-            use_mock_embeddings=args.mock_embeddings,
-            on_event=on_event,
-        )
-
-    counters = asyncio.run(_run())
+        counters = asyncio.run(_run())
     print(f"[code] done: {counters['done']} ok, {counters['failed']} failed")
     return 0
 
