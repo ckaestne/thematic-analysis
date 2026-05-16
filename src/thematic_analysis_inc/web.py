@@ -565,7 +565,7 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.delete("/api/coder-runs/{run_id}")
     def delete_coder_run(run_id: int) -> dict[str, Any]:
         """Delete a single coder_run row (and its codes). The pipeline will
-        recreate it next time `ta-stage1 code <coder_id>` runs."""
+        recreate it next time `ta code <coder_id>` runs."""
         conn = _conn()
         try:
             row = conn.execute(

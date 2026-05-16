@@ -1,10 +1,15 @@
-"""Single-entry CLI for the incremental Stage 1 pipeline.
+"""Unified `ta` command-line interface.
 
-Subcommands:
-    init, add-coder, rm-coder, list-coders,
-    enqueue, add-document, code, status, export-codebook
-The remaining worker subcommands (aggregate, review, run) are added in
-later steps.
+Covers the full thematic-analysis pipeline:
+
+  * document utilities — `segment`, `add-document`, `enqueue`
+  * Stage 1 (codebook) — `init`, `add-coder`, `code`, `aggregate`,
+    `review`, `status`, `list-codebooks`, `show-codebook`, `export-codebook`
+  * Stage 2 (themes) — `add-theme-coder`, `theme-code`,
+    `theme-aggregate`, `theme-status`, `export-themes`,
+    `export-themes-html`
+  * shared — `set-research-context`, `show-research-context`,
+    `clear-research-context`
 """
 
 from __future__ import annotations
@@ -38,7 +43,17 @@ try:
 except ImportError:
     pass
 
-from thematic_analysis_inc import research_context_cli, store, workers  # noqa: E402
+from thematic_analysis_inc import (  # noqa: E402
+    cli_utils,
+    research_context_cli,
+    store,
+    workers,
+)
+from thematic_analysis_inc.html_report import (  # noqa: E402
+    render_themes_html_from_json,
+)
+
+log = logging.getLogger("ta")
 
 
 # init ------------------------------------------------------------------------
@@ -99,6 +114,8 @@ def _cmd_list_coders(args: argparse.Namespace) -> int:
 
 def _load_segments_file(path: str) -> list[tuple[str, str]]:
     p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
     raw = p.read_text(encoding="utf-8").strip()
     if not raw:
         return []
@@ -106,18 +123,32 @@ def _load_segments_file(path: str) -> list[tuple[str, str]]:
     if raw.startswith("["):
         items = json.loads(raw)
     else:
-        for line in raw.splitlines():
+        for lineno, line in enumerate(raw.splitlines(), 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 items.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"{p}: line {lineno}: invalid JSON ({e.msg})"
+                ) from e
     out: list[tuple[str, str]] = []
-    for it in items:
+    for i, it in enumerate(items):
         if isinstance(it, dict):
-            out.append((str(it["segment_id"]), str(it["text"])))
+            try:
+                out.append((str(it["segment_id"]), str(it["text"])))
+            except KeyError as e:
+                raise ValueError(
+                    f"{p}: entry #{i + 1} missing key {e}"
+                ) from e
         elif isinstance(it, list | tuple) and len(it) == 2:
             out.append((str(it[0]), str(it[1])))
         else:
-            raise ValueError(f"unrecognized segment entry: {it!r}")
+            raise ValueError(
+                f"{p}: entry #{i + 1} is not a [id, text] pair or "
+                f"{{segment_id, text}} object: {it!r}"
+            )
     return out
 
 
@@ -144,29 +175,49 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
         for p in missing:
             print(f"file not found: {p}", file=sys.stderr)
         return 1
+    dirs = [p for p in paths if p.is_dir()]
+    if dirs:
+        for p in dirs:
+            print(f"expected a file, got a directory: {p}", file=sys.stderr)
+        return 1
 
     conn = store.connect(args.db)
-    total_files = total_inserted = total_skipped = 0
+    total_files = total_inserted = total_skipped = total_errors = 0
     for path in paths:
-        doc = load_text_file(path)
+        try:
+            doc = load_text_file(path)
+        except Exception as e:  # noqa: BLE001
+            log.error("[add-document] %s: failed to load (%s)", path.name, e)
+            total_errors += 1
+            continue
         rows: list[tuple[str, str, str | None]]
-        if args.segmentation == "llm":
-            from thematic_analysis_inc.segmenter_llm import segment_by_llm
+        try:
+            if args.segmentation == "llm":
+                from thematic_analysis_inc.segmenter_llm import segment_by_llm
 
-            titled = segment_by_llm(
-                doc.text,
-                doc_id=path.stem,
-                model=args.model,
-                min_words=args.min_words,
+                titled = segment_by_llm(
+                    doc.text,
+                    doc_id=path.stem,
+                    model=args.model,
+                    min_words=args.min_words,
+                )
+                rows = [(s.segment_id, s.text, s.title) for s in titled]
+            else:
+                segments = doc.segment(
+                    method=args.segmentation,
+                    min_words=args.min_words,
+                    max_words=args.max_words,
+                )
+                rows = [(s.segment_id, s.text, None) for s in segments]
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "[add-document] %s: segmentation failed (%s: %s)",
+                path.name,
+                type(e).__name__,
+                e,
             )
-            rows = [(s.segment_id, s.text, s.title) for s in titled]
-        else:
-            segments = doc.segment(
-                method=args.segmentation,
-                min_words=args.min_words,
-                max_words=args.max_words,
-            )
-            rows = [(s.segment_id, s.text, None) for s in segments]
+            total_errors += 1
+            continue
 
         if not rows:
             print(
@@ -175,14 +226,24 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
             )
             continue
 
-        document_id = store.add_document(
-            conn, filename=path.name, content=path.read_bytes()
-        )
-        enqueue_rows = [
-            (sid, txt, title, document_id, i)
-            for i, (sid, txt, title) in enumerate(rows)
-        ]
-        result = store.enqueue_segments(conn, enqueue_rows, batch=args.batch)
+        try:
+            document_id = store.add_document(
+                conn, filename=path.name, content=path.read_bytes()
+            )
+            enqueue_rows = [
+                (sid, txt, title, document_id, i)
+                for i, (sid, txt, title) in enumerate(rows)
+            ]
+            result = store.enqueue_segments(conn, enqueue_rows, batch=args.batch)
+        except Exception as e:  # noqa: BLE001
+            log.error(
+                "[add-document] %s: store failure (%s: %s)",
+                path.name,
+                type(e).__name__,
+                e,
+            )
+            total_errors += 1
+            continue
         total_files += 1
         total_inserted += result.inserted_segments
         total_skipped += result.skipped_segments
@@ -192,11 +253,14 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
             f"inserted={result.inserted_segments} "
             f"skipped={result.skipped_segments}"
         )
-    print(
+    summary = (
         f"done: {total_files} file(s), inserted={total_inserted} "
         f"skipped={total_skipped}"
     )
-    return 0
+    if total_errors:
+        summary += f" errors={total_errors}"
+    print(summary)
+    return 1 if total_errors and total_files == 0 else 0
 
 
 # code ------------------------------------------------------------------------
@@ -294,7 +358,7 @@ def _cmd_code(args: argparse.Namespace) -> int:
     def on_event(res: dict, c: dict) -> None:
         n = c["done"] + c["failed"]
         if res["ok"]:
-            if args.verbose and res.get("trace") is not None:
+            if args.trace and res.get("trace") is not None:
                 _print_trace(res["segment_id"], res["trace"])
             print(
                 f"[code] {res['segment_id']} coder={res['coder_id']} "
@@ -495,12 +559,449 @@ def _cmd_show_codebook(args: argparse.Namespace) -> int:
     return 0
 
 
+# segment ---------------------------------------------------------------------
+
+
+def _cmd_segment(args: argparse.Namespace) -> int:
+    from thematic_analysis.loaders import load_document  # lazy
+
+    path = Path(args.file)
+    if not path.exists():
+        print(f"file not found: {path}", file=sys.stderr)
+        return 1
+
+    doc = load_document(path)
+
+    if args.method == "llm":
+        from thematic_analysis_inc.segmenter_llm import segment_by_llm
+
+        titled = segment_by_llm(
+            doc.text,
+            doc_id=path.stem,
+            model=args.model,
+            min_words=args.min_words,
+        )
+        rows: list[tuple[str, str, str]] = [
+            (s.segment_id, s.text, s.title) for s in titled
+        ]
+    else:
+        segments = doc.segment(
+            method=args.method,
+            min_words=args.min_words,
+            max_words=args.max_words,
+        )
+        rows = [(s.segment_id, s.text, "") for s in segments]
+
+    if not rows:
+        print("(no segments produced)", file=sys.stderr)
+        return 1
+
+    for i, (seg_id, text, title) in enumerate(rows, 1):
+        words = len(text.split())
+        suffix = f"  — {title}" if title else ""
+        print(f"── [{i}/{len(rows)}] {seg_id}  ({words} words){suffix}")
+        print(text)
+        print()
+
+    print(f"── {len(rows)} segment(s) from {path.name}", file=sys.stderr)
+    return 0
+
+
+# stage 2 — theme coders -------------------------------------------------------
+
+
+def _cmd_add_theme_coder(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    inserted = store.add_theme_coder(conn, args.theme_coder_id, args.identity)
+    if inserted:
+        print(
+            f"added theme_coder '{args.theme_coder_id}' "
+            f"(identity: {args.identity!r})"
+        )
+    else:
+        print(
+            f"theme_coder '{args.theme_coder_id}' already exists; not modified"
+        )
+    return 0
+
+
+def _cmd_rm_theme_coder(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    try:
+        removed, runs_deleted = store.remove_theme_coder(
+            conn, args.theme_coder_id, force=args.force
+        )
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        print(
+            "hint: pass --force to also drop their theme_coder_runs",
+            file=sys.stderr,
+        )
+        return 1
+    if removed:
+        suffix = f" (also dropped {runs_deleted} run(s))" if runs_deleted else ""
+        print(f"removed theme_coder '{args.theme_coder_id}'{suffix}")
+        return 0
+    print(f"no theme_coder with id '{args.theme_coder_id}'", file=sys.stderr)
+    return 1
+
+
+def _cmd_list_theme_coders(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    coders = store.list_theme_coders(conn)
+    if not coders:
+        print("(no theme coders)")
+        return 0
+    for c in coders:
+        print(f"{c.theme_coder_id}\t{c.identity}")
+    return 0
+
+
+def _resolve_codebook_version(conn, version_arg: int | None) -> int | None:
+    if version_arg is not None:
+        return version_arg
+    cv = store.latest_codebook_version(conn)
+    if cv is None:
+        print(
+            "no codebook version found; run 'ta --db ... init' first",
+            file=sys.stderr,
+        )
+        return None
+    return cv.version
+
+
+def _cmd_theme_code(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+
+    if args.retry_failed:
+        for tc in store.list_theme_coders(conn):
+            n = store.reset_unfinished_theme_coder_runs(
+                conn, tc.theme_coder_id, version
+            )
+            if n:
+                print(
+                    f"[theme-code] cleared {n} failed/running run(s) "
+                    f"for {tc.theme_coder_id}"
+                )
+
+    pending = store.theme_coders_to_run(conn, version)
+    todo = len(pending)
+    print(
+        f"[theme-code] codebook=v{version} todo={todo} workers={args.workers}"
+        + (f" limit={args.limit}" if args.limit else "")
+    )
+    if todo == 0:
+        print("[theme-code] nothing to do")
+        return 0
+
+    def on_event(res: dict, c: dict) -> None:
+        n = c["done"] + c["failed"]
+        if res["ok"]:
+            print(
+                f"[theme-code] coder={res['theme_coder_id']} "
+                f"themes={res['n_themes']} v={res['codebook_version']} "
+                f"({n}/{todo} ok={c['done']} failed={c['failed']} "
+                f"{res['elapsed']:.1f}s)"
+            )
+        else:
+            print(
+                f"[theme-code] coder={res['theme_coder_id']} FAILED "
+                f"v={res['codebook_version']}: {res['error']}",
+                file=sys.stderr,
+            )
+
+    counters = asyncio.run(
+        workers.drain_theme_code_async(
+            conn,
+            version,
+            workers=args.workers,
+            limit=args.limit,
+            use_mock_embeddings=args.mock_embeddings,
+            on_event=on_event,
+        )
+    )
+    print(
+        f"[theme-code] done: {counters['done']} ok, {counters['failed']} failed"
+    )
+    return 0
+
+
+def _cmd_theme_aggregate(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+
+    if args.retry_failed:
+        n = store.reset_unfinished_theme_aggregations(conn, version)
+        if n:
+            print(
+                f"[theme-aggregate] cleared {n} failed/running aggregation(s)"
+            )
+
+    print(f"[theme-aggregate] codebook=v{version}")
+
+    res = workers.theme_aggregate_one(
+        conn,
+        version,
+        use_mock_embeddings=args.mock_embeddings,
+    )
+
+    if res is None:
+        if not store.all_theme_coders_done(conn, version):
+            print(
+                "[theme-aggregate] not all theme coders have finished for "
+                f"v{version}; run theme-code first",
+                file=sys.stderr,
+            )
+            return 1
+        existing = store.latest_theme_aggregation(conn, version)
+        if existing is not None and existing["status"] == "done":
+            print(
+                f"[theme-aggregate] already done (aggregation id={existing['id']}); "
+                "use --retry-failed to re-run"
+            )
+            return 0
+        print(
+            "[theme-aggregate] nothing to do (no theme coders registered?)",
+            file=sys.stderr,
+        )
+        return 1
+
+    if res["ok"]:
+        print(
+            f"[theme-aggregate] aggregation_id={res['aggregation_id']} "
+            f"inputs={res['n_input_results']} themes={res['n_themes']} "
+            f"{res['elapsed']:.1f}s"
+        )
+        return 0
+    print(
+        f"[theme-aggregate] FAILED: {res['error']}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_theme_status(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+    print(store.stage2_status_counts(conn, version).format())
+    return 0
+
+
+def _cmd_export_themes(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+
+    agg = store.latest_theme_aggregation(conn, version)
+    if agg is None or agg["status"] != "done" or not agg["result_json"]:
+        print(
+            f"no completed theme aggregation for codebook v{version}; "
+            "run theme-aggregate first",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.output == "-" or args.output is None:
+        sys.stdout.write(agg["result_json"])
+        if not agg["result_json"].endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        Path(args.output).write_text(agg["result_json"], encoding="utf-8")
+        n_themes = len(json.loads(agg["result_json"]).get("themes", []))
+        print(
+            f"wrote {n_themes} theme(s) from codebook v{version} "
+            f"to {args.output}"
+        )
+    return 0
+
+
+def _cmd_export_themes_html(args: argparse.Namespace) -> int:
+    conn = store.connect(args.db)
+    version = _resolve_codebook_version(conn, args.codebook_version)
+    if version is None:
+        return 1
+
+    agg = store.latest_theme_aggregation(conn, version)
+    if agg is None or agg["status"] != "done" or not agg["result_json"]:
+        print(
+            f"no completed theme aggregation for codebook v{version}; "
+            "run theme-aggregate first",
+            file=sys.stderr,
+        )
+        return 1
+
+    html_doc = render_themes_html_from_json(agg["result_json"], version)
+
+    if args.output == "-" or args.output is None:
+        sys.stdout.write(html_doc)
+        if not html_doc.endswith("\n"):
+            sys.stdout.write("\n")
+    else:
+        Path(args.output).write_text(html_doc, encoding="utf-8")
+        n_themes = len(json.loads(agg["result_json"]).get("themes", []))
+        print(
+            f"wrote HTML report for {n_themes} theme(s) from codebook v{version} "
+            f"to {args.output}"
+        )
+    return 0
+
+
 # parser ----------------------------------------------------------------------
 
 
+def _add_stage2_parsers(sub: argparse._SubParsersAction) -> None:
+    p_atc = sub.add_parser("add-theme-coder", help="register a theme coder")
+    p_atc.add_argument("theme_coder_id")
+    p_atc.add_argument(
+        "identity", help="free-text identity/persona shown to the agent"
+    )
+    p_atc.set_defaults(func=_cmd_add_theme_coder)
+
+    p_rtc = sub.add_parser(
+        "rm-theme-coder",
+        help="remove a theme coder (--force also drops their runs)",
+    )
+    p_rtc.add_argument("theme_coder_id")
+    p_rtc.add_argument("--force", action="store_true")
+    p_rtc.set_defaults(func=_cmd_rm_theme_coder)
+
+    p_ltc = sub.add_parser(
+        "list-theme-coders", help="list registered theme coders"
+    )
+    p_ltc.set_defaults(func=_cmd_list_theme_coders)
+
+    p_tc = sub.add_parser(
+        "theme-code",
+        help="run all pending theme coders against a codebook version",
+    )
+    p_tc.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version to use (default: latest)",
+    )
+    p_tc.add_argument("--limit", type=int, default=None)
+    p_tc.add_argument("--workers", type=int, default=1)
+    p_tc.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="delete failed/running runs before starting",
+    )
+    p_tc.add_argument(
+        "--mock-embeddings",
+        action="store_true",
+        help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_tc.set_defaults(func=_cmd_theme_code)
+
+    p_ta = sub.add_parser(
+        "theme-aggregate",
+        help="aggregate theme results into a final theme set",
+    )
+    p_ta.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version to aggregate (default: latest)",
+    )
+    p_ta.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="delete failed/running aggregation before starting",
+    )
+    p_ta.add_argument(
+        "--mock-embeddings",
+        action="store_true",
+        help="use deterministic mock embeddings (testing / no-network)",
+    )
+    p_ta.set_defaults(func=_cmd_theme_aggregate)
+
+    p_tst = sub.add_parser(
+        "theme-status", help="print stage-2 pipeline counts"
+    )
+    p_tst.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version to report on (default: latest)",
+    )
+    p_tst.set_defaults(func=_cmd_theme_status)
+
+    p_ex = sub.add_parser(
+        "export-themes", help="write theme aggregation result"
+    )
+    p_ex.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version (default: latest)",
+    )
+    p_ex.add_argument("-o", "--output", default="-")
+    p_ex.set_defaults(func=_cmd_export_themes)
+
+    p_eh = sub.add_parser(
+        "export-themes-html",
+        help="write theme aggregation result as a human-readable HTML report",
+    )
+    p_eh.add_argument(
+        "--codebook-version",
+        type=int,
+        default=None,
+        help="codebook version (default: latest)",
+    )
+    p_eh.add_argument(
+        "-o",
+        "--output",
+        default="-",
+        help="output HTML file (default: stdout)",
+    )
+    p_eh.set_defaults(func=_cmd_export_themes_html)
+
+
+def _add_segment_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser(
+        "segment", help="segment a document and print segments (no DB write)"
+    )
+    p.add_argument("file", help="path to .md/.txt/.pdf")
+    p.add_argument(
+        "--method",
+        choices=("paragraph", "sentence", "fixed", "llm"),
+        default="paragraph",
+    )
+    p.add_argument(
+        "--min-words",
+        type=int,
+        default=20,
+        help="minimum words per segment (for paragraph/sentence: drop; for llm: merge)",
+    )
+    p.add_argument("--max-words", type=int, default=500)
+    p.add_argument(
+        "--model",
+        default="gemini/gemini-2.5-flash-lite",
+        help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
+    )
+    p.set_defaults(func=_cmd_segment)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ta-stage1", description=__doc__)
-    p.add_argument("--db", required=True, help="path to the SQLite database")
+    p = argparse.ArgumentParser(prog="ta", description=__doc__)
+    p.add_argument(
+        "--db",
+        default=None,
+        help="path to the SQLite database (required by every subcommand "
+        "except `segment`)",
+    )
+    cli_utils.add_common_arguments(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="create the schema and codebook v1")
@@ -583,7 +1084,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="use deterministic mock embeddings (testing / no-network)",
     )
     p_code.add_argument(
-        "--verbose",
+        "--trace",
         action="store_true",
         help="print the first-pass codes, critique, and refined codes for each segment",
     )
@@ -641,15 +1142,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_ex.add_argument("-o", "--output", default="-")
     p_ex.set_defaults(func=_cmd_export_codebook)
 
+    _add_stage2_parsers(sub)
+    _add_segment_parser(sub)
     research_context_cli.register(sub)
 
     return p
 
 
+# Subcommands that operate on an existing DB. Excludes `init` (which is
+# allowed to create the DB) and `segment` (which doesn't touch the DB).
+_REQUIRES_EXISTING_DB = {
+    "add-coder",
+    "rm-coder",
+    "list-coders",
+    "enqueue",
+    "add-document",
+    "code",
+    "aggregate",
+    "review",
+    "status",
+    "list-codebooks",
+    "show-codebook",
+    "export-codebook",
+    "add-theme-coder",
+    "rm-theme-coder",
+    "list-theme-coders",
+    "theme-code",
+    "theme-aggregate",
+    "theme-status",
+    "export-themes",
+    "export-themes-html",
+    "set-research-context",
+    "show-research-context",
+    "clear-research-context",
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
+    return cli_utils.run_cli(
+        parser, argv, requires_existing_db=_REQUIRES_EXISTING_DB
+    )
 
 
 if __name__ == "__main__":
