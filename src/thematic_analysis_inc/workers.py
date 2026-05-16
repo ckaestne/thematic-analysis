@@ -191,10 +191,14 @@ def code_one(
         _apply_research_context(conn, agent)
         t0 = time.monotonic()
         assignment = agent.code_segment(segment_id, text)
-        return _persist(
+        res = _persist(
             conn, run_id, coder_id, segment_id, version, assignment,
             time.monotonic() - t0,
         )
+        trace = getattr(agent, "last_trace", None)
+        if trace is not None:
+            res["trace"] = trace
+        return res
     except Exception as exc:
         return _fail(conn, run_id, coder_id, segment_id, version, exc)
 
@@ -217,15 +221,20 @@ async def code_one_async(
     try:
         codebook = _get_codebook(conn, version, use_mock_embeddings)
         agent = factory(codebook, coder)
+        _apply_research_context(conn, agent)
         t0 = time.monotonic()
         if hasattr(agent, "code_segment_async"):
             assignment = await agent.code_segment_async(segment_id, text)
         else:
             assignment = agent.code_segment(segment_id, text)
-        return _persist(
+        res = _persist(
             conn, run_id, coder_id, segment_id, version, assignment,
             time.monotonic() - t0,
         )
+        trace = getattr(agent, "last_trace", None)
+        if trace is not None:
+            res["trace"] = trace
+        return res
     except Exception as exc:
         return _fail(conn, run_id, coder_id, segment_id, version, exc)
 

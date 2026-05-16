@@ -151,16 +151,19 @@ class TestCritic:
         assert calls[0].response_format is None
 
     def test_critic_prompt_emphasises_relevance_and_no_escape(self):
-        """Lock in the PR feedback: critic must headline relevance to
-        the research focus, accept "this segment isn't relevant" as a
-        valid critique, and explicitly forbid a "codes are fine" escape."""
+        """Lock in the design: critic must headline relevance to the
+        research focus, treat off-topic segments as a valid "drop all
+        codes" outcome, and explicitly forbid ratifying the codes."""
         import re
 
         flat = re.sub(r"\s+", " ", CRITIC_SYSTEM_PROMPT.lower())
         assert "research focus" in flat
-        assert "not relevant" in flat or "irrelevant" in flat
+        assert "off-topic" in flat
+        # Dropping every code (leaving the segment uncoded) is a valid outcome.
+        assert "drop" in flat
+        assert "uncoded" in flat
         # Prompt explicitly forbids the "codes are fine as-is" escape.
-        assert "never say the codes are fine" in flat
+        assert "not to ratify them" in flat
         # Conflation/vagueness criteria were dropped (PR feedback).
         assert "conflation" not in flat
         assert "vagueness" not in flat

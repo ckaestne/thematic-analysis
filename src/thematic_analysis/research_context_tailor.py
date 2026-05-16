@@ -29,6 +29,23 @@ _ROLE_BRIEFS: dict[str, str] = {
         "or latent meaning; what kinds of features to attend to; what to "
         "ignore."
     ),
+    "coding_critic": (
+        "The downstream agent is a *coding critic*. It runs immediately "
+        "after the coder, in a fresh chat session with no access to the "
+        "codebook or the coder's identity. It sees one text segment and "
+        "the 0–3 codes the coder just produced, and writes a short prose "
+        "critique pushing back on those codes. Its single most important "
+        "job is to judge whether each code is genuinely responsive to the "
+        "research question(s), or merely paraphrases the segment / "
+        "describes content that is off-topic for this study. Emphasise "
+        "what counts as on-topic vs. off-topic for this specific research "
+        "focus, with concrete examples of features that would be relevant "
+        "and features that would not. Make explicit that recommending the "
+        "coder drop all codes — leaving the segment uncoded — is the "
+        "correct outcome whenever the segment does not speak to the "
+        "research question(s); the critic must not invent relevance to "
+        "justify keeping codes."
+    ),
     "theme_coder": (
         "The downstream agent is a *theme coder*. It takes the full "
         "codebook (codes plus example quotes) and proposes themes that "

@@ -461,6 +461,31 @@ def reset_unfinished_coder_runs(
     return cur.rowcount
 
 
+def reset_all_coder_runs(
+    conn: sqlite3.Connection, coder_id: str
+) -> int:
+    """Delete all coder_runs (and their coder_codes) for this coder so every
+    segment is re-coded next time `code <coder_id>` runs. Returns rows
+    deleted."""
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            "DELETE FROM coder_codes WHERE coder_run_id IN ("
+            "  SELECT id FROM coder_runs WHERE coder_id = ?"
+            ")",
+            (coder_id,),
+        )
+        cur = conn.execute(
+            "DELETE FROM coder_runs WHERE coder_id = ?", (coder_id,)
+        )
+        deleted = cur.rowcount
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return deleted
+
+
 # ---------------------------------------------------------------------------
 # Aggregations
 # ---------------------------------------------------------------------------
