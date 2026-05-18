@@ -329,57 +329,7 @@ def create_app(db_path: str | Path) -> FastAPI:
             ).fetchone()
             if seg is None:
                 raise HTTPException(status_code=404, detail="segment not found")
-            runs = conn.execute(
-                "SELECT id, coder_id, codebook_version, status, "
-                "  claimed_at, finished_at, error, raw_response "
-                "FROM coder_runs WHERE segment_id = ? ORDER BY coder_id",
-                (segment_id,),
-            ).fetchall()
-            run_list: list[dict[str, Any]] = []
-            for r in runs:
-                codes = conn.execute(
-                    "SELECT position, code, rationale, is_new "
-                    "FROM coder_codes WHERE coder_run_id = ? ORDER BY position",
-                    (r["id"],),
-                ).fetchall()
-                run_list.append({**dict(r), "codes": _rows_to_dicts(codes)})
-
-            agg = conn.execute(
-                "SELECT id, status, created_at, finished_at, error "
-                "FROM aggregations WHERE segment_id = ?",
-                (segment_id,),
-            ).fetchone()
-            agg_codes: list[dict[str, Any]] = []
-            if agg is not None:
-                acs = conn.execute(
-                    "SELECT id, code, quotes_json, source_coders_json "
-                    "FROM aggregated_codes WHERE aggregation_id = ? ORDER BY id",
-                    (agg["id"],),
-                ).fetchall()
-                for ac in acs:
-                    rd = conn.execute(
-                        "SELECT id, decision, target_code, rationale, applied, "
-                        "  resulting_version, created_at "
-                        "FROM review_decisions WHERE aggregated_code_id = ?",
-                        (ac["id"],),
-                    ).fetchone()
-                    agg_codes.append(
-                        {
-                            "id": ac["id"],
-                            "code": ac["code"],
-                            "quotes": json.loads(ac["quotes_json"] or "[]"),
-                            "source_coders": json.loads(
-                                ac["source_coders_json"] or "[]"
-                            ),
-                            "review": dict(rd) if rd else None,
-                        }
-                    )
-            return {
-                **dict(seg),
-                "coder_runs": run_list,
-                "aggregation": dict(agg) if agg else None,
-                "aggregated_codes": agg_codes,
-            }
+            return _segment_coding_payload(conn, dict(seg))
         finally:
             conn.close()
 
@@ -466,7 +416,59 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "GROUP BY d.document_id "
                 "ORDER BY d.document_id DESC"
             ).fetchall()
-            return {"items": _rows_to_dicts(rows)}
+            # Per-(document, coder) run-status counts in one query.
+            progress_rows = conn.execute(
+                "SELECT s.document_id, cr.coder_id, cr.status, "
+                "  COUNT(*) AS n "
+                "FROM segments s "
+                "JOIN coder_runs cr ON cr.segment_id = s.segment_id "
+                "WHERE s.document_id IS NOT NULL "
+                "GROUP BY s.document_id, cr.coder_id, cr.status"
+            ).fetchall()
+            # Aggregation status counts per document.
+            agg_rows = conn.execute(
+                "SELECT s.document_id, a.status, COUNT(*) AS n "
+                "FROM segments s "
+                "JOIN aggregations a ON a.segment_id = s.segment_id "
+                "WHERE s.document_id IS NOT NULL "
+                "GROUP BY s.document_id, a.status"
+            ).fetchall()
+            coders_all = conn.execute(
+                "SELECT coder_id FROM coders ORDER BY coder_id"
+            ).fetchall()
+            coder_ids = [c["coder_id"] for c in coders_all]
+
+            by_doc: dict[int, dict[str, dict[str, int]]] = {}
+            for r in progress_rows:
+                d = by_doc.setdefault(r["document_id"], {})
+                c = d.setdefault(
+                    r["coder_id"], {"done": 0, "running": 0, "failed": 0}
+                )
+                c[r["status"]] = c.get(r["status"], 0) + r["n"]
+            agg_by_doc: dict[int, dict[str, int]] = {}
+            for r in agg_rows:
+                agg_by_doc.setdefault(r["document_id"], {})[r["status"]] = r["n"]
+
+            items = []
+            for row in _rows_to_dicts(rows):
+                doc_id = row["document_id"]
+                per_coder = []
+                for cid in coder_ids:
+                    d = by_doc.get(doc_id, {}).get(
+                        cid, {"done": 0, "running": 0, "failed": 0}
+                    )
+                    per_coder.append(
+                        {
+                            "coder_id": cid,
+                            "runs_done": d.get("done", 0),
+                            "runs_running": d.get("running", 0),
+                            "runs_failed": d.get("failed", 0),
+                        }
+                    )
+                row["per_coder"] = per_coder
+                row["aggregations_by_status"] = agg_by_doc.get(doc_id, {})
+                items.append(row)
+            return {"items": items, "coder_ids": coder_ids}
         finally:
             conn.close()
 
@@ -482,12 +484,99 @@ def create_app(db_path: str | Path) -> FastAPI:
             if doc is None:
                 raise HTTPException(status_code=404, detail="document not found")
             segs = conn.execute(
-                "SELECT segment_id, title, status, text, length(text) AS len "
+                "SELECT segment_id, title, status, text, batch, "
+                "  length(text) AS len "
                 "FROM segments WHERE document_id = ? "
                 "ORDER BY position IS NULL, position, segment_id",
                 (document_id,),
             ).fetchall()
-            return {**dict(doc), "segments": _rows_to_dicts(segs)}
+            seg_list: list[dict[str, Any]] = []
+            for seg in segs:
+                seg_list.append(_segment_coding_payload(conn, dict(seg)))
+            return {**dict(doc), "segments": seg_list}
+        finally:
+            conn.close()
+
+    @app.delete("/api/documents/{document_id}")
+    def delete_document(document_id: int) -> dict[str, Any]:
+        """Delete a document and every segment + derived row that came from it."""
+        conn = _conn()
+        try:
+            doc = conn.execute(
+                "SELECT document_id FROM documents WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            if doc is None:
+                raise HTTPException(status_code=404, detail="document not found")
+            seg_ids = [
+                r["segment_id"]
+                for r in conn.execute(
+                    "SELECT segment_id FROM segments WHERE document_id = ?",
+                    (document_id,),
+                ).fetchall()
+            ]
+            conn.execute("BEGIN")
+            removed_aggs = 0
+            removed_runs = 0
+            if seg_ids:
+                ph = ",".join("?" * len(seg_ids))
+                agg_ids = [
+                    r["id"]
+                    for r in conn.execute(
+                        f"SELECT id FROM aggregations WHERE segment_id IN ({ph})",
+                        seg_ids,
+                    ).fetchall()
+                ]
+                run_ids = [
+                    r["id"]
+                    for r in conn.execute(
+                        f"SELECT id FROM coder_runs WHERE segment_id IN ({ph})",
+                        seg_ids,
+                    ).fetchall()
+                ]
+                if agg_ids:
+                    aph = ",".join("?" * len(agg_ids))
+                    conn.execute(
+                        f"DELETE FROM review_decisions WHERE aggregated_code_id IN "
+                        f"(SELECT id FROM aggregated_codes WHERE aggregation_id IN ({aph}))",
+                        agg_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM aggregated_codes WHERE aggregation_id IN ({aph})",
+                        agg_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM aggregations WHERE id IN ({aph})", agg_ids
+                    )
+                    removed_aggs = len(agg_ids)
+                if run_ids:
+                    rph = ",".join("?" * len(run_ids))
+                    conn.execute(
+                        f"DELETE FROM coder_codes WHERE coder_run_id IN ({rph})",
+                        run_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM coder_runs WHERE id IN ({rph})", run_ids
+                    )
+                    removed_runs = len(run_ids)
+                conn.execute(
+                    f"DELETE FROM segments WHERE segment_id IN ({ph})", seg_ids
+                )
+            conn.execute(
+                "DELETE FROM documents WHERE document_id = ?", (document_id,)
+            )
+            conn.execute("COMMIT")
+            return {
+                "removed_document": True,
+                "removed_segments": len(seg_ids),
+                "removed_coder_runs": removed_runs,
+                "removed_aggregations": removed_aggs,
+            }
+        except HTTPException:
+            raise
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
@@ -995,6 +1084,66 @@ def create_app(db_path: str | Path) -> FastAPI:
             )
 
     return app
+
+
+def _segment_coding_payload(
+    conn: sqlite3.Connection, seg: dict[str, Any]
+) -> dict[str, Any]:
+    """Augment a segment row with its coder_runs (+codes) and aggregation
+    (+aggregated_codes/reviews) — the structure consumed by SegmentDetail and
+    by the per-segment cards on the document page."""
+    segment_id = seg["segment_id"]
+    runs = conn.execute(
+        "SELECT id, coder_id, codebook_version, status, "
+        "  claimed_at, finished_at, error, raw_response "
+        "FROM coder_runs WHERE segment_id = ? ORDER BY coder_id",
+        (segment_id,),
+    ).fetchall()
+    run_list: list[dict[str, Any]] = []
+    for r in runs:
+        codes = conn.execute(
+            "SELECT position, code, rationale, is_new "
+            "FROM coder_codes WHERE coder_run_id = ? ORDER BY position",
+            (r["id"],),
+        ).fetchall()
+        run_list.append({**dict(r), "codes": _rows_to_dicts(codes)})
+
+    agg = conn.execute(
+        "SELECT id, status, created_at, finished_at, error "
+        "FROM aggregations WHERE segment_id = ?",
+        (segment_id,),
+    ).fetchone()
+    agg_codes: list[dict[str, Any]] = []
+    if agg is not None:
+        acs = conn.execute(
+            "SELECT id, code, quotes_json, source_coders_json "
+            "FROM aggregated_codes WHERE aggregation_id = ? ORDER BY id",
+            (agg["id"],),
+        ).fetchall()
+        for ac in acs:
+            rd = conn.execute(
+                "SELECT id, decision, target_code, rationale, applied, "
+                "  resulting_version, created_at "
+                "FROM review_decisions WHERE aggregated_code_id = ?",
+                (ac["id"],),
+            ).fetchone()
+            agg_codes.append(
+                {
+                    "id": ac["id"],
+                    "code": ac["code"],
+                    "quotes": json.loads(ac["quotes_json"] or "[]"),
+                    "source_coders": json.loads(
+                        ac["source_coders_json"] or "[]"
+                    ),
+                    "review": dict(rd) if rd else None,
+                }
+            )
+    return {
+        **seg,
+        "coder_runs": run_list,
+        "aggregation": dict(agg) if agg else None,
+        "aggregated_codes": agg_codes,
+    }
 
 
 def _cascade_delete_aggregation(conn: sqlite3.Connection, agg_id: int) -> None:
