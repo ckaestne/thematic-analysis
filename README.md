@@ -19,8 +19,7 @@ uv sync
 Run the console scripts via `uv run`:
 
 ```bash
-uv run ta-stage1 --help
-uv run ta-stage2 --help
+uv run ta --help
 ```
 
 ## Environment Variables
@@ -33,18 +32,20 @@ export LLM_API_KEY=your-api-key
 # optional: export LLM_BASE_URL=https://...
 ```
 
-## Pipeline (`ta-stage1` / `ta-stage2`)
+## Pipeline (`ta`)
 
 A SQLite-backed pipeline that stores every intermediate result so each step
 can be run separately, resumed after failure, and rerun without redoing
-finished work.
+finished work. All operations are exposed as subcommands of a single `ta`
+entry point sharing one SQLite file:
 
-| Command | Stage |
+| Subcommand group | Stage |
 |---|---|
-| `ta-stage1` | Coding → Aggregation → Review → Codebook |
-| `ta-stage2` | Theme coding → Theme aggregation → Final themes |
+| `code`, `aggregate`, `review`, `status` | Stage 1: Coding → Aggregation → Review → Codebook |
+| `theme-code`, `theme-aggregate`, `theme-status` | Stage 2: Theme coding → Theme aggregation → Final themes |
 
-Both commands share the same SQLite file.
+Run `ta --help` to see every subcommand. Pass `--debug` for full
+tracebacks on unexpected errors.
 
 See [`src/thematic_analysis_inc/README.md`](src/thematic_analysis_inc/README.md)
 for the full usage guide, including all CLI flags, the database schema, and

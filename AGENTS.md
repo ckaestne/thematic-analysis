@@ -10,8 +10,7 @@ This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
   or edit `pyproject.toml` then `uv sync`).
 - Remove: `uv remove <pkg>`.
 - Run any project command via `uv run`:
-  - `uv run ta-stage1 ...`
-  - `uv run ta-stage2 ...`
+  - `uv run ta ...`  (all Stage 1 + Stage 2 subcommands; see `ta --help`)
   - `uv run ta-web --db analysis.sqlite`
   - `uv run pytest`
   - `uv run python -c "..."` for ad-hoc scripts.

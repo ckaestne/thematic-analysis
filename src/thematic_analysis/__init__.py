@@ -2,8 +2,7 @@
 Thematic analysis library.
 
 Provides the agent, codebook, prompt, loader, and research-context primitives
-used by the SQLite-backed `thematic_analysis_inc` pipeline (`ta-stage1` /
-`ta-stage2`).
+used by the SQLite-backed `thematic_analysis_inc` pipeline (`ta` CLI).
 """
 
 from thematic_analysis.loaders import (

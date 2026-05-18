@@ -456,7 +456,7 @@ def test_cli_theme_code_and_aggregate(tmp_path: Path, monkeypatch) -> None:
     rc = cli_stage2.main(["--db", db, "theme-aggregate"])
     assert rc == 0
 
-    rc = cli_stage2.main(["--db", db, "status"])
+    rc = cli_stage2.main(["--db", db, "theme-status"])
     assert rc == 0
 
     out_file = str(tmp_path / "themes.json")

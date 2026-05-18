@@ -1,8 +1,7 @@
 """CLI helpers for managing the stored research context.
 
-Shared between the Stage 1 (`ta-stage1`) and Stage 2 (`ta-stage2`) entry
-points so the same subcommands behave identically. The research context is
-a singleton row keyed `id = 1` in the `research_context` table.
+Registered under the unified `ta` CLI. The research context is a
+singleton row keyed `id = 1` in the `research_context` table.
 """
 
 from __future__ import annotations
