@@ -264,13 +264,16 @@ class RefiningCoderAgent:
 
     # ── coder-chat helpers ───────────────────────────────────────────────
 
-    def _initial_messages(self, segment_id: str, text: str) -> list[Message]:
+    def _initial_messages(
+        self, segment_id: str, text: str
+    ) -> tuple[str, str, list[Message]]:
         system_prompt = self.coder.get_system_prompt()
         user_prompt = self.coder._build_user_prompt(segment_id, text)
-        return [
+        messages = [
             Message(role="system", content=[TextContent(text=system_prompt)]),
             Message(role="user", content=[TextContent(text=user_prompt)]),
         ]
+        return system_prompt, user_prompt, messages
 
     @staticmethod
     def _append_turn(
@@ -296,7 +299,9 @@ class RefiningCoderAgent:
 
     def code_segment(self, segment_id: str, text: str) -> CodeAssignment:
         self.last_trace = None
-        initial_msgs = self._initial_messages(segment_id, text)
+        coder_system_prompt, coder_user_prompt, initial_msgs = (
+            self._initial_messages(segment_id, text)
+        )
         first_response = self._coder_completion(initial_msgs)
         first_assignment = self.coder._process_response(
             first_response, segment_id, text
@@ -307,18 +312,28 @@ class RefiningCoderAgent:
                 "first": first_assignment,
                 "critique": None,
                 "refined": None,
+                "coder_system_prompt": coder_system_prompt,
+                "coder_user_prompt": coder_user_prompt,
+                "critic_system_prompt": None,
+                "critic_user_prompt": None,
+                "refinement_user_prompt": None,
             }
             return first_assignment
 
+        critic_system_prompt = self.critic._system_prompt()
+        critic_user_prompt = _build_critic_user_prompt(
+            text, first_assignment.codes, first_assignment.rationales
+        )
         critique = self.critic.critique(
             text, first_assignment.codes, first_assignment.rationales
         )
 
+        refinement_user_prompt = _build_refinement_user_prompt(critique)
         refined_msgs = self._append_turn(
             initial_msgs, "assistant", first_response
         )
         refined_msgs = self._append_turn(
-            refined_msgs, "user", _build_refinement_user_prompt(critique)
+            refined_msgs, "user", refinement_user_prompt
         )
         refined_response = self._coder_completion(refined_msgs)
         refined_assignment = self.coder._process_response(
@@ -329,6 +344,11 @@ class RefiningCoderAgent:
             "first": first_assignment,
             "critique": critique,
             "refined": refined_assignment,
+            "coder_system_prompt": coder_system_prompt,
+            "coder_user_prompt": coder_user_prompt,
+            "critic_system_prompt": critic_system_prompt,
+            "critic_user_prompt": critic_user_prompt,
+            "refinement_user_prompt": refinement_user_prompt,
         }
         return refined_assignment
 
@@ -336,7 +356,9 @@ class RefiningCoderAgent:
         self, segment_id: str, text: str
     ) -> CodeAssignment:
         self.last_trace = None
-        initial_msgs = self._initial_messages(segment_id, text)
+        coder_system_prompt, coder_user_prompt, initial_msgs = (
+            self._initial_messages(segment_id, text)
+        )
         first_response = await self._coder_completion_async(initial_msgs)
         first_assignment = self.coder._process_response(
             first_response, segment_id, text
@@ -347,18 +369,28 @@ class RefiningCoderAgent:
                 "first": first_assignment,
                 "critique": None,
                 "refined": None,
+                "coder_system_prompt": coder_system_prompt,
+                "coder_user_prompt": coder_user_prompt,
+                "critic_system_prompt": None,
+                "critic_user_prompt": None,
+                "refinement_user_prompt": None,
             }
             return first_assignment
 
+        critic_system_prompt = self.critic._system_prompt()
+        critic_user_prompt = _build_critic_user_prompt(
+            text, first_assignment.codes, first_assignment.rationales
+        )
         critique = await self.critic.critique_async(
             text, first_assignment.codes, first_assignment.rationales
         )
 
+        refinement_user_prompt = _build_refinement_user_prompt(critique)
         refined_msgs = self._append_turn(
             initial_msgs, "assistant", first_response
         )
         refined_msgs = self._append_turn(
-            refined_msgs, "user", _build_refinement_user_prompt(critique)
+            refined_msgs, "user", refinement_user_prompt
         )
         refined_response = await self._coder_completion_async(refined_msgs)
         refined_assignment = self.coder._process_response(
@@ -369,6 +401,11 @@ class RefiningCoderAgent:
             "first": first_assignment,
             "critique": critique,
             "refined": refined_assignment,
+            "coder_system_prompt": coder_system_prompt,
+            "coder_user_prompt": coder_user_prompt,
+            "critic_system_prompt": critic_system_prompt,
+            "critic_user_prompt": critic_user_prompt,
+            "refinement_user_prompt": refinement_user_prompt,
         }
         return refined_assignment
 

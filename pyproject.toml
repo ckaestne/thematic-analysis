@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26.0",
     "rouge-score>=0.1.2",
     "pymupdf>=1.24.0",
+    "rich>=13.7",
 ]
 
 [project.urls]
