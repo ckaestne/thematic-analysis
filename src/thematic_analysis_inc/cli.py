@@ -64,6 +64,7 @@ PANEL_S1_STATUS = "Stage 1 — status & codebook inspection"
 PANEL_S2_CODERS = "Stage 2 — theme coder management"
 PANEL_S2_PIPELINE = "Stage 2 — theme pipeline"
 PANEL_S2_STATUS = "Stage 2 — status & theme exports"
+PANEL_DEBUG = "Debugging"
 
 
 # Subcommands that operate on an existing DB. Excludes `init` (which is
@@ -72,7 +73,6 @@ _REQUIRES_EXISTING_DB = {
     "add-coder",
     "rm-coder",
     "list-coders",
-    "enqueue",
     "add-document",
     "code",
     "aggregate",
@@ -173,60 +173,6 @@ def _cmd_list_coders(args: SimpleNamespace) -> int:
         return 0
     for c in coders:
         print(f"{c.coder_id}\t{c.identity}")
-    return 0
-
-
-def _load_segments_file(path: str) -> list[tuple[str, str]]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(path)
-    raw = p.read_text(encoding="utf-8").strip()
-    if not raw:
-        return []
-    items: list = []
-    if raw.startswith("["):
-        items = json.loads(raw)
-    else:
-        for lineno, line in enumerate(raw.splitlines(), 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                items.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"{p}: line {lineno}: invalid JSON ({e.msg})"
-                ) from e
-    out: list[tuple[str, str]] = []
-    for i, it in enumerate(items):
-        if isinstance(it, dict):
-            try:
-                out.append((str(it["segment_id"]), str(it["text"])))
-            except KeyError as e:
-                raise ValueError(
-                    f"{p}: entry #{i + 1} missing key {e}"
-                ) from e
-        elif isinstance(it, list | tuple) and len(it) == 2:
-            out.append((str(it[0]), str(it[1])))
-        else:
-            raise ValueError(
-                f"{p}: entry #{i + 1} is not a [id, text] pair or "
-                f"{{segment_id, text}} object: {it!r}"
-            )
-    return out
-
-
-def _cmd_enqueue(args: SimpleNamespace) -> int:
-    segments = _load_segments_file(args.segments)
-    if not segments:
-        print("no segments found in input file", file=sys.stderr)
-        return 1
-    conn = store.connect(args.db)
-    result = store.enqueue_segments(conn, segments, batch=args.batch)
-    print(
-        f"enqueued: inserted={result.inserted_segments} "
-        f"skipped={result.skipped_segments}"
-    )
     return 0
 
 
@@ -1029,51 +975,6 @@ def _cli_init(ctx: typer.Context) -> None:
 
 
 @app.command(
-    name="segment",
-    rich_help_panel=PANEL_DOCUMENTS,
-    help="segment a document and print segments (no DB write)",
-)
-def _cli_segment(
-    ctx: typer.Context,
-    file: Annotated[str, typer.Argument(help="path to .md/.txt/.pdf")],
-    method: Annotated[
-        str,
-        typer.Option(
-            "--method",
-            click_type=click.Choice(["paragraph", "sentence", "fixed", "llm"]),
-        ),
-    ] = "paragraph",
-    min_words: Annotated[
-        int,
-        typer.Option(
-            "--min-words",
-            help=(
-                "minimum words per segment (for paragraph/sentence: drop; "
-                "for llm: merge)"
-            ),
-        ),
-    ] = 20,
-    max_words: Annotated[int, typer.Option("--max-words")] = 500,
-    model: Annotated[
-        str,
-        typer.Option(
-            "--model",
-            help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
-        ),
-    ] = "gemini/gemini-2.5-flash-lite",
-) -> None:
-    _run(
-        ctx,
-        _cmd_segment,
-        file=file,
-        method=method,
-        min_words=min_words,
-        max_words=max_words,
-        model=model,
-    )
-
-
-@app.command(
     name="add-document",
     rich_help_panel=PANEL_DOCUMENTS,
     help="load .md/.txt files, segment, and add",
@@ -1115,19 +1016,6 @@ def _cli_add_document(
         model=model,
         batch=batch,
     )
-
-
-@app.command(
-    name="enqueue",
-    rich_help_panel=PANEL_DOCUMENTS,
-    help="add segments from a JSON/JSONL file",
-)
-def _cli_enqueue(
-    ctx: typer.Context,
-    segments: Annotated[str, typer.Option("--segments")],
-    batch: Annotated[int | None, typer.Option("--batch")] = None,
-) -> None:
-    _run(ctx, _cmd_enqueue, segments=segments, batch=batch)
 
 
 # Stage 1 coder management ---------------------------------------------------
@@ -1542,6 +1430,54 @@ def _cli_export_themes_html(
 # Research-context commands are registered via the helper module so its
 # specific options stay collocated with its handlers.
 research_context_cli.register_typer(app, _run, panel=PANEL_SETUP)
+
+
+# Debugging ------------------------------------------------------------------
+
+
+@app.command(
+    name="segment",
+    rich_help_panel=PANEL_DEBUG,
+    help="segment a document and print segments (no DB write)",
+)
+def _cli_segment(
+    ctx: typer.Context,
+    file: Annotated[str, typer.Argument(help="path to .md/.txt/.pdf")],
+    method: Annotated[
+        str,
+        typer.Option(
+            "--method",
+            click_type=click.Choice(["paragraph", "sentence", "fixed", "llm"]),
+        ),
+    ] = "paragraph",
+    min_words: Annotated[
+        int,
+        typer.Option(
+            "--min-words",
+            help=(
+                "minimum words per segment (for paragraph/sentence: drop; "
+                "for llm: merge)"
+            ),
+        ),
+    ] = 20,
+    max_words: Annotated[int, typer.Option("--max-words")] = 500,
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
+        ),
+    ] = "gemini/gemini-2.5-flash-lite",
+) -> None:
+    _run(
+        ctx,
+        _cmd_segment,
+        file=file,
+        method=method,
+        min_words=min_words,
+        max_words=max_words,
+        model=model,
+    )
 
 
 # Entry point ----------------------------------------------------------------

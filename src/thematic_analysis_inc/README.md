@@ -70,18 +70,12 @@ existing database.
 ### 2. Load data
 
 ```bash
-# From .txt or .md files — auto-segmented by paragraph
+# From .txt or .md files — auto-segmented (LLM by default)
 ta --db analysis.sqlite add-document interviews/*.txt
-
-# From a JSON array or JSONL file with {segment_id, text} objects
-ta --db analysis.sqlite enqueue --segments segments.jsonl
-
-# Optional: group segments into numbered batches
-ta --db analysis.sqlite enqueue --segments segments.jsonl --batch 1
 ```
 
-`enqueue` and `add-document` are idempotent: re-running them skips segments
-whose `segment_id` already exists.
+`add-document` is idempotent: re-running it skips files whose filename is
+already stored and segments whose `segment_id` already exists.
 
 ### 3. Register coders
 
@@ -318,9 +312,8 @@ ta --db DB init
 ta --db DB add-coder       ID IDENTITY
 ta --db DB rm-coder        ID [--force]
 ta --db DB list-coders
-ta --db DB add-document    FILES... [--segmentation paragraph|sentence|fixed]
+ta --db DB add-document    FILES... [--segmentation llm|paragraph|sentence|fixed]
                                            [--min-words N] [--max-words N] [--batch N]
-ta --db DB enqueue         --segments FILE [--batch N]
 ta --db DB code            ID [--workers K] [--limit N] [--retry-failed]
                                      [--mock-embeddings]
 ta --db DB aggregate       [--limit N] [--retry-failed] [--mock-embeddings]
