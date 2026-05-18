@@ -307,6 +307,21 @@ def add_document(
     return cur.lastrowid
 
 
+def find_document_id_by_filename(
+    conn: sqlite3.Connection,
+    filename: str,
+) -> int | None:
+    """Return an existing document_id for an exact filename match, if any."""
+    row = conn.execute(
+        "SELECT document_id FROM documents WHERE filename = ? "
+        "ORDER BY document_id ASC LIMIT 1",
+        (filename,),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row["document_id"])
+
+
 def enqueue_segments(
     conn: sqlite3.Connection,
     segments: Iterable[

@@ -118,6 +118,22 @@ class TitledSegment:
     title: str
 
 
+def _extract_response_text(response) -> str:
+    content = getattr(getattr(response, "message", None), "content", None) or []
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, TextContent):
+            parts.append(part.text)
+            continue
+        text = getattr(part, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+            continue
+        if isinstance(part, str):
+            parts.append(part)
+    return "".join(parts)
+
+
 def _slice_segments(
     boundaries: list[LLMSegment], lines: list[str], doc_id: str
 ) -> list[TitledSegment]:
@@ -174,17 +190,25 @@ def segment_by_llm(
     """
     numbered, lines = _number_lines(text)
     llm = LLM(usage_id="segmenter", model=model, temperature=0.0)
-    response = llm.completion(
-        messages=[
-            Message(role="system", content=[TextContent(text=_SYSTEM_PROMPT)]),
-            Message(role="user", content=[TextContent(text=numbered)]),
-        ],
-        response_format=_RESPONSE_SCHEMA,
+    last_error: Exception | None = None
+    for _attempt in range(3):
+        response = llm.completion(
+            messages=[
+                Message(role="system", content=[TextContent(text=_SYSTEM_PROMPT)]),
+                Message(role="user", content=[TextContent(text=numbered)]),
+            ],
+            response_format=_RESPONSE_SCHEMA,
+        )
+        raw = _extract_response_text(response)
+        try:
+            payload = _extract_json(raw)
+            boundaries = _parse_boundaries(payload, total_lines=len(lines))
+            segments = _slice_segments(boundaries, lines, doc_id)
+            return _merge_short(segments, min_words=min_words)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    detail = str(last_error) if last_error is not None else "unknown parse failure"
+    raise ValueError(
+        f"failed to parse segmentation JSON after 3 attempts: {detail}"
     )
-    raw = "".join(
-        part.text for part in response.message.content if isinstance(part, TextContent)
-    )
-    payload = _extract_json(raw)
-    boundaries = _parse_boundaries(payload, total_lines=len(lines))
-    segments = _slice_segments(boundaries, lines, doc_id)
-    return _merge_short(segments, min_words=min_words)
