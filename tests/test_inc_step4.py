@@ -358,10 +358,9 @@ def test_cli_review_runs_against_stub(
     )
 
     assert cli.main(["--db", str(db), "code", "alice", "--mock-embeddings"]) == 0
-    assert cli.main(["--db", str(db), "aggregate", "--mock-embeddings"]) == 0
     capsys.readouterr()
 
-    rc = cli.main(["--db", str(db), "review", "--mock-embeddings"])
+    rc = cli.main(["--db", str(db), "update-codebook", "--mock-embeddings"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "done: 2 ok" in out  # 2 codes (alpha + beta) reviewed

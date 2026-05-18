@@ -1,26 +1,20 @@
-"""Unified `ta` command-line interface.
+"""Unified `ta` command-line interface for the thematic-analysis pipeline.
 
-Covers the full thematic-analysis pipeline:
-
-  * document utilities — `segment`, `add-document`, `enqueue`
-  * Stage 1 (codebook) — `init`, `add-coder`, `code`, `aggregate`,
-    `review`, `status`, `list-codebooks`, `show-codebook`, `export-codebook`
-  * Stage 2 (themes) — `add-theme-coder`, `theme-code`,
-    `theme-aggregate`, `theme-status`, `export-themes`,
-    `export-themes-html`
-  * shared — `set-research-context`, `show-research-context`,
-    `clear-research-context`
+Subcommands are grouped by stage (Setup, Documents, Stage 1, Stage 2) in
+`ta --help`. Run `ta <command> --help` for per-command arguments.
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated
 
 
 # Quiet down noisy ML deps before anything imports them. The Coder/Reviewer
@@ -43,6 +37,9 @@ try:
 except ImportError:
     pass
 
+import click  # noqa: E402  (typer wraps click; we catch its exceptions)
+import typer  # noqa: E402
+
 from thematic_analysis_inc import (  # noqa: E402
     cli_utils,
     research_context_cli,
@@ -53,7 +50,47 @@ from thematic_analysis_inc.html_report import (  # noqa: E402
     render_themes_html_from_json,
 )
 
+
 log = logging.getLogger("ta")
+
+
+# Rich help panels (groups) ---------------------------------------------------
+
+PANEL_SETUP = "Setup"
+PANEL_DOCUMENTS = "Documents"
+PANEL_S1_CODERS = "Stage 1 — coder management"
+PANEL_S1_PIPELINE = "Stage 1 — codebook pipeline"
+PANEL_S1_STATUS = "Stage 1 — status & codebook inspection"
+PANEL_S2_CODERS = "Stage 2 — theme coder management"
+PANEL_S2_PIPELINE = "Stage 2 — theme pipeline"
+PANEL_S2_STATUS = "Stage 2 — status & theme exports"
+PANEL_DEBUG = "Debugging"
+
+
+# Subcommands that operate on an existing DB. Excludes `init` (which is
+# allowed to create the DB) and `segment` (which doesn't touch the DB).
+_REQUIRES_EXISTING_DB = {
+    "add-coder",
+    "rm-coder",
+    "list-coders",
+    "add-document",
+    "code",
+    "update-codebook",
+    "status",
+    "list-codebooks",
+    "show-codebook",
+    "export-codebook",
+    "add-theme-coder",
+    "rm-theme-coder",
+    "list-theme-coders",
+    "generate-themes",
+    "theme-status",
+    "export-themes",
+    "export-themes-html",
+    "set-research-context",
+    "show-research-context",
+    "clear-research-context",
+}
 
 
 def _make_progress(label: str):
@@ -82,10 +119,15 @@ def _make_progress(label: str):
     )
 
 
-# init ------------------------------------------------------------------------
+# Handler implementations -----------------------------------------------------
+#
+# These take a `SimpleNamespace` of arguments and return an int exit code.
+# Each Typer command below builds the namespace from its parameters and
+# delegates here, so the underlying logic stays argparse-compatible and
+# small adjustments to flags don't need wholesale rewrites.
 
 
-def _cmd_init(args: argparse.Namespace) -> int:
+def _cmd_init(args: SimpleNamespace) -> int:
     conn = store.init_db(args.db)
     latest = store.latest_codebook_version(conn)
     assert latest is not None
@@ -93,10 +135,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-# coders ----------------------------------------------------------------------
-
-
-def _cmd_add_coder(args: argparse.Namespace) -> int:
+def _cmd_add_coder(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     inserted = store.add_coder(conn, args.coder_id, args.identity)
     if inserted:
@@ -106,7 +145,7 @@ def _cmd_add_coder(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_rm_coder(args: argparse.Namespace) -> int:
+def _cmd_rm_coder(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     try:
         removed, runs_deleted = store.remove_coder(
@@ -124,7 +163,7 @@ def _cmd_rm_coder(args: argparse.Namespace) -> int:
     return 1
 
 
-def _cmd_list_coders(args: argparse.Namespace) -> int:
+def _cmd_list_coders(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     coders = store.list_coders(conn)
     if not coders:
@@ -135,64 +174,7 @@ def _cmd_list_coders(args: argparse.Namespace) -> int:
     return 0
 
 
-# segments --------------------------------------------------------------------
-
-
-def _load_segments_file(path: str) -> list[tuple[str, str]]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(path)
-    raw = p.read_text(encoding="utf-8").strip()
-    if not raw:
-        return []
-    items: list = []
-    if raw.startswith("["):
-        items = json.loads(raw)
-    else:
-        for lineno, line in enumerate(raw.splitlines(), 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                items.append(json.loads(line))
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"{p}: line {lineno}: invalid JSON ({e.msg})"
-                ) from e
-    out: list[tuple[str, str]] = []
-    for i, it in enumerate(items):
-        if isinstance(it, dict):
-            try:
-                out.append((str(it["segment_id"]), str(it["text"])))
-            except KeyError as e:
-                raise ValueError(
-                    f"{p}: entry #{i + 1} missing key {e}"
-                ) from e
-        elif isinstance(it, list | tuple) and len(it) == 2:
-            out.append((str(it[0]), str(it[1])))
-        else:
-            raise ValueError(
-                f"{p}: entry #{i + 1} is not a [id, text] pair or "
-                f"{{segment_id, text}} object: {it!r}"
-            )
-    return out
-
-
-def _cmd_enqueue(args: argparse.Namespace) -> int:
-    segments = _load_segments_file(args.segments)
-    if not segments:
-        print("no segments found in input file", file=sys.stderr)
-        return 1
-    conn = store.connect(args.db)
-    result = store.enqueue_segments(conn, segments, batch=args.batch)
-    print(
-        f"enqueued: inserted={result.inserted_segments} "
-        f"skipped={result.skipped_segments}"
-    )
-    return 0
-
-
-def _cmd_add_document(args: argparse.Namespace) -> int:
+def _cmd_add_document(args: SimpleNamespace) -> int:
     from thematic_analysis.loaders import load_text_file  # lazy
 
     paths = [Path(p) for p in args.files]
@@ -310,9 +292,6 @@ def _cmd_add_document(args: argparse.Namespace) -> int:
     return 1 if total_errors and total_files == 0 else 0
 
 
-# code ------------------------------------------------------------------------
-
-
 def _format_codes(assignment) -> str:
     if assignment is None:
         return "  (none)"
@@ -402,7 +381,7 @@ def _resolve_workers(value: str | int) -> int:
     return 4
 
 
-def _cmd_code(args: argparse.Namespace) -> int:
+def _cmd_code(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     coder = store.get_coder(conn, args.coder_id)
     if coder is None:
@@ -473,10 +452,7 @@ def _cmd_code(args: argparse.Namespace) -> int:
     return 0
 
 
-# aggregate -------------------------------------------------------------------
-
-
-def _cmd_aggregate(args: argparse.Namespace) -> int:
+def _cmd_aggregate(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
 
     if args.retry_failed:
@@ -517,10 +493,7 @@ def _cmd_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
-# review ----------------------------------------------------------------------
-
-
-def _cmd_review(args: argparse.Namespace) -> int:
+def _cmd_review(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
 
     print(
@@ -551,16 +524,20 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-# status / export -------------------------------------------------------------
+def _cmd_update_codebook(args: SimpleNamespace) -> int:
+    rc = _cmd_aggregate(args)
+    if rc:
+        return rc
+    return _cmd_review(args)
 
 
-def _cmd_status(args: argparse.Namespace) -> int:
+def _cmd_status(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     print(store.status_counts(conn).format())
     return 0
 
 
-def _cmd_export_codebook(args: argparse.Namespace) -> int:
+def _cmd_export_codebook(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     if args.version is None:
         cv = store.latest_codebook_version(conn)
@@ -580,7 +557,7 @@ def _cmd_export_codebook(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_list_codebooks(args: argparse.Namespace) -> int:
+def _cmd_list_codebooks(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     versions = store.list_codebook_versions(conn)
     if not versions:
@@ -597,7 +574,7 @@ def _cmd_list_codebooks(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_show_codebook(args: argparse.Namespace) -> int:
+def _cmd_show_codebook(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     if args.version is None:
         cv = store.latest_codebook_version(conn)
@@ -639,10 +616,7 @@ def _cmd_show_codebook(args: argparse.Namespace) -> int:
     return 0
 
 
-# segment ---------------------------------------------------------------------
-
-
-def _cmd_segment(args: argparse.Namespace) -> int:
+def _cmd_segment(args: SimpleNamespace) -> int:
     from thematic_analysis.loaders import load_document  # lazy
 
     path = Path(args.file)
@@ -687,10 +661,7 @@ def _cmd_segment(args: argparse.Namespace) -> int:
     return 0
 
 
-# stage 2 — theme coders -------------------------------------------------------
-
-
-def _cmd_add_theme_coder(args: argparse.Namespace) -> int:
+def _cmd_add_theme_coder(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     inserted = store.add_theme_coder(conn, args.theme_coder_id, args.identity)
     if inserted:
@@ -705,7 +676,7 @@ def _cmd_add_theme_coder(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_rm_theme_coder(args: argparse.Namespace) -> int:
+def _cmd_rm_theme_coder(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     try:
         removed, runs_deleted = store.remove_theme_coder(
@@ -726,7 +697,7 @@ def _cmd_rm_theme_coder(args: argparse.Namespace) -> int:
     return 1
 
 
-def _cmd_list_theme_coders(args: argparse.Namespace) -> int:
+def _cmd_list_theme_coders(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     coders = store.list_theme_coders(conn)
     if not coders:
@@ -750,7 +721,7 @@ def _resolve_codebook_version(conn, version_arg: int | None) -> int | None:
     return cv.version
 
 
-def _cmd_theme_code(args: argparse.Namespace) -> int:
+def _cmd_theme_code(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
 
     version = _resolve_codebook_version(conn, args.codebook_version)
@@ -810,7 +781,7 @@ def _cmd_theme_code(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_theme_aggregate(args: argparse.Namespace) -> int:
+def _cmd_theme_aggregate(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
 
     version = _resolve_codebook_version(conn, args.codebook_version)
@@ -867,7 +838,14 @@ def _cmd_theme_aggregate(args: argparse.Namespace) -> int:
     return 1
 
 
-def _cmd_theme_status(args: argparse.Namespace) -> int:
+def _cmd_generate_themes(args: SimpleNamespace) -> int:
+    rc = _cmd_theme_code(args)
+    if rc:
+        return rc
+    return _cmd_theme_aggregate(args)
+
+
+def _cmd_theme_status(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     version = _resolve_codebook_version(conn, args.codebook_version)
     if version is None:
@@ -876,7 +854,7 @@ def _cmd_theme_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_export_themes(args: argparse.Namespace) -> int:
+def _cmd_export_themes(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     version = _resolve_codebook_version(conn, args.codebook_version)
     if version is None:
@@ -905,7 +883,7 @@ def _cmd_export_themes(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_export_themes_html(args: argparse.Namespace) -> int:
+def _cmd_export_themes_html(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     version = _resolve_codebook_version(conn, args.codebook_version)
     if version is None:
@@ -936,333 +914,608 @@ def _cmd_export_themes_html(args: argparse.Namespace) -> int:
     return 0
 
 
-# parser ----------------------------------------------------------------------
+# Typer wiring ---------------------------------------------------------------
 
 
-def _add_stage2_parsers(sub: argparse._SubParsersAction) -> None:
-    p_atc = sub.add_parser("add-theme-coder", help="register a theme coder")
-    p_atc.add_argument("theme_coder_id")
-    p_atc.add_argument(
-        "identity", help="free-text identity/persona shown to the agent"
-    )
-    p_atc.set_defaults(func=_cmd_add_theme_coder)
-
-    p_rtc = sub.add_parser(
-        "rm-theme-coder",
-        help="remove a theme coder (--force also drops their runs)",
-    )
-    p_rtc.add_argument("theme_coder_id")
-    p_rtc.add_argument("--force", action="store_true")
-    p_rtc.set_defaults(func=_cmd_rm_theme_coder)
-
-    p_ltc = sub.add_parser(
-        "list-theme-coders", help="list registered theme coders"
-    )
-    p_ltc.set_defaults(func=_cmd_list_theme_coders)
-
-    p_tc = sub.add_parser(
-        "theme-code",
-        help="run all pending theme coders against a codebook version",
-    )
-    p_tc.add_argument(
-        "--codebook-version",
-        type=int,
-        default=None,
-        help="codebook version to use (default: latest)",
-    )
-    p_tc.add_argument("--limit", type=int, default=None)
-    p_tc.add_argument("--workers", type=int, default=1)
-    p_tc.add_argument(
-        "--retry-failed",
-        action="store_true",
-        help="delete failed/running runs before starting",
-    )
-    p_tc.add_argument(
-        "--mock-embeddings",
-        action="store_true",
-        help="use deterministic mock embeddings (testing / no-network)",
-    )
-    p_tc.set_defaults(func=_cmd_theme_code)
-
-    p_ta = sub.add_parser(
-        "theme-aggregate",
-        help="aggregate theme results into a final theme set",
-    )
-    p_ta.add_argument(
-        "--codebook-version",
-        type=int,
-        default=None,
-        help="codebook version to aggregate (default: latest)",
-    )
-    p_ta.add_argument(
-        "--retry-failed",
-        action="store_true",
-        help="delete failed/running aggregation before starting",
-    )
-    p_ta.add_argument(
-        "--mock-embeddings",
-        action="store_true",
-        help="use deterministic mock embeddings (testing / no-network)",
-    )
-    p_ta.set_defaults(func=_cmd_theme_aggregate)
-
-    p_tst = sub.add_parser(
-        "theme-status", help="print stage-2 pipeline counts"
-    )
-    p_tst.add_argument(
-        "--codebook-version",
-        type=int,
-        default=None,
-        help="codebook version to report on (default: latest)",
-    )
-    p_tst.set_defaults(func=_cmd_theme_status)
-
-    p_ex = sub.add_parser(
-        "export-themes", help="write theme aggregation result"
-    )
-    p_ex.add_argument(
-        "--codebook-version",
-        type=int,
-        default=None,
-        help="codebook version (default: latest)",
-    )
-    p_ex.add_argument("-o", "--output", default="-")
-    p_ex.set_defaults(func=_cmd_export_themes)
-
-    p_eh = sub.add_parser(
-        "export-themes-html",
-        help="write theme aggregation result as a human-readable HTML report",
-    )
-    p_eh.add_argument(
-        "--codebook-version",
-        type=int,
-        default=None,
-        help="codebook version (default: latest)",
-    )
-    p_eh.add_argument(
-        "-o",
-        "--output",
-        default="-",
-        help="output HTML file (default: stdout)",
-    )
-    p_eh.set_defaults(func=_cmd_export_themes_html)
+app = typer.Typer(
+    name="ta",
+    help=__doc__,
+    add_completion=False,
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
-def _add_segment_parser(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser(
-        "segment", help="segment a document and print segments (no DB write)"
-    )
-    p.add_argument("file", help="path to .md/.txt/.pdf")
-    p.add_argument(
-        "--method",
-        choices=("paragraph", "sentence", "fixed", "llm"),
-        default="paragraph",
-    )
-    p.add_argument(
-        "--min-words",
-        type=int,
-        default=20,
-        help="minimum words per segment (for paragraph/sentence: drop; for llm: merge)",
-    )
-    p.add_argument("--max-words", type=int, default=500)
-    p.add_argument(
-        "--model",
-        default="gemini/gemini-2.5-flash-lite",
-        help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
-    )
-    p.set_defaults(func=_cmd_segment)
+def _run(ctx: typer.Context, handler, **kwargs) -> None:
+    """Validate the DB requirement, then dispatch to the legacy handler."""
+    sub = ctx.info_name
+    db = ctx.obj.get("db") if ctx.obj else None
+    needs_db = sub in _REQUIRES_EXISTING_DB
+    if (sub == "init" or needs_db) and not db:
+        typer.echo(f"--db is required for subcommand '{sub}'", err=True)
+        raise typer.Exit(2)
+    if needs_db and db:
+        rc = cli_utils.require_db(db)
+        if rc:
+            raise typer.Exit(rc)
+    args = SimpleNamespace(db=db, **kwargs)
+    rc = handler(args)
+    if rc:
+        raise typer.Exit(rc)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ta", description=__doc__)
-    p.add_argument(
-        "--db",
-        default=None,
-        help="path to the SQLite database (required by every subcommand "
-        "except `segment`)",
-    )
-    cli_utils.add_common_arguments(p)
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    p_init = sub.add_parser("init", help="create the schema and codebook v1")
-    p_init.set_defaults(func=_cmd_init)
-
-    p_ac = sub.add_parser("add-coder", help="register a coder")
-    p_ac.add_argument("coder_id")
-    p_ac.add_argument(
-        "identity",
-        help="free-text identity/persona shown to the coder agent",
-    )
-    p_ac.set_defaults(func=_cmd_add_coder)
-
-    p_rc = sub.add_parser(
-        "rm-coder",
-        help="remove a coder (use --force to also drop their coder_runs)",
-    )
-    p_rc.add_argument("coder_id")
-    p_rc.add_argument(
-        "--force",
-        action="store_true",
-        help="also delete this coder's coder_runs and coder_codes",
-    )
-    p_rc.set_defaults(func=_cmd_rm_coder)
-
-    p_lc = sub.add_parser("list-coders", help="list registered coders")
-    p_lc.set_defaults(func=_cmd_list_coders)
-
-    p_enq = sub.add_parser("enqueue", help="add segments from a JSON/JSONL file")
-    p_enq.add_argument("--segments", required=True)
-    p_enq.add_argument("--batch", type=int, default=None)
-    p_enq.set_defaults(func=_cmd_enqueue)
-
-    p_doc = sub.add_parser(
-        "add-document", help="load .md/.txt files, segment, and add"
-    )
-    p_doc.add_argument("files", nargs="+")
-    p_doc.add_argument(
-        "--segmentation",
-        choices=("llm", "paragraph", "sentence", "fixed"),
-        default="llm",
-    )
-    p_doc.add_argument(
-        "--min-words",
-        type=int,
-        default=50,
-        help="minimum words per segment (drop for paragraph/sentence; merge for llm)",
-    )
-    p_doc.add_argument("--max-words", type=int, default=500)
-    p_doc.add_argument(
-        "--model",
-        default="gemini/gemini-2.5-flash-lite",
-        help="litellm model id for --segmentation llm",
-    )
-    p_doc.add_argument("--batch", type=int, default=None)
-    p_doc.set_defaults(func=_cmd_add_document)
-
-    p_code = sub.add_parser("code", help="code all unprocessed segments for a coder")
-    p_code.add_argument("coder_id")
-    p_code.add_argument("--limit", type=int, default=None)
-    p_code.add_argument(
-        "--workers",
-        default="auto",
-        help='integer or "auto" (default: auto — 8 for Claude, 4 for Gemini/other)',
-    )
-    p_code.add_argument(
-        "--retry-failed",
-        action="store_true",
-        help="delete failed/running runs for this coder before starting",
-    )
-    p_code.add_argument(
-        "--recode",
-        action="store_true",
-        help="delete ALL existing runs for this coder (including 'done') "
-        "and re-code every segment from scratch",
-    )
-    p_code.add_argument(
-        "--mock-embeddings",
-        action="store_true",
-        help="use deterministic mock embeddings (testing / no-network)",
-    )
-    p_code.add_argument(
-        "--trace",
-        action="store_true",
-        help="print the system/user prompts, first-pass codes, critique, and refined codes for each segment",
-    )
-    p_code.set_defaults(func=_cmd_code)
-
-    p_agg = sub.add_parser(
-        "aggregate", help="aggregate codes for ready segments"
-    )
-    p_agg.add_argument("--limit", type=int, default=None)
-    p_agg.add_argument(
-        "--retry-failed",
-        action="store_true",
-        help="delete failed/pending aggregation rows before starting",
-    )
-    p_agg.add_argument(
-        "--mock-embeddings",
-        action="store_true",
-        help="use deterministic mock embeddings (testing / no-network)",
-    )
-    p_agg.set_defaults(func=_cmd_aggregate)
-
-    p_rev = sub.add_parser(
-        "review", help="review aggregated codes and update the codebook"
-    )
-    p_rev.add_argument("--limit", type=int, default=None)
-    p_rev.add_argument(
-        "--mock-embeddings",
-        action="store_true",
-        help="use deterministic mock embeddings (testing / no-network)",
-    )
-    p_rev.set_defaults(func=_cmd_review)
-
-    p_st = sub.add_parser("status", help="print pipeline counts")
-    p_st.set_defaults(func=_cmd_status)
-
-    p_lcb = sub.add_parser(
-        "list-codebooks", help="list all codebook versions"
-    )
-    p_lcb.set_defaults(func=_cmd_list_codebooks)
-
-    p_scb = sub.add_parser(
-        "show-codebook",
-        help="print a codebook version in a human-readable format",
-    )
-    p_scb.add_argument(
-        "--version",
-        type=int,
-        default=None,
-        help="codebook version (default: latest)",
-    )
-    p_scb.set_defaults(func=_cmd_show_codebook)
-
-    p_ex = sub.add_parser("export-codebook", help="write codebook snapshot")
-    p_ex.add_argument("--version", type=int, default=None)
-    p_ex.add_argument("-o", "--output", default="-")
-    p_ex.set_defaults(func=_cmd_export_codebook)
-
-    _add_stage2_parsers(sub)
-    _add_segment_parser(sub)
-    research_context_cli.register(sub)
-
-    return p
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    db: Annotated[
+        str | None,
+        typer.Option(
+            "--db",
+            help="path to the SQLite database (required by every subcommand "
+            "except `segment`)",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("-v", "--verbose", help="verbose logging (INFO level)"),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="debug logging and full tracebacks on unexpected errors",
+        ),
+    ] = False,
+) -> None:
+    cli_utils.setup_logging(verbose=verbose, debug=debug)
+    ctx.ensure_object(dict)
+    ctx.obj["db"] = db
+    ctx.obj["debug"] = debug
 
 
-# Subcommands that operate on an existing DB. Excludes `init` (which is
-# allowed to create the DB) and `segment` (which doesn't touch the DB).
-_REQUIRES_EXISTING_DB = {
-    "add-coder",
-    "rm-coder",
-    "list-coders",
-    "enqueue",
-    "add-document",
-    "code",
-    "aggregate",
-    "review",
-    "status",
-    "list-codebooks",
-    "show-codebook",
-    "export-codebook",
-    "add-theme-coder",
-    "rm-theme-coder",
-    "list-theme-coders",
-    "theme-code",
-    "theme-aggregate",
-    "theme-status",
-    "export-themes",
-    "export-themes-html",
-    "set-research-context",
-    "show-research-context",
-    "clear-research-context",
-}
+# Setup ----------------------------------------------------------------------
+
+
+@app.command(
+    name="init",
+    rich_help_panel=PANEL_SETUP,
+    help=(
+        "create an empty database — schema, an empty codebook (v1), "
+        "and no research context"
+    ),
+)
+def _cli_init(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_init)
+
+
+# Documents ------------------------------------------------------------------
+
+
+@app.command(
+    name="add-document",
+    rich_help_panel=PANEL_DOCUMENTS,
+    help="load .md/.txt files, segment, and add",
+)
+def _cli_add_document(
+    ctx: typer.Context,
+    files: Annotated[list[str], typer.Argument(help="files to ingest")],
+    segmentation: Annotated[
+        str,
+        typer.Option(
+            "--segmentation",
+            click_type=click.Choice(["llm", "paragraph", "sentence", "fixed"]),
+        ),
+    ] = "llm",
+    min_words: Annotated[
+        int,
+        typer.Option(
+            "--min-words",
+            help=(
+                "minimum words per segment "
+                "(drop for paragraph/sentence; merge for llm)"
+            ),
+        ),
+    ] = 50,
+    max_words: Annotated[int, typer.Option("--max-words")] = 500,
+    model: Annotated[
+        str,
+        typer.Option("--model", help="litellm model id for --segmentation llm"),
+    ] = "gemini/gemini-2.5-flash-lite",
+    batch: Annotated[int | None, typer.Option("--batch")] = None,
+) -> None:
+    _run(
+        ctx,
+        _cmd_add_document,
+        files=files,
+        segmentation=segmentation,
+        min_words=min_words,
+        max_words=max_words,
+        model=model,
+        batch=batch,
+    )
+
+
+# Stage 1 coder management ---------------------------------------------------
+
+
+@app.command(
+    name="add-coder",
+    rich_help_panel=PANEL_S1_CODERS,
+    help="register a coder",
+)
+def _cli_add_coder(
+    ctx: typer.Context,
+    coder_id: str,
+    identity: Annotated[
+        str,
+        typer.Argument(help="free-text identity/persona shown to the coder agent"),
+    ],
+) -> None:
+    _run(ctx, _cmd_add_coder, coder_id=coder_id, identity=identity)
+
+
+@app.command(
+    name="rm-coder",
+    rich_help_panel=PANEL_S1_CODERS,
+    help="remove a coder (use --force to also drop their coder_runs)",
+)
+def _cli_rm_coder(
+    ctx: typer.Context,
+    coder_id: str,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="also delete this coder's coder_runs and coder_codes",
+        ),
+    ] = False,
+) -> None:
+    _run(ctx, _cmd_rm_coder, coder_id=coder_id, force=force)
+
+
+@app.command(
+    name="list-coders",
+    rich_help_panel=PANEL_S1_CODERS,
+    help="list registered coders",
+)
+def _cli_list_coders(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_list_coders)
+
+
+# Stage 1 codebook pipeline --------------------------------------------------
+
+
+@app.command(
+    name="code",
+    rich_help_panel=PANEL_S1_PIPELINE,
+    help="code all unprocessed segments for a coder",
+)
+def _cli_code(
+    ctx: typer.Context,
+    coder_id: str,
+    limit: Annotated[int | None, typer.Option("--limit")] = None,
+    workers: Annotated[
+        str,
+        typer.Option(
+            "--workers",
+            help='integer or "auto" (default: auto — 8 for Claude, 4 for Gemini/other)',
+        ),
+    ] = "auto",
+    retry_failed: Annotated[
+        bool,
+        typer.Option(
+            "--retry-failed",
+            help="delete failed/running runs for this coder before starting",
+        ),
+    ] = False,
+    recode: Annotated[
+        bool,
+        typer.Option(
+            "--recode",
+            help=(
+                "delete ALL existing runs for this coder (including 'done') "
+                "and re-code every segment from scratch"
+            ),
+        ),
+    ] = False,
+    mock_embeddings: Annotated[
+        bool,
+        typer.Option(
+            "--mock-embeddings",
+            help="use deterministic mock embeddings (testing / no-network)",
+        ),
+    ] = False,
+    trace: Annotated[
+        bool,
+        typer.Option(
+            "--trace",
+            help=(
+                "print the system/user prompts, first-pass codes, critique, "
+                "and refined codes for each segment"
+            ),
+        ),
+    ] = False,
+) -> None:
+    _run(
+        ctx,
+        _cmd_code,
+        coder_id=coder_id,
+        limit=limit,
+        workers=workers,
+        retry_failed=retry_failed,
+        recode=recode,
+        mock_embeddings=mock_embeddings,
+        trace=trace,
+    )
+
+
+@app.command(
+    name="update-codebook",
+    rich_help_panel=PANEL_S1_PIPELINE,
+    help="aggregate codes for ready segments, then review them into the codebook",
+)
+def _cli_update_codebook(
+    ctx: typer.Context,
+    limit: Annotated[int | None, typer.Option("--limit")] = None,
+    retry_failed: Annotated[
+        bool,
+        typer.Option(
+            "--retry-failed",
+            help="delete failed/pending aggregation rows before starting",
+        ),
+    ] = False,
+    mock_embeddings: Annotated[
+        bool,
+        typer.Option(
+            "--mock-embeddings",
+            help="use deterministic mock embeddings (testing / no-network)",
+        ),
+    ] = False,
+) -> None:
+    _run(
+        ctx,
+        _cmd_update_codebook,
+        limit=limit,
+        retry_failed=retry_failed,
+        mock_embeddings=mock_embeddings,
+    )
+
+
+# Stage 1 status & inspection ------------------------------------------------
+
+
+@app.command(
+    name="status",
+    rich_help_panel=PANEL_S1_STATUS,
+    help="print pipeline counts",
+)
+def _cli_status(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_status)
+
+
+@app.command(
+    name="list-codebooks",
+    rich_help_panel=PANEL_S1_STATUS,
+    help="list all codebook versions",
+)
+def _cli_list_codebooks(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_list_codebooks)
+
+
+@app.command(
+    name="show-codebook",
+    rich_help_panel=PANEL_S1_STATUS,
+    help="print a codebook version in a human-readable format",
+)
+def _cli_show_codebook(
+    ctx: typer.Context,
+    version: Annotated[
+        int | None,
+        typer.Option("--version", help="codebook version (default: latest)"),
+    ] = None,
+) -> None:
+    _run(ctx, _cmd_show_codebook, version=version)
+
+
+@app.command(
+    name="export-codebook",
+    rich_help_panel=PANEL_S1_STATUS,
+    help="write codebook snapshot",
+)
+def _cli_export_codebook(
+    ctx: typer.Context,
+    version: Annotated[int | None, typer.Option("--version")] = None,
+    output: Annotated[str, typer.Option("-o", "--output")] = "-",
+) -> None:
+    _run(ctx, _cmd_export_codebook, version=version, output=output)
+
+
+# Stage 2 theme coder management ---------------------------------------------
+
+
+@app.command(
+    name="add-theme-coder",
+    rich_help_panel=PANEL_S2_CODERS,
+    help="register a theme coder",
+)
+def _cli_add_theme_coder(
+    ctx: typer.Context,
+    theme_coder_id: str,
+    identity: Annotated[
+        str,
+        typer.Argument(help="free-text identity/persona shown to the agent"),
+    ],
+) -> None:
+    _run(
+        ctx,
+        _cmd_add_theme_coder,
+        theme_coder_id=theme_coder_id,
+        identity=identity,
+    )
+
+
+@app.command(
+    name="rm-theme-coder",
+    rich_help_panel=PANEL_S2_CODERS,
+    help="remove a theme coder (--force also drops their runs)",
+)
+def _cli_rm_theme_coder(
+    ctx: typer.Context,
+    theme_coder_id: str,
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
+    _run(ctx, _cmd_rm_theme_coder, theme_coder_id=theme_coder_id, force=force)
+
+
+@app.command(
+    name="list-theme-coders",
+    rich_help_panel=PANEL_S2_CODERS,
+    help="list registered theme coders",
+)
+def _cli_list_theme_coders(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_list_theme_coders)
+
+
+# Stage 2 theme pipeline -----------------------------------------------------
+
+
+@app.command(
+    name="generate-themes",
+    rich_help_panel=PANEL_S2_PIPELINE,
+    help=(
+        "run all pending theme coders against a codebook version, "
+        "then aggregate their results into a final theme set"
+    ),
+)
+def _cli_generate_themes(
+    ctx: typer.Context,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option(
+            "--codebook-version",
+            help="codebook version to use (default: latest)",
+        ),
+    ] = None,
+    limit: Annotated[int | None, typer.Option("--limit")] = None,
+    workers: Annotated[int, typer.Option("--workers")] = 1,
+    retry_failed: Annotated[
+        bool,
+        typer.Option(
+            "--retry-failed",
+            help="delete failed/running runs and aggregations before starting",
+        ),
+    ] = False,
+    mock_embeddings: Annotated[
+        bool,
+        typer.Option(
+            "--mock-embeddings",
+            help="use deterministic mock embeddings (testing / no-network)",
+        ),
+    ] = False,
+) -> None:
+    _run(
+        ctx,
+        _cmd_generate_themes,
+        codebook_version=codebook_version,
+        limit=limit,
+        workers=workers,
+        retry_failed=retry_failed,
+        mock_embeddings=mock_embeddings,
+    )
+
+
+# Stage 2 status & exports ---------------------------------------------------
+
+
+@app.command(
+    name="theme-status",
+    rich_help_panel=PANEL_S2_STATUS,
+    help="print stage-2 pipeline counts",
+)
+def _cli_theme_status(
+    ctx: typer.Context,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option(
+            "--codebook-version",
+            help="codebook version to report on (default: latest)",
+        ),
+    ] = None,
+) -> None:
+    _run(ctx, _cmd_theme_status, codebook_version=codebook_version)
+
+
+@app.command(
+    name="export-themes",
+    rich_help_panel=PANEL_S2_STATUS,
+    help="write theme aggregation result",
+)
+def _cli_export_themes(
+    ctx: typer.Context,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option("--codebook-version", help="codebook version (default: latest)"),
+    ] = None,
+    output: Annotated[str, typer.Option("-o", "--output")] = "-",
+) -> None:
+    _run(
+        ctx,
+        _cmd_export_themes,
+        codebook_version=codebook_version,
+        output=output,
+    )
+
+
+@app.command(
+    name="export-themes-html",
+    rich_help_panel=PANEL_S2_STATUS,
+    help="write theme aggregation result as a human-readable HTML report",
+)
+def _cli_export_themes_html(
+    ctx: typer.Context,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option("--codebook-version", help="codebook version (default: latest)"),
+    ] = None,
+    output: Annotated[
+        str,
+        typer.Option("-o", "--output", help="output HTML file (default: stdout)"),
+    ] = "-",
+) -> None:
+    _run(
+        ctx,
+        _cmd_export_themes_html,
+        codebook_version=codebook_version,
+        output=output,
+    )
+
+
+# Research-context commands are registered via the helper module so its
+# specific options stay collocated with its handlers.
+research_context_cli.register_typer(app, _run, panel=PANEL_SETUP)
+
+
+# Debugging ------------------------------------------------------------------
+
+
+@app.command(
+    name="segment",
+    rich_help_panel=PANEL_DEBUG,
+    help="segment a document and print segments (no DB write)",
+)
+def _cli_segment(
+    ctx: typer.Context,
+    file: Annotated[str, typer.Argument(help="path to .md/.txt/.pdf")],
+    method: Annotated[
+        str,
+        typer.Option(
+            "--method",
+            click_type=click.Choice(["paragraph", "sentence", "fixed", "llm"]),
+        ),
+    ] = "paragraph",
+    min_words: Annotated[
+        int,
+        typer.Option(
+            "--min-words",
+            help=(
+                "minimum words per segment (for paragraph/sentence: drop; "
+                "for llm: merge)"
+            ),
+        ),
+    ] = 20,
+    max_words: Annotated[int, typer.Option("--max-words")] = 500,
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
+        ),
+    ] = "gemini/gemini-2.5-flash-lite",
+) -> None:
+    _run(
+        ctx,
+        _cmd_segment,
+        file=file,
+        method=method,
+        min_words=min_words,
+        max_words=max_words,
+        model=model,
+    )
+
+
+# Entry point ----------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    return cli_utils.run_cli(
-        parser, argv, requires_existing_db=_REQUIRES_EXISTING_DB
-    )
+    """Parse argv and run the Typer app, returning an int exit code.
+
+    Wraps the Typer/Click invocation with `standalone_mode=False` so we can
+    map Click's exceptions to the same exit codes the previous argparse
+    entry point used (and so tests can call `main([...])` directly).
+    """
+    debug_env = "--debug" in (argv or sys.argv[1:])
+    try:
+        rv = app(args=argv, standalone_mode=False)
+        return int(rv) if isinstance(rv, int) else 0
+    except click.exceptions.UsageError as e:
+        e.show()
+        return int(e.exit_code) if e.exit_code is not None else 2
+    except click.exceptions.Abort:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except click.exceptions.ClickException as e:
+        e.show()
+        return int(e.exit_code) if e.exit_code is not None else 1
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else 2
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except FileNotFoundError as e:
+        print(f"error: file not found: {e.filename or e}", file=sys.stderr)
+        if debug_env:
+            import traceback
+
+            traceback.print_exception(e, file=sys.stderr)
+        return 1
+    except PermissionError as e:
+        print(f"error: permission denied: {e.filename or e}", file=sys.stderr)
+        return 1
+    except IsADirectoryError as e:
+        print(
+            f"error: expected a file, got a directory: {e.filename or e}",
+            file=sys.stderr,
+        )
+        return 1
+    except json.JSONDecodeError as e:
+        print(
+            f"error: invalid JSON: {e.msg} (line {e.lineno}, column {e.colno})",
+            file=sys.stderr,
+        )
+        return 1
+    except sqlite3.DatabaseError as e:
+        print(f"error: database error: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        if debug_env:
+            import traceback
+
+            print(
+                f"error: unexpected error: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            traceback.print_exception(e, file=sys.stderr)
+        else:
+            print(
+                f"error: unexpected error: {type(e).__name__}: {e} "
+                "(run with --debug for a full traceback)",
+                file=sys.stderr,
+            )
+        return 1
 
 
 if __name__ == "__main__":

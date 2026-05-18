@@ -270,7 +270,7 @@ def test_cli_aggregate_runs_against_stub(
     ) == 0
     capsys.readouterr()
 
-    rc = cli.main(["--db", str(db), "aggregate", "--mock-embeddings"])
+    rc = cli.main(["--db", str(db), "update-codebook", "--mock-embeddings"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "done: 2 ok, 0 failed" in out

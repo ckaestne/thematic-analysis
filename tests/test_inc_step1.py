@@ -315,24 +315,6 @@ def test_cli_rm_coder(tmp_path: Path, capsys) -> None:
     assert cli.main(["--db", str(db), "rm-coder", "ghost"]) == 1
 
 
-def test_cli_enqueue_jsonl(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    segs_path = tmp_path / "segs.jsonl"
-    segs_path.write_text(
-        "\n".join(
-            json.dumps({"segment_id": f"s{i}", "text": f"t{i}"})
-            for i in range(2)
-        )
-    )
-    assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(
-        ["--db", str(db), "enqueue", "--segments", str(segs_path)]
-    ) == 0
-    conn = store.connect(db)
-    n = conn.execute("SELECT COUNT(*) AS n FROM segments").fetchone()["n"]
-    assert n == 2
-
-
 def test_cli_add_document_markdown(tmp_path: Path, capsys) -> None:
     db = tmp_path / "x.sqlite"
     md = tmp_path / "alpha.md"
