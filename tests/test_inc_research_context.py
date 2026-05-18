@@ -12,7 +12,8 @@ from thematic_analysis.agents.theme_aggregator import (
 )
 from thematic_analysis.research_context import ResearchContext
 
-from thematic_analysis_inc import store, workers
+from thematic_analysis_inc import workers
+from thematic_analysis_inc import db as store
 
 
 CTX_DESCRIPTION = (

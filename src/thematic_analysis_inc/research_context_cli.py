@@ -14,7 +14,7 @@ from typing import Annotated
 import typer
 
 from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
-from thematic_analysis_inc import store
+from thematic_analysis_inc import db as store  # noqa: N812 — keep `store` name local
 
 
 def _load_description(args: SimpleNamespace) -> str:

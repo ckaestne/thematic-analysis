@@ -29,7 +29,8 @@ from openhands.sdk import Message, TextContent
 from thematic_analysis.agents.coder import CoderAgent
 from thematic_analysis.codebook import Codebook
 from thematic_analysis.research_context import ResearchContext
-from thematic_analysis_inc import store, workers
+from thematic_analysis_inc import workers
+from thematic_analysis_inc import db as store
 from thematic_analysis_inc.refinement import (
     CRITIC_SYSTEM_PROMPT,
     Critic,
@@ -403,7 +404,7 @@ class TestWrapWithRefinement:
 class TestWorkerDefaultFactory:
     def test_default_factory_returns_refining_agent(self):
         codebook = Codebook(use_mock_embeddings=True)
-        coder_row = store.Coder(coder_id="c1", identity="x", created_at="now")
+        coder_row = store.Coder(coder_id=1, name="c1", identity="x", created_at="now")
         agent = workers.default_coder_factory(codebook, coder_row)
         assert isinstance(agent, RefiningCoderAgent)
         assert isinstance(agent.coder, CoderAgent)
@@ -417,8 +418,9 @@ class TestWorkerEndToEnd:
     def test_code_one_persists_refined_codes(self, tmp_path: Path):
         db = tmp_path / "x.sqlite"
         conn = store.init_db(db)
-        store.add_coder(conn, "c1", "id1")
-        store.enqueue_segments(conn, _segments(1))
+        c = store.add_coder(conn, name="c1", identity="id1")
+        doc = store.add_document(conn, "d.md", b"data")
+        store.enqueue_segments(conn, [(doc, "text 0", None, None, 0)])
 
         llm, _ = _fake_llm(
             [
@@ -435,12 +437,13 @@ class TestWorkerEndToEnd:
             return wrap_with_refinement(base)
 
         res = workers.code_one(
-            conn, "c1", use_mock_embeddings=True, agent_factory=factory
+            conn, c.coder_id, use_mock_embeddings=True, agent_factory=factory
         )
         assert res is not None and res["ok"], res
         assert res["n_codes"] == 1
 
         codes = conn.execute(
-            "SELECT code FROM coder_codes ORDER BY position"
+            "SELECT code FROM codes WHERE coder_id = ? ORDER BY code_id",
+            (c.coder_id,),
         ).fetchall()
-        assert [c["code"] for c in codes] == ["deeper-concept"]
+        assert [row["code"] for row in codes] == ["deeper-concept"]

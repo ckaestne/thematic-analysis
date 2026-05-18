@@ -1,4 +1,12 @@
-"""Tests for thematic_analysis_inc steps 1–2 (schema, DAL, CLI, code worker)."""
+"""Tests for thematic_analysis_inc Step 1 (schema, DAL, code worker).
+
+Updated for the refactored schema:
+- INTEGER segment_ids (auto-assigned)
+- INTEGER coder_ids (>= 1 for real coders, 0 = aggregator, -1 = reviewer)
+- coding_queue replaces coder_runs (status derived from claimed_at/finished_at/error)
+- codes table replaces coder_codes; quotes / codes_supporting_quotes
+- codebook_versions has no snapshot_json
+"""
 
 from __future__ import annotations
 
@@ -8,12 +16,26 @@ from pathlib import Path
 
 import pytest
 
-from thematic_analysis_inc import cli, store, workers
-from thematic_analysis_inc.schema import create_schema
+from thematic_analysis_inc import cli, workers
+from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db.schema import create_schema
 
 
-def _segments(n: int) -> list[tuple[str, str]]:
-    return [(f"seg_{i:04d}", f"text {i}") for i in range(n)]
+def _add_segments(conn, doc_id: int, n: int) -> list[int]:
+    rows = [(doc_id, f"text {i}", None, None, i) for i in range(n)]
+    store.enqueue_segments(conn, rows)
+    return [
+        int(r["segment_id"])
+        for r in conn.execute(
+            "SELECT segment_id FROM segments WHERE document_id = ? "
+            "ORDER BY position",
+            (doc_id,),
+        ).fetchall()
+    ]
+
+
+def _seed_document(conn) -> int:
+    return store.add_document(conn, "doc.md", b"content")
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +50,20 @@ def test_init_creates_schema_and_v1(tmp_path: Path) -> None:
     assert latest is not None
     assert latest.version == 1
     assert latest.parent_version is None
-    assert json.loads(latest.snapshot_json) == {"codes": []}
+    # Empty codebook serialises to {"codes": []}
+    snap = json.loads(store.codebook_to_json_for_version(conn, 1))
+    assert snap == {"codes": []}
+
+
+def test_init_seeds_system_coders(tmp_path: Path) -> None:
+    db = tmp_path / "x.sqlite"
+    conn = store.init_db(db)
+    agg = store.get_coder(conn, 0)
+    rev = store.get_coder(conn, -1)
+    assert agg is not None and agg.name == "aggregator"
+    assert rev is not None and rev.name == "reviewer"
+    # list_coders only returns real coders.
+    assert store.list_coders(conn) == []
 
 
 def test_init_is_idempotent(tmp_path: Path) -> None:
@@ -49,12 +84,7 @@ def test_create_schema_idempotent(tmp_path: Path) -> None:
 def test_insert_codebook_version_appends(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
     conn = store.init_db(db)
-    v2 = store.insert_codebook_version(
-        conn,
-        json.dumps({"codes": [{"code": "x", "quotes": []}]}),
-        parent=1,
-        created_by="reviewer",
-    )
+    v2 = store.insert_codebook_version(conn, parent=1, created_by="reviewer")
     assert v2 == 2
     latest = store.latest_codebook_version(conn)
     assert latest is not None
@@ -67,71 +97,48 @@ def test_insert_codebook_version_appends(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_add_and_remove_coder(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    assert store.add_coder(conn, "c1", "feminist scholar") is True
-    assert store.add_coder(conn, "c1", "duplicate") is False  # idempotent
-    coders = store.list_coders(conn)
-    assert [c.coder_id for c in coders] == ["c1"]
-    assert coders[0].identity == "feminist scholar"
-    removed, runs_deleted = store.remove_coder(conn, "c1")
-    assert removed is True and runs_deleted == 0
-    assert store.list_coders(conn) == []
+def test_add_coder_assigns_increasing_ids(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    c1 = store.add_coder(conn, name="alice", identity="feminist scholar")
+    c2 = store.add_coder(conn, name="bob", identity="marxist")
+    assert c1.coder_id == 1 and c2.coder_id == 2
+    assert [c.coder_id for c in store.list_coders(conn)] == [1, 2]
 
 
-def test_remove_coder_refuses_when_runs_exist(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "x")
-    store.enqueue_segments(conn, _segments(1))
-    store.start_coder_run(conn, "seg_0000", "c1", 1)
+def test_remove_coder_refuses_when_queue_rows_exist(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    c = store.add_coder(conn, name="alice", identity="x")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 1)
+    store.coding.sync_coding_queue(conn)
     with pytest.raises(RuntimeError):
-        store.remove_coder(conn, "c1")
-    # force=True cascades: deletes coder_runs (and any coder_codes) then coder.
-    removed, runs_deleted = store.remove_coder(conn, "c1", force=True)
-    assert removed is True and runs_deleted == 1
-    n_runs = conn.execute("SELECT COUNT(*) AS n FROM coder_runs").fetchone()["n"]
-    assert n_runs == 0
+        store.cascades.delete_coder_cascade(conn, c.coder_id)
+    removed, queue_deleted = store.cascades.delete_coder_cascade(
+        conn, c.coder_id, force=True
+    )
+    assert removed is True and queue_deleted == 1
+    n_queue = conn.execute(
+        "SELECT COUNT(*) AS n FROM coding_queue"
+    ).fetchone()["n"]
+    assert n_queue == 0
 
 
 def test_enqueue_inserts_segments_only(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    result = store.enqueue_segments(conn, _segments(3))
-    assert result.inserted_segments == 3
-    assert result.skipped_segments == 0
-    n_runs = conn.execute(
-        "SELECT COUNT(*) AS n FROM coder_runs"
+    conn = store.init_db(tmp_path / "x.sqlite")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 3)
+    n_queue = conn.execute(
+        "SELECT COUNT(*) AS n FROM coding_queue"
     ).fetchone()["n"]
-    assert n_runs == 0  # no runs created up front
+    assert n_queue == 0  # no queue rows until sync_coding_queue runs
 
 
 def test_add_document_and_link_segments(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
+    conn = store.init_db(tmp_path / "x.sqlite")
     doc_id = store.add_document(conn, "post.md", b"# hello\n\nworld\n")
     assert doc_id >= 1
-
-    rows = [
-        ("seg_b", "second segment text", "Second", doc_id, 1),
-        ("seg_a", "first segment text", "First", doc_id, 0),
-    ]
-    result = store.enqueue_segments(conn, rows)
-    assert result.inserted_segments == 2
-
-    fetched = conn.execute(
-        "SELECT segment_id, title, document_id, position FROM segments "
-        "WHERE document_id = ? ORDER BY position",
-        (doc_id,),
-    ).fetchall()
-    assert [
-        (r["segment_id"], r["title"], r["document_id"], r["position"])
-        for r in fetched
-    ] == [
-        ("seg_a", "First", doc_id, 0),
-        ("seg_b", "Second", doc_id, 1),
-    ]
+    sids = _add_segments(conn, doc_id, 2)
+    assert len(sids) == 2
 
     doc = conn.execute(
         "SELECT filename, content FROM documents WHERE document_id = ?",
@@ -141,27 +148,14 @@ def test_add_document_and_link_segments(tmp_path: Path) -> None:
     assert bytes(doc["content"]) == b"# hello\n\nworld\n"
 
 
-def test_enqueue_idempotent_on_segment_id(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.enqueue_segments(conn, _segments(2))
-    result = store.enqueue_segments(
-        conn, _segments(2) + [("seg_0099", "extra")]
-    )
-    assert result.inserted_segments == 1
-    assert result.skipped_segments == 2
-
-
-def test_segments_to_code_excludes_already_run(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "x")
-    store.enqueue_segments(conn, _segments(3))
-    todo = store.segments_to_code(conn, "c1")
-    assert {r["segment_id"] for r in todo} == {"seg_0000", "seg_0001", "seg_0002"}
-    store.start_coder_run(conn, "seg_0000", "c1", 1)
-    todo = store.segments_to_code(conn, "c1")
-    assert {r["segment_id"] for r in todo} == {"seg_0001", "seg_0002"}
+def test_sync_coding_queue_pairs_segments_and_coders(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    store.add_coder(conn, name="alice", identity="i")
+    store.add_coder(conn, name="bob", identity="i")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 3)
+    n = store.coding.sync_coding_queue(conn)
+    assert n == 6  # 3 segments x 2 real coders
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +181,7 @@ class _StubAgent:
         self.raise_on = raise_on
 
     def code_segment(self, segment_id, text):
-        if self.raise_on is not None and segment_id == self.raise_on:
+        if self.raise_on is not None and str(segment_id) == self.raise_on:
             raise RuntimeError("boom")
         return _StubAssignment(
             segment_id=segment_id,
@@ -208,78 +202,84 @@ def _stub_factory(raise_on: str | None = None):
 
 
 def test_code_one_persists_codes(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "id1")
-    store.enqueue_segments(conn, _segments(2))
+    conn = store.init_db(tmp_path / "x.sqlite")
+    c = store.add_coder(conn, name="alice", identity="id1")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 2)
 
     res = workers.code_one(
-        conn, "c1", use_mock_embeddings=True, agent_factory=_stub_factory()
+        conn, c.coder_id, use_mock_embeddings=True,
+        agent_factory=_stub_factory(),
     )
     assert res is not None and res["ok"]
-    assert res["coder_id"] == "c1"
+    assert res["coder_id"] == c.coder_id
     assert res["n_codes"] == 2
 
-    rows = conn.execute(
-        "SELECT segment_id, status FROM coder_runs ORDER BY id"
-    ).fetchall()
-    assert len(rows) == 1
-    assert rows[0]["status"] == "done"
+    # Queue row done.
+    row = conn.execute(
+        "SELECT claimed_at, finished_at, error FROM coding_queue "
+        "WHERE coder_id = ? AND finished_at IS NOT NULL",
+        (c.coder_id,),
+    ).fetchone()
+    assert row is not None and row["error"] is None
+
     codes = conn.execute(
-        "SELECT code, position, is_new FROM coder_codes ORDER BY position"
+        "SELECT code, rationale FROM codes WHERE coder_id = ? ORDER BY code_id",
+        (c.coder_id,),
     ).fetchall()
-    assert [c["code"] for c in codes][1] == "shared"
-    assert codes[0]["is_new"] == 1
+    assert {row["code"] for row in codes} >= {"shared"}
 
 
 def test_code_one_returns_none_when_done(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "id1")
-    store.enqueue_segments(conn, _segments(1))
-    workers.code_one(conn, "c1", agent_factory=_stub_factory())
-    res = workers.code_one(conn, "c1", agent_factory=_stub_factory())
+    conn = store.init_db(tmp_path / "x.sqlite")
+    c = store.add_coder(conn, name="alice", identity="id1")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 1)
+    workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
+    res = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
     assert res is None
 
 
-def test_code_one_failure_records_failed_row(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "id1")
-    store.enqueue_segments(conn, _segments(1))
+def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    c = store.add_coder(conn, name="alice", identity="id1")
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
     res = workers.code_one(
-        conn, "c1", agent_factory=_stub_factory(raise_on="seg_0000")
+        conn, c.coder_id,
+        agent_factory=_stub_factory(raise_on=str(sids[0])),
     )
     assert res is not None and res["ok"] is False
     assert "boom" in res["error"]
     row = conn.execute(
-        "SELECT status, error FROM coder_runs WHERE coder_id='c1'"
+        "SELECT error FROM coding_queue WHERE coder_id = ?", (c.coder_id,)
     ).fetchone()
-    assert row["status"] == "failed"
-    assert "boom" in row["error"]
+    assert row is not None and "boom" in row["error"]
 
-    # retry: clear and re-run
-    cleared = store.reset_unfinished_coder_runs(conn, "c1")
+    # Reset failed → retry.
+    cleared = store.cascades.reset_failed_assignments(conn, c.coder_id)
     assert cleared == 1
-    res2 = workers.code_one(conn, "c1", agent_factory=_stub_factory())
+    res2 = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
     assert res2 is not None and res2["ok"]
 
 
 def test_code_one_two_coders_independent(tmp_path: Path) -> None:
-    db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    store.add_coder(conn, "c1", "id1")
-    store.add_coder(conn, "c2", "id2")
-    store.enqueue_segments(conn, _segments(2))
-    while workers.code_one(conn, "c1", agent_factory=_stub_factory()) is not None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    a = store.add_coder(conn, name="alice", identity="id1")
+    b = store.add_coder(conn, name="bob", identity="id2")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 2)
+    while workers.code_one(conn, a.coder_id, agent_factory=_stub_factory()) is not None:
         pass
-    while workers.code_one(conn, "c2", agent_factory=_stub_factory()) is not None:
+    while workers.code_one(conn, b.coder_id, agent_factory=_stub_factory()) is not None:
         pass
     rows = conn.execute(
-        "SELECT coder_id, COUNT(*) AS n FROM coder_runs GROUP BY coder_id "
-        "ORDER BY coder_id"
+        "SELECT coder_id, COUNT(*) AS n FROM coding_queue "
+        "WHERE finished_at IS NOT NULL GROUP BY coder_id ORDER BY coder_id"
     ).fetchall()
-    assert {r["coder_id"]: r["n"] for r in rows} == {"c1": 2, "c2": 2}
+    assert {r["coder_id"]: r["n"] for r in rows} == {
+        a.coder_id: 2, b.coder_id: 2
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +324,10 @@ def test_cli_add_document_markdown(tmp_path: Path, capsys) -> None:
         + ("Another paragraph that also clears the minimum word threshold " * 5)
     )
     assert cli.main(["--db", str(db), "init"]) == 0
-    rc = cli.main(["--db", str(db), "add-document", str(md)])
+    rc = cli.main(
+        ["--db", str(db), "add-document", "--segmentation", "paragraph",
+         str(md)]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "alpha.md" in out and "inserted=" in out
@@ -339,10 +342,16 @@ def test_cli_add_document_skips_existing_filename(tmp_path: Path, capsys) -> Non
         + ("Another paragraph that also clears the minimum word threshold " * 5)
     )
     assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(["--db", str(db), "add-document", str(md)]) == 0
+    assert cli.main(
+        ["--db", str(db), "add-document", "--segmentation", "paragraph",
+         str(md)]
+    ) == 0
     capsys.readouterr()
 
-    rc = cli.main(["--db", str(db), "add-document", str(md)])
+    rc = cli.main(
+        ["--db", str(db), "add-document", "--segmentation", "paragraph",
+         str(md)]
+    )
     assert rc == 0
     out = capsys.readouterr().out
     assert "already exists" in out
@@ -366,7 +375,8 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
     assert cli.main(["--db", str(db), "init"]) == 0
     assert cli.main(["--db", str(db), "add-coder", "c1", "voice"]) == 0
     conn = store.connect(db)
-    store.enqueue_segments(conn, _segments(3))
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 3)
     conn.close()
 
     monkeypatch.setattr(workers, "default_coder_factory", _stub_factory())
@@ -382,7 +392,7 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
 
     conn = store.connect(db)
     n_done = conn.execute(
-        "SELECT COUNT(*) AS n FROM coder_runs WHERE status='done'"
+        "SELECT COUNT(*) AS n FROM coding_queue WHERE finished_at IS NOT NULL"
     ).fetchone()["n"]
     assert n_done == 3
 
