@@ -75,8 +75,7 @@ _REQUIRES_EXISTING_DB = {
     "list-coders",
     "add-document",
     "code",
-    "aggregate",
-    "review",
+    "update-codebook",
     "status",
     "list-codebooks",
     "show-codebook",
@@ -84,8 +83,7 @@ _REQUIRES_EXISTING_DB = {
     "add-theme-coder",
     "rm-theme-coder",
     "list-theme-coders",
-    "theme-code",
-    "theme-aggregate",
+    "generate-themes",
     "theme-status",
     "export-themes",
     "export-themes-html",
@@ -526,6 +524,13 @@ def _cmd_review(args: SimpleNamespace) -> int:
     return 0
 
 
+def _cmd_update_codebook(args: SimpleNamespace) -> int:
+    rc = _cmd_aggregate(args)
+    if rc:
+        return rc
+    return _cmd_review(args)
+
+
 def _cmd_status(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     print(store.status_counts(conn).format())
@@ -833,6 +838,13 @@ def _cmd_theme_aggregate(args: SimpleNamespace) -> int:
     return 1
 
 
+def _cmd_generate_themes(args: SimpleNamespace) -> int:
+    rc = _cmd_theme_code(args)
+    if rc:
+        return rc
+    return _cmd_theme_aggregate(args)
+
+
 def _cmd_theme_status(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     version = _resolve_codebook_version(conn, args.codebook_version)
@@ -965,8 +977,14 @@ def _root(
 # Setup ----------------------------------------------------------------------
 
 
-@app.command(name="init", rich_help_panel=PANEL_SETUP,
-             help="create the schema and codebook v1")
+@app.command(
+    name="init",
+    rich_help_panel=PANEL_SETUP,
+    help=(
+        "create an empty database — schema, an empty codebook (v1), "
+        "and no research context"
+    ),
+)
 def _cli_init(ctx: typer.Context) -> None:
     _run(ctx, _cmd_init)
 
@@ -1133,11 +1151,11 @@ def _cli_code(
 
 
 @app.command(
-    name="aggregate",
+    name="update-codebook",
     rich_help_panel=PANEL_S1_PIPELINE,
-    help="aggregate codes for ready segments",
+    help="aggregate codes for ready segments, then review them into the codebook",
 )
-def _cli_aggregate(
+def _cli_update_codebook(
     ctx: typer.Context,
     limit: Annotated[int | None, typer.Option("--limit")] = None,
     retry_failed: Annotated[
@@ -1157,30 +1175,11 @@ def _cli_aggregate(
 ) -> None:
     _run(
         ctx,
-        _cmd_aggregate,
+        _cmd_update_codebook,
         limit=limit,
         retry_failed=retry_failed,
         mock_embeddings=mock_embeddings,
     )
-
-
-@app.command(
-    name="review",
-    rich_help_panel=PANEL_S1_PIPELINE,
-    help="review aggregated codes and update the codebook",
-)
-def _cli_review(
-    ctx: typer.Context,
-    limit: Annotated[int | None, typer.Option("--limit")] = None,
-    mock_embeddings: Annotated[
-        bool,
-        typer.Option(
-            "--mock-embeddings",
-            help="use deterministic mock embeddings (testing / no-network)",
-        ),
-    ] = False,
-) -> None:
-    _run(ctx, _cmd_review, limit=limit, mock_embeddings=mock_embeddings)
 
 
 # Stage 1 status & inspection ------------------------------------------------
@@ -1282,11 +1281,14 @@ def _cli_list_theme_coders(ctx: typer.Context) -> None:
 
 
 @app.command(
-    name="theme-code",
+    name="generate-themes",
     rich_help_panel=PANEL_S2_PIPELINE,
-    help="run all pending theme coders against a codebook version",
+    help=(
+        "run all pending theme coders against a codebook version, "
+        "then aggregate their results into a final theme set"
+    ),
 )
-def _cli_theme_code(
+def _cli_generate_themes(
     ctx: typer.Context,
     codebook_version: Annotated[
         int | None,
@@ -1301,7 +1303,7 @@ def _cli_theme_code(
         bool,
         typer.Option(
             "--retry-failed",
-            help="delete failed/running runs before starting",
+            help="delete failed/running runs and aggregations before starting",
         ),
     ] = False,
     mock_embeddings: Annotated[
@@ -1314,48 +1316,10 @@ def _cli_theme_code(
 ) -> None:
     _run(
         ctx,
-        _cmd_theme_code,
+        _cmd_generate_themes,
         codebook_version=codebook_version,
         limit=limit,
         workers=workers,
-        retry_failed=retry_failed,
-        mock_embeddings=mock_embeddings,
-    )
-
-
-@app.command(
-    name="theme-aggregate",
-    rich_help_panel=PANEL_S2_PIPELINE,
-    help="aggregate theme results into a final theme set",
-)
-def _cli_theme_aggregate(
-    ctx: typer.Context,
-    codebook_version: Annotated[
-        int | None,
-        typer.Option(
-            "--codebook-version",
-            help="codebook version to aggregate (default: latest)",
-        ),
-    ] = None,
-    retry_failed: Annotated[
-        bool,
-        typer.Option(
-            "--retry-failed",
-            help="delete failed/running aggregation before starting",
-        ),
-    ] = False,
-    mock_embeddings: Annotated[
-        bool,
-        typer.Option(
-            "--mock-embeddings",
-            help="use deterministic mock embeddings (testing / no-network)",
-        ),
-    ] = False,
-) -> None:
-    _run(
-        ctx,
-        _cmd_theme_aggregate,
-        codebook_version=codebook_version,
         retry_failed=retry_failed,
         mock_embeddings=mock_embeddings,
     )

@@ -10,7 +10,7 @@ A single `ta` CLI exposes every step as a subcommand:
 | Subcommand group | Stage |
 |---|---|
 | `code`, `aggregate`, `review` | Coding → Aggregation → Review → Codebook |
-| `theme-code`, `theme-aggregate` | Theme coding → Theme aggregation → Final themes |
+| `generate-themes` | Theme coding → Theme aggregation → Final themes |
 
 All subcommands share the same SQLite file (`--db <path>`).
 
@@ -126,33 +126,26 @@ assistant`) for the refinement turn, so provider-side prompt caching
 applies. If the first pass returns OUT_OF_SCOPE / no codes, both the
 critic and refinement turns are skipped.
 
-### 5. Aggregate codes
+### 5. Update the codebook
 
-Merges codes from all coders for each segment. Runs serially; safe to
-restart — already-aggregated segments are skipped.
-
-```bash
-ta --db analysis.sqlite aggregate
-
-# Retry failed aggregations
-ta --db analysis.sqlite aggregate --retry-failed
-```
-
-### 6. Review and build the codebook
-
-The reviewer processes each aggregated code one at a time, deciding whether
-to add it to the codebook, merge it with an existing code, update an
-existing code, or skip it. Each decision that changes the codebook creates
-a new versioned snapshot.
+Runs aggregation and review in sequence. Aggregation merges codes from all
+coders for each segment; review then processes each aggregated code,
+deciding whether to add it to the codebook, merge it with an existing code,
+update an existing code, or skip it. Each decision that changes the
+codebook creates a new versioned snapshot. Safe to restart —
+already-processed segments and codes are skipped.
 
 ```bash
-ta --db analysis.sqlite review
+ta --db analysis.sqlite update-codebook
 
-# Process only the next N codes
-ta --db analysis.sqlite review --limit 20
+# Retry failed aggregations and continue
+ta --db analysis.sqlite update-codebook --retry-failed
+
+# Process only the next N items per stage
+ta --db analysis.sqlite update-codebook --limit 20
 ```
 
-### 7. Check progress
+### 6. Check progress
 
 ```bash
 ta --db analysis.sqlite status
@@ -164,7 +157,7 @@ ta --db analysis.sqlite status
 # codebook:         v=52 codes=41
 ```
 
-### 8. Export the codebook
+### 7. Export the codebook
 
 ```bash
 # Latest version (default)
@@ -207,38 +200,24 @@ ta --db analysis.sqlite add-theme-coder t2 "phenomenological researcher"
 ta --db analysis.sqlite list-theme-coders
 ```
 
-### 2. Develop themes
+### 2. Generate themes
 
 Each theme coder independently reads the codebook and proposes a set of
-themes. Multiple coders can run in parallel.
+themes; once all coders have finished, their themes are merged into a
+final consolidated set. Multiple coders can run in parallel.
 
 ```bash
 # Uses the latest codebook version by default
-ta --db analysis.sqlite theme-code --workers 2
+ta --db analysis.sqlite generate-themes --workers 2
 
 # Pin to a specific codebook version
-ta --db analysis.sqlite theme-code --codebook-version 30
+ta --db analysis.sqlite generate-themes --codebook-version 30
 
-# Retry failed runs
-ta --db analysis.sqlite theme-code --retry-failed
+# Retry failed runs and aggregations
+ta --db analysis.sqlite generate-themes --retry-failed
 ```
 
-### 3. Aggregate themes
-
-Runs once all theme coders have finished. Merges similar themes across
-coders into a final consolidated set.
-
-```bash
-ta --db analysis.sqlite theme-aggregate
-
-# Retry a failed aggregation
-ta --db analysis.sqlite theme-aggregate --retry-failed
-
-# Aggregate against a specific codebook version
-ta --db analysis.sqlite theme-aggregate --codebook-version 30
-```
-
-### 4. Check progress
+### 3. Check progress
 
 ```bash
 ta --db analysis.sqlite theme-status
@@ -316,18 +295,15 @@ ta --db DB add-document    FILES... [--segmentation llm|paragraph|sentence|fixed
                                            [--min-words N] [--max-words N] [--batch N]
 ta --db DB code            ID [--workers K] [--limit N] [--retry-failed]
                                      [--mock-embeddings]
-ta --db DB aggregate       [--limit N] [--retry-failed] [--mock-embeddings]
-ta --db DB review          [--limit N] [--mock-embeddings]
+ta --db DB update-codebook [--limit N] [--retry-failed] [--mock-embeddings]
 ta --db DB status
 ta --db DB export-codebook [--version N] [-o FILE]
 
 ta --db DB add-theme-coder   ID IDENTITY
 ta --db DB rm-theme-coder    ID [--force]
 ta --db DB list-theme-coders
-ta --db DB theme-code        [--codebook-version N] [--workers K] [--limit N]
+ta --db DB generate-themes   [--codebook-version N] [--workers K] [--limit N]
                                     [--retry-failed] [--mock-embeddings]
-ta --db DB theme-aggregate   [--codebook-version N] [--retry-failed]
-                                    [--mock-embeddings]
 ta --db DB theme-status      [--codebook-version N]
 ta --db DB export-themes        [--codebook-version N] [-o FILE]
 ta --db DB export-themes-html   [--codebook-version N] [-o FILE]

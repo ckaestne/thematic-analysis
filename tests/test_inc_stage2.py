@@ -450,10 +450,7 @@ def test_cli_theme_code_and_aggregate(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(workers, "default_theme_aggregator_factory",
                         lambda: _StubThemeAggregator(agg_result))
 
-    rc = cli_stage2.main(["--db", db, "theme-code", "--workers", "2"])
-    assert rc == 0
-
-    rc = cli_stage2.main(["--db", db, "theme-aggregate"])
+    rc = cli_stage2.main(["--db", db, "generate-themes", "--workers", "2"])
     assert rc == 0
 
     rc = cli_stage2.main(["--db", db, "theme-status"])
@@ -483,14 +480,3 @@ def test_cli_export_themes_html_requires_aggregation(tmp_path: Path) -> None:
     assert rc != 0
 
 
-def test_cli_theme_aggregate_fails_when_coders_not_done(
-    tmp_path: Path, capsys
-) -> None:
-    db = str(tmp_path / "x.sqlite")
-    cli_stage2.main(["--db", db, "init"])
-    cli_stage2.main(["--db", db, "add-theme-coder", "tc1", "a"])
-    # Don't run theme-code — aggregation should refuse
-    rc = cli_stage2.main(["--db", db, "theme-aggregate"])
-    assert rc != 0
-    captured = capsys.readouterr()
-    assert "theme-code" in captured.err
