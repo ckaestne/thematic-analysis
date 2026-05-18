@@ -6,15 +6,18 @@ singleton row keyed `id = 1` in the `research_context` table.
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated
+
+import typer
 
 from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
 from thematic_analysis_inc import store
 
 
-def _load_description(args: argparse.Namespace) -> str:
+def _load_description(args: SimpleNamespace) -> str:
     if args.description_file:
         return Path(args.description_file).read_text(encoding="utf-8")
     if args.description is not None:
@@ -22,7 +25,7 @@ def _load_description(args: argparse.Namespace) -> str:
     return ""
 
 
-def cmd_set(args: argparse.Namespace) -> int:
+def cmd_set(args: SimpleNamespace) -> int:
     description = _load_description(args).strip()
     if not description:
         print(
@@ -58,7 +61,7 @@ def cmd_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_show(args: argparse.Namespace) -> int:
+def cmd_show(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     ctx = store.get_research_context(conn)
     if ctx is None:
@@ -77,44 +80,71 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_clear(args: argparse.Namespace) -> int:
+def cmd_clear(args: SimpleNamespace) -> int:
     conn = store.connect(args.db)
     removed = store.clear_research_context(conn)
     print("research context cleared" if removed else "no research context to clear")
     return 0
 
 
-def register(sub: argparse._SubParsersAction) -> None:
-    """Attach set/show/clear-research-context subcommands to a CLI."""
-    p_set = sub.add_parser(
-        "set-research-context",
+def register_typer(app: typer.Typer, run, *, panel: str) -> None:
+    """Attach set/show/clear-research-context subcommands to a Typer app."""
+
+    @app.command(
+        name="set-research-context",
+        rich_help_panel=panel,
         help="store the research context used by Stage 1 + Stage 2 prompts",
     )
-    p_set.add_argument(
-        "--description",
-        default=None,
-        help="freeform research context + research question(s) as a single string",
-    )
-    p_set.add_argument(
-        "--description-file",
-        default=None,
-        help="path to a text file containing the research context description",
-    )
-    p_set.add_argument(
-        "--regenerate-prompts",
-        action="store_true",
-        help="after saving, call the LLM to generate per-agent tailored prompts",
-    )
-    p_set.set_defaults(func=cmd_set)
+    def _set(
+        ctx: typer.Context,
+        description: Annotated[
+            str | None,
+            typer.Option(
+                "--description",
+                help=(
+                    "freeform research context + research question(s) "
+                    "as a single string"
+                ),
+            ),
+        ] = None,
+        description_file: Annotated[
+            str | None,
+            typer.Option(
+                "--description-file",
+                help="path to a text file containing the research context description",
+            ),
+        ] = None,
+        regenerate_prompts: Annotated[
+            bool,
+            typer.Option(
+                "--regenerate-prompts",
+                help=(
+                    "after saving, call the LLM to generate per-agent "
+                    "tailored prompts"
+                ),
+            ),
+        ] = False,
+    ) -> None:
+        run(
+            ctx,
+            cmd_set,
+            description=description,
+            description_file=description_file,
+            regenerate_prompts=regenerate_prompts,
+        )
 
-    p_show = sub.add_parser(
-        "show-research-context",
+    @app.command(
+        name="show-research-context",
+        rich_help_panel=panel,
         help="print the stored research context",
     )
-    p_show.set_defaults(func=cmd_show)
+    def _show(ctx: typer.Context) -> None:
+        run(ctx, cmd_show)
 
-    p_clear = sub.add_parser(
-        "clear-research-context",
+    @app.command(
+        name="clear-research-context",
+        rich_help_panel=panel,
         help="delete the stored research context",
     )
-    p_clear.set_defaults(func=cmd_clear)
+    def _clear(ctx: typer.Context) -> None:
+        run(ctx, cmd_clear)
