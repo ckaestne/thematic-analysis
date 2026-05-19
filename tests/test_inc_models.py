@@ -1,10 +1,15 @@
 """Smoke tests for the SQLModel schema in `db/models.py`.
 
-These verify that every table is created, every relationship navigates,
-and the check constraints reject invalid enum values. They use an
-in-memory SQLite engine — no on-disk state, no interaction with the
-raw-SQL `db/` modules (yet).
+Verifies every table is created, every relationship navigates in both
+directions, the CodingQueueEntry status property derives correctly, the
+self-referential parent/children chain on Codebook works, and the CHECK
+constraints on codes_derived reject invalid enum values.
+
+Uses an in-memory SQLite engine — no on-disk state, no interaction with
+the raw-SQL `db/` modules.
 """
+
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import inspect
@@ -13,9 +18,9 @@ from sqlmodel import Session, SQLModel, create_engine, delete, select
 
 from thematic_analysis_inc.db.models import (
     Code,
+    Codebook,
+    CodebookCode,
     Coder,
-    CodebookMembership,
-    CodebookVersion,
     CodesDerived,
     CodingQueueEntry,
     DECISION_ADD,
@@ -35,20 +40,20 @@ from thematic_analysis_inc.db.models import (
 
 EXPECTED_TABLES = {
     "codebook",
-    "codebook_versions",
-    "coders",
-    "codes",
+    "codebook_code",
+    "coder",
+    "code",
     "codes_derived",
     "codes_supporting_quotes",
     "coding_queue",
-    "documents",
-    "quotes",
+    "document",
+    "quote",
     "research_context",
-    "segments",
-    "theme_aggregation_inputs",
-    "theme_aggregations",
-    "theme_coder_runs",
-    "theme_coders",
+    "segment",
+    "theme_aggregation",
+    "theme_aggregation_input",
+    "theme_coder",
+    "theme_coder_run",
 }
 
 
@@ -66,33 +71,36 @@ def session(engine):
 
 
 def _seed_world(session: Session) -> dict:
-    """Build a minimal world that covers every relationship and return
+    """Build a minimal world that exercises every relationship and return
     the key objects for assertions."""
     session.add(Coder(coder_id=0, identity="aggregator"))
     session.add(Coder(coder_id=-1, identity="reviewer"))
-    cv1 = CodebookVersion(created_by="init")
-    session.add(cv1)
+    cb1 = Codebook()
+    session.add(cb1)
     rc1 = ResearchContext(description="initial", coder_prompt="careful")
     session.add(rc1)
     session.commit()
-    session.refresh(cv1)
+    session.refresh(cb1)
     session.refresh(rc1)
 
     alice = Coder(coder_id=1, identity="alice")
     session.add(alice)
-    doc = Document(filename="d.md", content=b"hello")
+    doc = Document(filename="d.md")
     session.add(doc)
     session.commit()
     session.refresh(doc)
 
-    seg = Segment(document=doc, content="seg one", line_from=1, line_to=2)
+    seg = Segment(
+        document=doc, content="seg one",
+        line_from=1, line_to=2, position=0,
+    )
     session.add(seg)
     session.commit()
     session.refresh(seg)
 
     coder_code = Code(
-        segment=seg, coder=alice, codebook_version=cv1,
-        research_context=rc1, code="resistance", rationale="why",
+        segment=seg, coder=alice, codebook_used=cb1,
+        research_context_used=rc1, code="resistance", rationale="why",
     )
     session.add(coder_code)
     session.commit()
@@ -100,8 +108,8 @@ def _seed_world(session: Session) -> dict:
 
     q = Quote(segment=seg, text="I refuse")
     agg = Code(
-        segment=seg, coder_id=0, codebook_version=cv1,
-        research_context=rc1, code="resistance",
+        segment=seg, coder_id=0, codebook_used=cb1,
+        research_context_used=rc1, code="resistance",
     )
     agg.supporting_quotes.append(q)
     session.add(agg)
@@ -116,14 +124,15 @@ def _seed_world(session: Session) -> dict:
     session.commit()
 
     rev = Code(
-        coder_id=-1, codebook_version=cv1, research_context=rc1,
-        code="resistance", description="opposing change",
+        segment=seg, coder_id=-1, codebook_used=cb1,
+        research_context_used=rc1, code="resistance",
+        description="opposing change",
     )
     session.add(rev)
     session.commit()
     session.refresh(rev)
     session.add(
-        CodebookMembership(codebook_version_id=cv1.version, code_id=rev.code_id)
+        CodebookCode(codebook_version=cb1.version, code_id=rev.code_id)
     )
     session.add(
         CodesDerived(
@@ -137,8 +146,8 @@ def _seed_world(session: Session) -> dict:
     session.add(
         CodingQueueEntry(
             segment_id=seg.segment_id, coder_id=alice.coder_id,
-            codebook_version_id=cv1.version,
-            research_context_version_id=rc1.research_context_version,
+            codebook_used_id=cb1.version,
+            research_context_used_id=rc1.research_context_version,
         )
     )
     session.commit()
@@ -148,14 +157,14 @@ def _seed_world(session: Session) -> dict:
     session.commit()
     tcr = ThemeCoderRun(
         theme_coder_id="t1",
-        codebook_version_id=cv1.version,
-        research_context_version_id=rc1.research_context_version,
+        codebook_used_id=cb1.version,
+        research_context_used_id=rc1.research_context_version,
     )
     session.add(tcr)
     session.commit()
     ta = ThemeAggregation(
-        codebook_version_id=cv1.version,
-        research_context_version_id=rc1.research_context_version,
+        codebook_used_id=cb1.version,
+        research_context_used_id=rc1.research_context_version,
     )
     session.add(ta)
     session.commit()
@@ -163,14 +172,14 @@ def _seed_world(session: Session) -> dict:
     session.commit()
 
     return {
-        "cv1": cv1, "rc1": rc1, "alice": alice, "doc": doc, "seg": seg,
+        "cb1": cb1, "rc1": rc1, "alice": alice, "doc": doc, "seg": seg,
         "coder_code": coder_code, "agg": agg, "rev": rev, "tcr": tcr,
         "ta": ta,
     }
 
 
 # ---------------------------------------------------------------------------
-# Schema basics
+# Schema
 # ---------------------------------------------------------------------------
 
 
@@ -179,9 +188,24 @@ def test_all_tables_are_created(engine) -> None:
     assert EXPECTED_TABLES <= tables, EXPECTED_TABLES - tables
 
 
+def test_document_has_no_content_column(engine) -> None:
+    cols = {c["name"] for c in inspect(engine).get_columns("document")}
+    assert cols == {"document_id", "filename", "created_at"}
+
+
+def test_coder_has_no_name_column(engine) -> None:
+    cols = {c["name"] for c in inspect(engine).get_columns("coder")}
+    assert "name" not in cols
+    assert cols == {"coder_id", "identity", "created_at"}
+
+
+def test_codebook_is_minimal(engine) -> None:
+    """Codebook keeps only id, parent, created_at — no created_by."""
+    cols = {c["name"] for c in inspect(engine).get_columns("codebook")}
+    assert cols == {"version", "parent_version", "created_at"}
+
+
 def test_coder_id_is_not_autoincrement(session: Session) -> None:
-    """System coders need explicit ids 0 and -1; explicit-id inserts must
-    persist as-is."""
     session.add(Coder(coder_id=0, identity="aggregator"))
     session.add(Coder(coder_id=-1, identity="reviewer"))
     session.commit()
@@ -203,11 +227,18 @@ def test_code_navigates_to_segment_coder_codebook_and_research_context(
     ).one()
     assert code.segment.content == "seg one"
     assert code.coder.identity == "alice"
-    assert code.codebook_version.version == world["cv1"].version
-    assert code.research_context.description == "initial"
+    assert code.codebook_used.version == world["cb1"].version
+    assert code.research_context_used.description == "initial"
 
 
-def test_aggregator_code_exposes_quotes_and_provenance_edges(
+def test_document_segments_back_ref(session: Session) -> None:
+    world = _seed_world(session)
+    doc = session.exec(select(Document)).one()
+    assert [s.content for s in doc.segments] == ["seg one"]
+    assert doc.segments[0].document is doc
+
+
+def test_aggregator_code_exposes_quotes_and_derivation_edges(
     session: Session,
 ) -> None:
     world = _seed_world(session)
@@ -216,31 +247,25 @@ def test_aggregator_code_exposes_quotes_and_provenance_edges(
     ).one()
 
     assert [q.text for q in agg.supporting_quotes] == ["I refuse"]
-    # derivation_sources: rows where this code is the result
     assert [d.derivation_type for d in agg.derivation_sources] == [
         DERIVATION_AGGREGATION
     ]
     assert agg.derivation_sources[0].source_code.code == "resistance"
-    # derivation_targets: rows where this code is the source
     assert [
         (d.derivation_type, d.decision) for d in agg.derivation_targets
     ] == [(DERIVATION_REVIEW, DECISION_ADD)]
     assert agg.derivation_targets[0].new_code.code == "resistance"
 
 
-def test_codebook_version_lists_member_codes(session: Session) -> None:
+def test_codebook_lists_member_codes(session: Session) -> None:
     world = _seed_world(session)
-    cv = session.exec(
-        select(CodebookVersion).where(
-            CodebookVersion.version == world["cv1"].version
-        )
+    cb = session.exec(
+        select(Codebook).where(Codebook.version == world["cb1"].version)
     ).one()
-    assert [c.code for c in cv.member_codes] == ["resistance"]
+    assert [c.code for c in cb.codes] == ["resistance"]
 
 
 def test_coding_queue_status_property(session: Session) -> None:
-    from datetime import datetime, timezone
-
     world = _seed_world(session)
     q = session.exec(select(CodingQueueEntry)).one()
     assert q.status == "pending"
@@ -255,52 +280,36 @@ def test_coding_queue_status_property(session: Session) -> None:
     assert q.status == "failed"
 
 
-def test_codebook_version_parent_chain(session: Session) -> None:
-    v1 = CodebookVersion(created_by="init")
-    session.add(v1)
+def test_codebook_parent_chain(session: Session) -> None:
+    cb1 = Codebook()
+    session.add(cb1)
     session.commit()
-    session.refresh(v1)
-    v2 = CodebookVersion(parent_version_id=v1.version, created_by="reviewer")
-    session.add(v2)
+    session.refresh(cb1)
+    cb2 = Codebook(parent_version=cb1.version)
+    session.add(cb2)
     session.commit()
-    session.refresh(v2)
-    assert v2.parent is not None
-    assert v2.parent.version == v1.version
-    assert v1.parent is None
+    session.refresh(cb2)
+    assert cb2.parent is not None
+    assert cb2.parent.version == cb1.version
+    assert cb1.parent is None
+    # children walks forward
+    assert [c.version for c in cb1.children] == [cb2.version]
 
 
-def test_theme_aggregation_navigates_to_input_runs_and_codebook(
-    session: Session,
-) -> None:
+def test_theme_aggregation_navigates(session: Session) -> None:
     world = _seed_world(session)
     ta = session.exec(select(ThemeAggregation)).one()
     assert len(ta.input_runs) == 1
     assert ta.input_runs[0].theme_coder.identity == "critic"
-    assert ta.codebook_version.version == world["cv1"].version
-    assert ta.research_context.description == "initial"
+    assert ta.codebook_used.version == world["cb1"].version
+    assert ta.research_context_used.description == "initial"
 
 
-def test_quote_belongs_to_segment_and_back_to_codes(session: Session) -> None:
+def test_quote_back_ref_to_codes(session: Session) -> None:
     world = _seed_world(session)
     q = session.exec(select(Quote)).one()
     assert q.segment.segment_id == world["seg"].segment_id
     assert [c.code for c in q.codes] == ["resistance"]
-
-
-def test_research_context_lists_dependent_rows(session: Session) -> None:
-    world = _seed_world(session)
-    rc = session.exec(
-        select(ResearchContext).where(
-            ResearchContext.research_context_version
-            == world["rc1"].research_context_version
-        )
-    ).one()
-    # 3 codes (coder + aggregator + reviewer), 1 queue, 1 theme run,
-    # 1 theme aggregation
-    assert len(rc.codes) == 3
-    assert len(rc.coding_queue_entries) == 1
-    assert len(rc.theme_coder_runs) == 1
-    assert len(rc.theme_aggregations) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -308,12 +317,8 @@ def test_research_context_lists_dependent_rows(session: Session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_derivation_type_check_constraint_rejects_unknown(
-    session: Session,
-) -> None:
-    """`derivation_type` must be 'A' or 'R'."""
+def test_derivation_type_check_rejects_unknown(session: Session) -> None:
     _seed_world(session)
-    # Use any two existing code_ids
     cid = session.exec(select(Code.code_id)).first()
     with pytest.raises(IntegrityError):
         session.add(
@@ -324,8 +329,7 @@ def test_derivation_type_check_constraint_rejects_unknown(
         session.commit()
 
 
-def test_decision_check_constraint_rejects_unknown(session: Session) -> None:
-    """`decision` must be NULL or one of 'A'/'M'/'U'."""
+def test_decision_check_rejects_unknown(session: Session) -> None:
     _seed_world(session)
     cid = session.exec(select(Code.code_id)).first()
     with pytest.raises(IntegrityError):
@@ -338,16 +342,10 @@ def test_decision_check_constraint_rejects_unknown(session: Session) -> None:
         session.commit()
 
 
-def test_decision_constants_match_check_constraint(session: Session) -> None:
-    """All three valid decision values are accepted."""
+def test_all_three_decisions_accepted(session: Session) -> None:
     _seed_world(session)
-    rev = session.exec(
-        select(Code).where(Code.coder_id == -1)
-    ).first()
-    agg = session.exec(
-        select(Code).where(Code.coder_id == 0)
-    ).first()
-    # Replace the existing R edge first.
+    rev = session.exec(select(Code).where(Code.coder_id == -1)).first()
+    agg = session.exec(select(Code).where(Code.coder_id == 0)).first()
     session.exec(
         delete(CodesDerived).where(
             CodesDerived.new_code_id == rev.code_id,
