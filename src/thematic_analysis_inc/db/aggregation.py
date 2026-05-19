@@ -77,7 +77,7 @@ def record_aggregation_result(
     optional; if ``None`` the latest known RC version is used.
     """
     if research_context_version is None:
-        research_context_version = latest_research_context_version(conn)
+        research_context_version = latest_research_context_version()
     new_ids: list[int] = []
     with conn:
         for inp in inputs:

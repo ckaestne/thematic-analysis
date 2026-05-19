@@ -106,7 +106,7 @@ def start_theme_coder_run(
     theme_coder_id: str,
     codebook_version: int,
 ) -> int | None:
-    rc_version = latest_research_context_version(conn)
+    rc_version = latest_research_context_version()
     try:
         cur = conn.execute(
             "INSERT INTO theme_coder_runs "
@@ -215,7 +215,7 @@ def load_done_theme_coder_runs(
 def start_theme_aggregation(
     conn: sqlite3.Connection, codebook_version: int
 ) -> int | None:
-    rc_version = latest_research_context_version(conn)
+    rc_version = latest_research_context_version()
     try:
         cur = conn.execute(
             "INSERT INTO theme_aggregations "

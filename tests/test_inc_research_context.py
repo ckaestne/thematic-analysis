@@ -28,51 +28,48 @@ def _ctx() -> ResearchContext:
 
 
 def test_set_get_clear_research_context(tmp_path: Path) -> None:
-    conn = store.init_db(tmp_path / "rc.sqlite")
+    store.init_db(tmp_path / "rc.sqlite")
 
-    assert store.get_research_context(conn) is None
-    assert store.latest_research_context_version(conn) is None
+    assert store.get_research_context() is None
+    assert store.latest_research_context_version() is None
 
     ctx = _ctx()
-    v1 = store.set_research_context(conn, ctx)
-    assert v1 == 1
+    rc1 = store.set_research_context(ctx)
+    assert rc1.research_context_version == 1
 
-    loaded = store.get_research_context(conn)
-    assert loaded is not None
-    version, got = loaded
-    assert version == 1
-    assert got.description == CTX_DESCRIPTION
-    assert got.tailored_prompts == {}
-    assert store.latest_research_context_version(conn) == 1
+    got1 = store.get_research_context()
+    assert got1 is not None
+    assert got1.research_context_version == 1
+    domain1 = store.research_context_to_domain(got1)
+    assert domain1.description == CTX_DESCRIPTION
+    assert domain1.tailored_prompts == {}
+    assert store.latest_research_context_version() == 1
 
     # Setting again produces a NEW version (history preserved).
-    v2 = store.set_research_context(
-        conn, ResearchContext(description="different focus")
-    )
-    assert v2 == 2
-    loaded2 = store.get_research_context(conn)
-    assert loaded2 is not None
-    version2, got2 = loaded2
-    assert version2 == 2
+    rc2 = store.set_research_context(ResearchContext(description="different focus"))
+    assert rc2.research_context_version == 2
+    got2 = store.get_research_context()
+    assert got2 is not None
+    assert got2.research_context_version == 2
     assert got2.description == "different focus"
 
     # Original version still retrievable by id.
-    by_v1 = store.get_research_context(conn, version=1)
+    by_v1 = store.get_research_context(version=1)
     assert by_v1 is not None
-    assert by_v1[0] == 1
-    assert by_v1[1].description == CTX_DESCRIPTION
+    assert by_v1.research_context_version == 1
+    assert by_v1.description == CTX_DESCRIPTION
 
-    versions = store.list_research_context_versions(conn)
-    assert [v["research_context_version"] for v in versions] == [1, 2]
+    versions = store.list_research_context_versions()
+    assert [r.research_context_version for r in versions] == [1, 2]
 
-    assert store.clear_research_context(conn) is True
-    assert store.get_research_context(conn) is None
-    assert store.list_research_context_versions(conn) == []
-    assert store.clear_research_context(conn) is False
+    assert store.clear_research_context() is True
+    assert store.get_research_context() is None
+    assert store.list_research_context_versions() == []
+    assert store.clear_research_context() is False
 
 
 def test_tailored_prompts_round_trip(tmp_path: Path) -> None:
-    conn = store.init_db(tmp_path / "rc.sqlite")
+    store.init_db(tmp_path / "rc.sqlite")
     ctx = ResearchContext(
         description="study X",
         tailored_prompts={
@@ -80,10 +77,10 @@ def test_tailored_prompts_round_trip(tmp_path: Path) -> None:
             "reviewer": "reviewer section",
         },
     )
-    store.set_research_context(conn, ctx)
-    loaded = store.get_research_context(conn)
-    assert loaded is not None
-    _, got = loaded
+    store.set_research_context(ctx)
+    rc = store.get_research_context()
+    assert rc is not None
+    got = store.research_context_to_domain(rc)
     assert got.tailored_prompts["coder"] == "coder section"
     assert got.tailored_prompts["reviewer"] == "reviewer section"
 
@@ -97,8 +94,8 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
 
     # Set initial RC.
     rc_v1 = store.set_research_context(
-        conn, ResearchContext(description="first RC")
-    )
+        ResearchContext(description="first RC")
+    ).research_context_version
 
     # Seed a segment and run the queue sync.
     doc = store.add_document(conn, "doc.md", b"x")
@@ -114,8 +111,8 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
 
     # Set a new RC and add another segment; its new queue row picks up v2.
     rc_v2 = store.set_research_context(
-        conn, ResearchContext(description="second RC")
-    )
+        ResearchContext(description="second RC")
+    ).research_context_version
     store.enqueue_segments(conn, [(doc, "seg two", None, None, 1)])
     store.coding.sync_coding_queue(conn)
     rows_by_seg = {
@@ -163,7 +160,7 @@ class _CapturingThemeAggregator:
 def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "tc.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(conn, _ctx())
+    store.set_research_context(_ctx())
 
     _CapturingThemeCoder.last_seen = None
     res = workers.theme_code_one(
@@ -189,7 +186,7 @@ def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
 def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "ta.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(conn, _ctx())
+    store.set_research_context(_ctx())
 
     workers.theme_code_one(
         conn,

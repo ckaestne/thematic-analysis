@@ -95,7 +95,7 @@ def record_review(
             f"decision {decision!r} requires target_code_id"
         )
 
-    rc_version = latest_research_context_version(conn)
+    rc_version = latest_research_context_version()
     with conn:
         cur = conn.execute(
             "INSERT INTO codes "

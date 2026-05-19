@@ -61,10 +61,10 @@ def clear_codebook_cache() -> None:
 def _apply_research_context(conn: sqlite3.Connection, agent: Any) -> None:
     if not hasattr(agent, "research_context"):
         return
-    loaded = db.get_research_context(conn)
-    if loaded is None:
+    rc = db.get_research_context()
+    if rc is None:
         return
-    _, ctx = loaded
+    ctx = db.research_context_to_domain(rc)
     if ctx.is_empty():
         return
     agent.research_context = ctx

@@ -17,18 +17,11 @@ import sqlite3
 
 
 SCHEMA_SQL = """
--- ── Research context (versioned history; latest row = current) ───────────────
-
-CREATE TABLE IF NOT EXISTS research_context (
-    research_context_version  INTEGER PRIMARY KEY AUTOINCREMENT,
-    description               TEXT NOT NULL DEFAULT '',
-    coder_prompt              TEXT,
-    coding_critic_prompt      TEXT,
-    reviewer_prompt           TEXT,
-    theme_coder_prompt        TEXT,
-    theme_aggregator_prompt   TEXT,
-    created_at                DATETIME NOT NULL
-);
+-- ── Research context ────────────────────────────────────────────────────────
+-- The ``research_context`` table is owned by SQLModel (see
+-- ``db.models.ResearchContext``); it is created via
+-- ``ResearchContext.__table__.create(...)`` in
+-- ``db.connection._create_sqlmodel_tables`` rather than here.
 
 -- ── Stage 1 ──────────────────────────────────────────────────────────────────
 

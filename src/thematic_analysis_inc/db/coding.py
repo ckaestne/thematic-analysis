@@ -47,7 +47,7 @@ def sync_coding_queue(conn: sqlite3.Connection) -> int:
     if row is None or row["v"] is None:
         return 0
     version = int(row["v"])
-    rc_version = latest_research_context_version(conn)
+    rc_version = latest_research_context_version()
     cur = conn.execute(
         "INSERT OR IGNORE INTO coding_queue "
         "(segment_id, coder_id, codebook_version, research_context_version) "
@@ -136,7 +136,7 @@ def record_coding_result(
     time of writing.
     """
     if research_context_version is None:
-        research_context_version = latest_research_context_version(conn)
+        research_context_version = latest_research_context_version()
     new_ids: list[int] = []
     with conn:
         for i, code in enumerate(codes):

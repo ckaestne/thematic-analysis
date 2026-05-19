@@ -36,16 +36,16 @@ def cmd_set(args: SimpleNamespace) -> int:
         )
         return 1
 
-    conn = store.connect(args.db)
-    existing = store.get_research_context(conn)
+    store.connect(args.db)
+    existing = store.get_research_context()
     # Preserve tailored prompts only if description is unchanged.
-    if existing is not None and existing[1].description == description:
-        tailored = dict(existing[1].tailored_prompts)
+    if existing is not None and existing.description == description:
+        tailored = dict(store.research_context_to_domain(existing).tailored_prompts)
     else:
         tailored = {}
     ctx = ResearchContext(description=description, tailored_prompts=tailored)
-    new_version = store.set_research_context(conn, ctx)
-    print(f"research context saved (version {new_version})")
+    rc = store.set_research_context(ctx)
+    print(f"research context saved (version {rc.research_context_version})")
 
     if args.regenerate_prompts:
         from thematic_analysis.research_context_tailor import (
@@ -54,25 +54,24 @@ def cmd_set(args: SimpleNamespace) -> int:
 
         print(f"generating tailored prompts for: {', '.join(AGENT_ROLES)} ...")
         prompts = generate_all_tailored_prompts(description)
-        new_version = store.set_research_context(
-            conn,
+        rc = store.set_research_context(
             ResearchContext(description=description, tailored_prompts=prompts),
         )
         print(
             f"tailored prompts saved ({len(prompts)} roles) "
-            f"as version {new_version}"
+            f"as version {rc.research_context_version}"
         )
     return 0
 
 
 def cmd_show(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    loaded = store.get_research_context(conn)
-    if loaded is None:
+    store.connect(args.db)
+    rc = store.get_research_context()
+    if rc is None:
         print("(no research context set)")
         return 0
-    version, ctx = loaded
-    print(f"# Description (version {version})")
+    ctx = store.research_context_to_domain(rc)
+    print(f"# Description (version {rc.research_context_version})")
     print(ctx.description.strip() or "(empty)")
     if ctx.tailored_prompts:
         for role in AGENT_ROLES:
@@ -86,8 +85,8 @@ def cmd_show(args: SimpleNamespace) -> int:
 
 
 def cmd_clear(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    removed = store.clear_research_context(conn)
+    store.connect(args.db)
+    removed = store.clear_research_context()
     print("research context cleared" if removed else "no research context to clear")
     return 0
 

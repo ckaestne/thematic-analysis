@@ -57,6 +57,7 @@ from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
     list_research_context_versions,
     set_research_context,
+    to_domain as research_context_to_domain,
 )
 from thematic_analysis_inc.db.schema import create_schema
 from thematic_analysis_inc.db.theme import (
@@ -108,6 +109,7 @@ __all__ = [
     "latest_research_context_version",
     "list_research_context_versions",
     "clear_research_context",
+    "research_context_to_domain",
     # codebook
     "CodebookEntry",
     "CodebookVersion",
