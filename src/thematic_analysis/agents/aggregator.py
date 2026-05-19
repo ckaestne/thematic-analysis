@@ -84,11 +84,12 @@ The user message is a JSON object with two fields:
 ## Rules
 1. Each code is attributed to exactly one coder. Codes produced by the
    **same coder** already represent distinct concepts in that coder's view
-   and must **not** be merged with each other. Only consider merging codes
-   that come from *different* coders.
-2. Merge codes when they describe the same phenomenon, even if from
-   different angles or at different levels of specificity. Give the
-   merged code a clear, representative label.
+   and do not need to be merged with each other. Only consider merging
+   codes that come from *different* coders.
+2. Merge codes when they describe the same phenomenon and cover all the
+   quotes from the original codes, even if from different angles or at
+   different levels of specificity. Give the merged code a clear,
+   representative label.
 3. Keep codes separate when merging them would lose an analytical
    distinction.
 4. Every input code id must appear in exactly one of `merge_groups`
