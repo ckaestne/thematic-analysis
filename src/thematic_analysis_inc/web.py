@@ -9,8 +9,12 @@ Stage-2 endpoints still open a ``sqlite3.Connection`` for the
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import os
+import signal
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -892,7 +896,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", required=True, help="Path to the SQLite DB.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--reload", action="store_true")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn auto-reload (dev only).",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help=(
+            "also launch the Vite dev server (frontend/ npm run dev) as a "
+            "subprocess. Open http://localhost:5173 — it proxies /api here."
+        ),
+    )
+
     args = parser.parse_args(argv)
 
     db_path = Path(args.db).resolve()
@@ -911,8 +928,48 @@ def main(argv: list[str] | None = None) -> int:
 
     app = create_app(db_path)
     print(f"serving {db_path} at http://{args.host}:{args.port}", flush=True)
+
+    if args.dev:
+        _start_vite_dev()
+
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
     return 0
+
+
+def _start_vite_dev() -> None:
+    """Spawn `npm run dev` in frontend/ as a child process and ensure it
+    is killed when this process exits. The Vite server proxies /api to
+    this backend (see frontend/vite.config.ts)."""
+    frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
+    if not (frontend_dir / "package.json").is_file():
+        print(
+            f"--dev: no package.json under {frontend_dir}; skipping Vite",
+            flush=True,
+        )
+        return
+    try:
+        proc = subprocess.Popen(
+            ["npm", "run", "dev"],
+            cwd=str(frontend_dir),
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        print("--dev: `npm` not on PATH; skipping Vite", flush=True)
+        return
+
+    def _kill() -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    atexit.register(_kill)
+    print(
+        "dev: vite running in frontend/ — open http://localhost:5173",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
