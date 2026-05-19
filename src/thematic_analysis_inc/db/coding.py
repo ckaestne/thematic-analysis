@@ -138,36 +138,68 @@ def enqueue_segment(
     return enqueue_pairs((segment_id, cid) for cid in coders)
 
 
-def pending_count(coder: Coder) -> int:
+def pending_count(coder: Coder | None = None) -> int:
     with session() as s:
-        return int(
-            s.exec(
-                select(func.count())
-                .select_from(CodingQueueEntry)
-                .where(
-                    CodingQueueEntry.coder_id == coder.coder_id,
-                    CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
-                    CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
-                    CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
-                )
-            ).one()
+        stmt = (
+            select(func.count())
+            .select_from(CodingQueueEntry)
+            .where(
+                CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
+                CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+                CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
+            )
         )
+        if coder is not None:
+            stmt = stmt.where(CodingQueueEntry.coder_id == coder.coder_id)
+        return int(s.exec(stmt).one())
 
 
-def claim_next_assignment(coder: Coder) -> CodingQueueEntry | None:
-    """Atomically claim the next pending row for ``coder``."""
+def assignment_has_codes(assignment: CodingQueueEntry) -> bool:
+    """True iff Code rows already exist for this assignment's
+    (segment_id, coder_id, codebook_used_id, research_context_used_id)."""
+    with session() as s:
+        n = s.exec(
+            select(func.count())
+            .select_from(Code)
+            .where(
+                Code.segment_id == assignment.segment_id,
+                Code.coder_id == assignment.coder_id,
+                Code.codebook_used_id == assignment.codebook_used_id,
+                Code.research_context_used_id
+                == assignment.research_context_used_id,
+            )
+        ).one()
+        return int(n) > 0
+
+
+def mark_assignment_finished(assignment: CodingQueueEntry) -> None:
+    """Mark a queue entry finished without recording new codes."""
+    with session() as s:
+        a = s.get(CodingQueueEntry, _assignment_pk(assignment))
+        if a is None:
+            return
+        a.finished_at = _utcnow()
+        s.add(a)
+        s.commit()
+
+
+def claim_next_assignment(coder: Coder | None = None) -> CodingQueueEntry | None:
+    """Atomically claim the next pending row.
+
+    If ``coder`` is given, restrict to that coder; otherwise claim any
+    pending row across all coders.
+    """
     while True:
         with session() as s:
+            stmt = select(CodingQueueEntry).where(
+                CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
+                CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+                CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
+            )
+            if coder is not None:
+                stmt = stmt.where(CodingQueueEntry.coder_id == coder.coder_id)
             row = s.exec(
-                select(CodingQueueEntry)
-                .where(
-                    CodingQueueEntry.coder_id == coder.coder_id,
-                    CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
-                    CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
-                    CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
-                )
-                .order_by(CodingQueueEntry.segment_id)
-                .limit(1)
+                stmt.order_by(CodingQueueEntry.segment_id).limit(1)
             ).first()
             if row is None:
                 return None

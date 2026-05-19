@@ -184,12 +184,13 @@ async def test_code_segment_async(
 
 def code_one(
     conn: sqlite3.Connection | None,
-    coder_id: int,
+    coder_id: int | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AgentFactory | None = None,
 ) -> dict | None:
-    """Process one un-coded segment for the given coder. ``conn`` is
+    """Process one un-coded segment. If ``coder_id`` is given, restrict to
+    that coder's queue rows; otherwise claim any pending row. ``conn`` is
     accepted (and ignored) for backwards compatibility — Stage-1 helpers
     use their own SQLModel session."""
     return asyncio.run(
@@ -204,22 +205,47 @@ def code_one(
 
 async def code_one_async(
     conn: sqlite3.Connection | None,
-    coder_id: int,
+    coder_id: int | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AgentFactory | None = None,
 ) -> dict | None:
-    coder = db_coders.get_coder(coder_id)
-    if coder is None or coder_id < 1:
-        raise ValueError(f"unknown or system coder_id: {coder_id}")
-    assignment = db_coding.claim_next_assignment(coder)
+    coder_filter = None
+    if coder_id is not None:
+        coder_filter = db_coders.get_coder(coder_id)
+        if coder_filter is None or coder_id < 1:
+            raise ValueError(f"unknown or system coder_id: {coder_id}")
+    assignment = db_coding.claim_next_assignment(coder_filter)
     if assignment is None:
         return None
-    factory = agent_factory or default_coder_factory
+    coder = db_coders.get_coder(assignment.coder_id)
+    if coder is None:
+        msg = f"unknown coder_id on queue row: {assignment.coder_id}"
+        db_coding.record_coding_failure(assignment, error=msg)
+        return {
+            "ok": False,
+            "coder_id": assignment.coder_id,
+            "segment_id": assignment.segment_id,
+            "version": assignment.codebook_used_id,
+            "error": msg,
+        }
+
     segment_id = assignment.segment_id
     version = assignment.codebook_used_id
-    seg = db.get_segment(segment_id)
-    text = seg.content if seg is not None else ""
+
+    if db_coding.assignment_has_codes(assignment):
+        db_coding.mark_assignment_finished(assignment)
+        return {
+            "ok": True,
+            "coder_id": coder.coder_id,
+            "segment_id": segment_id,
+            "version": version,
+            "n_codes": 0,
+            "elapsed": 0.0,
+            "skipped": True,
+        }
+
+    factory = agent_factory or default_coder_factory
     try:
         res = await _run_coder_for_segment(
             segment_id,
@@ -236,7 +262,7 @@ async def code_one_async(
         db_coding.record_coding_failure(assignment, error=msg)
         return {
             "ok": False,
-            "coder_id": coder_id,
+            "coder_id": coder.coder_id,
             "segment_id": segment_id,
             "version": version,
             "error": msg,
@@ -245,7 +271,6 @@ async def code_one_async(
 
 async def drain_code_async(
     conn: sqlite3.Connection | None,
-    coder_id: int,
     *,
     workers: int = 1,
     limit: int | None = None,
@@ -253,6 +278,7 @@ async def drain_code_async(
     agent_factory: AgentFactory | None = None,
     on_event: Callable[[dict, dict], None] | None = None,
 ) -> dict:
+    """Drain the coding queue across all coders."""
     counters = {"done": 0, "failed": 0}
     stop = False
 
@@ -266,7 +292,6 @@ async def drain_code_async(
                 return
             res = await code_one_async(
                 conn,
-                coder_id,
                 use_mock_embeddings=use_mock_embeddings,
                 agent_factory=agent_factory,
             )
