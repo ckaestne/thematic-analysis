@@ -102,57 +102,6 @@ def default_coder_factory(codebook: DomainCodebook, coder: Coder) -> Any:
     return wrap_with_refinement(base)
 
 
-def _code_one_impl(
-    coder_id: int,
-    *,
-    use_mock_embeddings: bool,
-    agent_factory: AgentFactory | None,
-    sync: bool = True,
-) -> dict | None:
-    coder = db_coders.get_coder(coder_id)
-    if coder is None or coder_id < 1:
-        raise ValueError(f"unknown or system coder_id: {coder_id}")
-    assignment = db_coding.claim_next_assignment(coder)
-    if assignment is None:
-        return None
-    factory = agent_factory or default_coder_factory
-    segment_id = assignment.segment_id
-    version = assignment.codebook_used_id
-    # Re-fetch segment for content (assignment.segment was expunged).
-    seg = db.get_segment(segment_id)
-    text = seg.content if seg is not None else ""
-    try:
-        codebook = _get_codebook(version, use_mock_embeddings)
-        agent = factory(codebook, coder)
-        _apply_research_context(agent)
-        t0 = time.monotonic()
-        result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(assignment, result)
-        elapsed = time.monotonic() - t0
-        res: dict[str, Any] = {
-            "ok": True,
-            "coder_id": coder_id,
-            "segment_id": segment_id,
-            "version": version,
-            "n_codes": len(result),
-            "elapsed": elapsed,
-        }
-        trace = getattr(agent, "last_trace", None)
-        if trace is not None:
-            res["trace"] = trace
-        return res
-    except Exception as exc:
-        msg = f"{type(exc).__name__}: {exc}"
-        db_coding.record_coding_failure(assignment, error=msg)
-        return {
-            "ok": False,
-            "coder_id": coder_id,
-            "segment_id": segment_id,
-            "version": version,
-            "error": msg,
-        }
-
-
 def code_one(
     conn: sqlite3.Connection | None,
     coder_id: int,
@@ -163,10 +112,13 @@ def code_one(
     """Process one un-coded segment for the given coder. ``conn`` is
     accepted (and ignored) for backwards compatibility — Stage-1 helpers
     use their own SQLModel session."""
-    return _code_one_impl(
-        coder_id,
-        use_mock_embeddings=use_mock_embeddings,
-        agent_factory=agent_factory,
+    return asyncio.run(
+        code_one_async(
+            conn,
+            coder_id,
+            use_mock_embeddings=use_mock_embeddings,
+            agent_factory=agent_factory,
+        )
     )
 
 
@@ -615,23 +567,6 @@ def theme_code_one(
         }
 
 
-async def theme_code_one_async(
-    conn: sqlite3.Connection,
-    theme_coder_id: str,
-    codebook_version: int,
-    *,
-    use_mock_embeddings: bool = False,
-    agent_factory: ThemeCoderFactory | None = None,
-) -> dict | None:
-    return theme_code_one(
-        conn,
-        theme_coder_id,
-        codebook_version,
-        use_mock_embeddings=use_mock_embeddings,
-        agent_factory=agent_factory,
-    )
-
-
 async def drain_theme_code_async(
     conn: sqlite3.Connection,
     codebook_version: int,
@@ -654,7 +589,7 @@ async def drain_theme_code_async(
 
     async def run_one(coder_id: str) -> None:
         async with sem:
-            res = await theme_code_one_async(
+            res = theme_code_one(
                 conn,
                 coder_id,
                 codebook_version,
