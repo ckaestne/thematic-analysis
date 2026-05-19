@@ -5,8 +5,7 @@ import re
 from dataclasses import dataclass
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
-from thematic_analysis.codebook import Codebook, Quote
-from thematic_analysis.iterative import NegotiationStrategy, negotiate
+from thematic_analysis.codebook import Quote
 from thematic_analysis_inc.db.models import Code as DBCode
 
 
@@ -14,10 +13,7 @@ from thematic_analysis_inc.db.models import Code as DBCode
 class AggregatorConfig(AgentConfig):
     """Configuration for the Code Aggregator agent."""
 
-    similarity_threshold: float = 0.8
     max_quotes_per_code: int = 10
-    negotiation_strategy: NegotiationStrategy = NegotiationStrategy.CONSENSUS
-    consensus_threshold: float = 0.5  # Fraction of coders needed for consensus
 
 
 @dataclass
@@ -73,43 +69,41 @@ class AggregationResult:
 
 
 AGGREGATOR_SYSTEM_PROMPT = """\
-You are an expert qualitative researcher responsible for organizing codes from
-multiple coders. Your task is to identify codes with similar meanings that should
-be merged, while retaining codes that represent distinct concepts.
+You are an aggregator coder in the thematic analysis of social media data. \
+Your job is to take the codes and corresponding quotes produced by several \
+independent coders, merge codes from different coders that capture the same \
+underlying concept, and retain codes that capture different concepts.
 
-## Guidelines for Code Aggregation:
-1. **Semantic similarity**: Merge codes that capture the same underlying concept
-2. **Preserve nuance**: Keep codes separate if they capture different aspects
-3. **Create clear labels**: When merging, create a clear label for the merged code
-4. **Prioritize relevance**: Select the most representative quotes for each code
+## Input
+The user message is a JSON object with two fields:
+- `coders`: a list of coders. Each coder has a `coder_id` and a list of
+  `codes`. Each code has an integer `id`, a `label`, and a list of
+  `quote_ids` (the quotes that support it).
+- `quotes`: a list of quotes. Each quote has an integer `id` and a `text`.
 
-## Decision Criteria for Merging:
-- Merge if: Codes describe the same phenomenon from different angles
-- Merge if: One code is a more specific version of another
-- Keep separate if: Codes capture different aspects of the data
-- Keep separate if: Merging would lose important analytical distinctions
+## Rules
+1. Each code is attributed to exactly one coder. Codes produced by the
+   **same coder** already represent distinct concepts in that coder's view
+   and must **not** be merged with each other. Only consider merging codes
+   that come from *different* coders.
+2. Merge codes when they describe the same phenomenon, even if from
+   different angles or at different levels of specificity. Give the
+   merged code a clear, representative label.
+3. Keep codes separate when merging them would lose an analytical
+   distinction.
+4. Every input code id must appear in exactly one of `merge_groups`
+   (inside `original_code_ids`) or `retain_code_ids`.
+5. Refer to codes by their integer `id` from the input. Do not echo
+   labels or quote text back.
 
-## Output Format:
-Respond with a JSON object containing two lists:
-- "merge_groups": List of code groups to merge, each with:
-  - "merged_code": The new unified code label
-  - "original_codes": List of original codes being merged
-  - "rationale": Brief explanation for the merge
-- "retain_codes": List of codes to keep separate (as-is)
-
-Example:
-```json
-{{
-  "merge_groups": [
-    {{
-      "merged_code": "emotional support from peers",
-      "original_codes": ["peer support", "friend comfort", "emotional help"],
-      "rationale": "All describe emotional assistance from peer relationships"
-    }}
-  ],
-  "retain_codes": ["academic pressure", "time management"]
-}}
-```"""
+## Output
+Respond with a single JSON object:
+- `merge_groups`: list of merges. Each merge has:
+  - `merged_code`: a new representative label (string)
+  - `original_code_ids`: list of input code ids being merged (length >= 2)
+  - `rationale`: a brief explanation
+- `retain_code_ids`: list of input code ids kept as-is (not merged)
+"""
 
 AGGREGATOR_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -127,35 +121,28 @@ AGGREGATOR_RESPONSE_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "merged_code": {"type": "string"},
-                            "original_codes": {
+                            "original_code_ids": {
                                 "type": "array",
-                                "items": {"type": "string"},
+                                "items": {"type": "integer"},
                             },
                             "rationale": {"type": "string"},
                         },
-                        "required": ["merged_code", "original_codes", "rationale"],
+                        "required": [
+                            "merged_code",
+                            "original_code_ids",
+                            "rationale",
+                        ],
                     },
                 },
-                "retain_codes": {
+                "retain_code_ids": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "integer"},
                 },
             },
-            "required": ["merge_groups", "retain_codes"],
+            "required": ["merge_groups", "retain_code_ids"],
         },
     },
 }
-
-
-AGGREGATOR_USER_PROMPT = """\
-## Codes to Aggregate:
-{codes_section}
-
-## Similar Code Groups (based on semantic similarity):
-{similar_groups_section}
-
-Please analyze these codes and determine which should be merged and which should
-remain separate. Provide your response as JSON."""
 
 
 class CodeAggregatorAgent(BaseAgent):
@@ -166,299 +153,188 @@ class CodeAggregatorAgent(BaseAgent):
     and organizes the results with top-K most relevant quotes.
     """
 
-    def __init__(
-        self,
-        config: AggregatorConfig | None = None,
-        codebook: Codebook | None = None,
-    ):
-        """Initialize the Code Aggregator agent.
-
-        Args:
-            config: Aggregator configuration.
-            codebook: Codebook for semantic similarity search.
-        """
+    def __init__(self, config: AggregatorConfig | None = None):
         super().__init__(config or AggregatorConfig())
         self.aggregator_config: AggregatorConfig = self.config  # type: ignore
-        self.codebook = codebook if codebook is not None else Codebook()
 
     def get_system_prompt(self) -> str:
-        """Get the system prompt for aggregation."""
         return AGGREGATOR_SYSTEM_PROMPT
 
-    def _apply_negotiation_strategy(
+    def _build_prompt_payload(
         self, coder_codes: list[list[DBCode]]
-    ) -> set[str]:
-        """Apply negotiation strategy to filter codes based on coder agreement.
-
-        Args:
-            coder_codes: One inner list of ``Code`` rows per coder.
+    ) -> tuple[dict, dict[int, DBCode], dict[int, Quote]]:
+        """Assign sequential ids and build the JSON payload for the LLM.
 
         Returns:
-            Set of codes that pass the negotiation strategy filter.
+            payload: dict to be json-dumped as the user message.
+            code_index: assigned code id -> DBCode row.
+            quote_index: assigned quote id -> Quote.
         """
-        code_sets = [{c.code for c in codes} for codes in coder_codes]
+        quote_id_by_text: dict[str, int] = {}
+        quote_index: dict[int, Quote] = {}
+        code_index: dict[int, DBCode] = {}
+        coders_payload: list[dict] = []
 
-        if not code_sets:
-            return set()
-
-        result = negotiate(
-            code_sets=code_sets,
-            strategy=self.aggregator_config.negotiation_strategy,
-        )
-
-        return set(result.agreed_codes)
-
-    def _collect_codes_with_quotes(
-        self,
-        coder_codes: list[list[DBCode]],
-        agreed_codes: set[str] | None = None,
-    ) -> dict[str, list[Quote]]:
-        """Collect codes with their associated quotes.
-
-        Each ``Code`` carries ``supporting_quotes`` extracted by the
-        coder agent; we surface those quotes here keyed by the code
-        label. Quotes are deduplicated by their text.
-
-        Args:
-            coder_codes: One inner list of ``Code`` rows per coder.
-            agreed_codes: Optional set of codes that passed negotiation.
-                         If None, all codes are included.
-
-        Returns:
-            Dict mapping code labels to lists of quotes.
-        """
-        code_quotes: dict[str, list[Quote]] = {}
+        next_code_id = 1
+        next_quote_id = 1
 
         for codes in coder_codes:
-            for c in codes:
-                if agreed_codes is not None and c.code not in agreed_codes:
-                    continue
-                bucket = code_quotes.setdefault(c.code, [])
-                seen = {q.text for q in bucket}
-                for sq in (c.supporting_quotes or []):
-                    if sq.text in seen:
-                        continue
-                    seen.add(sq.text)
-                    bucket.append(
-                        Quote(quote_id=str(c.segment_id or ""), text=sq.text)
-                    )
-                # If the coder produced no supporting_quotes for this
-                # code, still surface the code so it can be aggregated.
-                if not bucket:
-                    code_quotes[c.code] = []
-
-        return code_quotes
-
-    def _find_similar_groups(self, codes: list[str]) -> list[list[str]]:
-        """Group codes by semantic similarity.
-
-        Args:
-            codes: List of code labels.
-
-        Returns:
-            List of code groups that are semantically similar.
-        """
-        if len(codes) <= 1:
-            return [codes] if codes else []
-
-        # Build similarity matrix and group codes
-        groups: list[list[str]] = []
-        remaining = set(codes)
-
-        for code in codes:
-            if code not in remaining:
+            if not codes:
                 continue
+            coder_id = codes[0].coder_id
+            codes_payload: list[dict] = []
+            for c in codes:
+                cid = next_code_id
+                next_code_id += 1
+                code_index[cid] = c
 
-            remaining.remove(code)
-            group = [code]
+                quote_ids: list[int] = []
+                for sq in (c.supporting_quotes or []):
+                    qid = quote_id_by_text.get(sq.text)
+                    if qid is None:
+                        qid = next_quote_id
+                        next_quote_id += 1
+                        quote_id_by_text[sq.text] = qid
+                        quote_index[qid] = Quote(quote_id=str(qid), text=sq.text)
+                    if qid not in quote_ids:
+                        quote_ids.append(qid)
 
-            # Find similar codes
-            for other_code in list(remaining):
-                similarity = self.codebook.embedding_service.compute_similarity(
-                    code, other_code
+                codes_payload.append(
+                    {"id": cid, "label": c.code, "quote_ids": quote_ids}
                 )
-                if similarity >= self.aggregator_config.similarity_threshold:
-                    group.append(other_code)
-                    remaining.remove(other_code)
+            coders_payload.append({"coder_id": coder_id, "codes": codes_payload})
 
-            groups.append(group)
+        quotes_payload = [
+            {"id": qid, "text": quote_index[qid].text}
+            for qid in sorted(quote_index)
+        ]
+        payload = {"coders": coders_payload, "quotes": quotes_payload}
+        return payload, code_index, quote_index
 
-        return groups
-
-    def _format_codes_section(self, code_quotes: dict[str, list[Quote]]) -> str:
-        """Format codes and quotes for the prompt."""
-        lines = []
-        for code, quotes in code_quotes.items():
-            quote_samples = quotes[:3]  # Show up to 3 sample quotes
-            quote_text = "; ".join(f'"{q.text[:100]}..."' for q in quote_samples)
-            lines.append(f"- **{code}** ({len(quotes)} quotes): {quote_text}")
-        return "\n".join(lines)
-
-    def _format_similar_groups_section(self, groups: list[list[str]]) -> str:
-        """Format similar code groups for the prompt."""
-        if not groups:
-            return "No similar groups identified."
-
-        lines = []
-        for i, group in enumerate(groups, 1):
-            if len(group) > 1:
-                lines.append(f"Group {i}: {', '.join(group)}")
-            else:
-                lines.append(f"Standalone: {group[0]}")
-        return "\n".join(lines)
+    def _quotes_for_code(
+        self, code: DBCode, quote_index: dict[int, Quote]
+    ) -> list[Quote]:
+        """Return assigned Quote objects (with the assigned ids) for a code."""
+        # Look up by text so we reuse the assigned id from the payload.
+        text_to_qid = {q.text: int(q.quote_id) for q in quote_index.values()}
+        seen: set[int] = set()
+        out: list[Quote] = []
+        for sq in (code.supporting_quotes or []):
+            qid = text_to_qid.get(sq.text)
+            if qid is None or qid in seen:
+                continue
+            seen.add(qid)
+            out.append(quote_index[qid])
+        return out
 
     def _parse_response(
         self,
         response: str,
-        code_quotes: dict[str, list[Quote]],
+        code_index: dict[int, DBCode],
+        quote_index: dict[int, Quote],
     ) -> AggregationResult | None:
-        """Parse the LLM response into an AggregationResult.
-
-        Args:
-            response: The raw LLM response.
-            code_quotes: Dict mapping codes to quotes.
-
-        Returns:
-            AggregationResult if parsing succeeds, None otherwise.
-        """
-        # Extract JSON from response
+        """Parse the LLM response into an AggregationResult."""
         json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1).strip()
         else:
             json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
+            if not json_match:
                 return None
+            json_str = json_match.group(0)
 
         try:
             data = json.loads(json_str)
-            merged_codes = []
-            retained_codes = []
-
-            # Process merge groups
-            for group in data.get("merge_groups", []):
-                merged_code_label = group.get("merged_code", "")
-                original_codes = group.get("original_codes", [])
-                rationale = group.get("rationale", "")
-
-                # Collect quotes from all original codes
-                quotes = []
-                for orig_code in original_codes:
-                    if orig_code in code_quotes:
-                        quotes.extend(code_quotes[orig_code])
-
-                # Deduplicate and limit quotes
-                seen_ids = set()
-                unique_quotes = []
-                for q in quotes:
-                    if q.quote_id not in seen_ids:
-                        seen_ids.add(q.quote_id)
-                        unique_quotes.append(q)
-
-                max_quotes = self.aggregator_config.max_quotes_per_code
-                merged_codes.append(
-                    MergedCode(
-                        code=merged_code_label,
-                        original_codes=original_codes,
-                        quotes=unique_quotes[:max_quotes],
-                        merge_rationale=rationale,
-                    )
-                )
-
-            # Process retained codes
-            for code_label in data.get("retain_codes", []):
-                if code_label in code_quotes:
-                    quotes = code_quotes[code_label]
-                    retained_codes.append(
-                        MergedCode(
-                            code=code_label,
-                            original_codes=[code_label],
-                            quotes=quotes[: self.aggregator_config.max_quotes_per_code],
-                        )
-                    )
-
-            return AggregationResult(
-                merged_codes=merged_codes,
-                retained_codes=retained_codes,
-            )
-
         except json.JSONDecodeError:
             return None
 
-    def aggregate(
-        self,
-        coder_codes: list[list[DBCode]],
-        apply_negotiation: bool = True,
-    ) -> AggregationResult:
+        max_quotes = self.aggregator_config.max_quotes_per_code
+        merged_codes: list[MergedCode] = []
+        retained_codes: list[MergedCode] = []
+        consumed_ids: set[int] = set()
+
+        for group in data.get("merge_groups", []):
+            label = group.get("merged_code", "")
+            orig_ids = [int(i) for i in group.get("original_code_ids", [])]
+            rationale = group.get("rationale", "")
+
+            original_codes: list[str] = []
+            quotes: list[Quote] = []
+            seen_qids: set[str] = set()
+            for cid in orig_ids:
+                src = code_index.get(cid)
+                if src is None:
+                    continue
+                consumed_ids.add(cid)
+                original_codes.append(src.code)
+                for q in self._quotes_for_code(src, quote_index):
+                    if q.quote_id in seen_qids:
+                        continue
+                    seen_qids.add(q.quote_id)
+                    quotes.append(q)
+
+            if not original_codes:
+                continue
+            merged_codes.append(
+                MergedCode(
+                    code=label,
+                    original_codes=original_codes,
+                    quotes=quotes[:max_quotes],
+                    merge_rationale=rationale,
+                )
+            )
+
+        for cid in data.get("retain_code_ids", []):
+            cid = int(cid)
+            src = code_index.get(cid)
+            if src is None or cid in consumed_ids:
+                continue
+            consumed_ids.add(cid)
+            quotes = self._quotes_for_code(src, quote_index)
+            retained_codes.append(
+                MergedCode(
+                    code=src.code,
+                    original_codes=[src.code],
+                    quotes=quotes[:max_quotes],
+                )
+            )
+
+        return AggregationResult(
+            merged_codes=merged_codes,
+            retained_codes=retained_codes,
+        )
+
+    def aggregate(self, coder_codes: list[list[DBCode]]) -> AggregationResult:
         """Aggregate codes from multiple coders for one segment.
 
         Args:
-            coder_codes: One inner list of ``Code`` rows per coder, all
-                for the same segment. Each ``Code`` is expected to
-                carry its ``supporting_quotes``.
-            apply_negotiation: Whether to apply negotiation strategy first.
-
-        Returns:
-            AggregationResult with merged and retained codes.
+            coder_codes: One inner list of ``Code`` rows per coder, all for
+                the same segment. Each ``Code`` is expected to carry its
+                ``supporting_quotes``.
         """
-        # Step 1: Apply negotiation strategy to filter codes
-        agreed_codes = None
-        if apply_negotiation and len(coder_codes) > 1:
-            agreed_codes = self._apply_negotiation_strategy(coder_codes)
-            if not agreed_codes:
-                agreed_codes = None  # Include all codes
+        payload, code_index, quote_index = self._build_prompt_payload(coder_codes)
 
-        # Step 2: Collect codes with their quotes (filtered by negotiation)
-        code_quotes = self._collect_codes_with_quotes(coder_codes, agreed_codes)
-
-        if not code_quotes:
+        if not code_index:
             return AggregationResult(merged_codes=[], retained_codes=[])
 
-        # Step 3: Find similar code groups using embeddings
-        similar_groups = self._find_similar_groups(list(code_quotes.keys()))
-
-        # Step 4: Use LLM to decide on merging
-        user_prompt = AGGREGATOR_USER_PROMPT.format(
-            codes_section=self._format_codes_section(code_quotes),
-            similar_groups_section=self._format_similar_groups_section(similar_groups),
-        )
-
+        user_prompt = json.dumps(payload, indent=2)
         response = self._call_llm(
             self.get_system_prompt(),
             user_prompt,
             response_format=AGGREGATOR_RESPONSE_SCHEMA,
         )
-        result = self._parse_response(response, code_quotes)
+        result = self._parse_response(response, code_index, quote_index)
 
         if result is None:
-            # Fallback: keep all codes separate
+            max_quotes = self.aggregator_config.max_quotes_per_code
             retained = [
                 MergedCode(
-                    code=code,
-                    original_codes=[code],
-                    quotes=quotes[: self.aggregator_config.max_quotes_per_code],
+                    code=c.code,
+                    original_codes=[c.code],
+                    quotes=self._quotes_for_code(c, quote_index)[:max_quotes],
                 )
-                for code, quotes in code_quotes.items()
+                for c in code_index.values()
             ]
             return AggregationResult(merged_codes=[], retained_codes=retained)
 
         return result
-
-    def update_codebook(self, result: AggregationResult) -> Codebook:
-        """Update the codebook with aggregated codes.
-
-        Args:
-            result: The aggregation result.
-
-        Returns:
-            Updated codebook.
-        """
-        # Clear existing codes and add aggregated ones
-        new_codebook = Codebook(embedding_service=self.codebook.embedding_service)
-
-        for merged_code in result.all_codes():
-            new_codebook.add_code(merged_code.code, merged_code.quotes)
-
-        return new_codebook

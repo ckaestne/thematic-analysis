@@ -100,6 +100,7 @@ def derive_segment_status(segment: Segment | int) -> str:
                 .where(
                     Code.segment_id == seg_id,
                     Code.coder_id == 0,
+                    Code.code != "",  # exclude empty-aggregation sentinel
                     ~outgoing_r,
                 )
             ).one()

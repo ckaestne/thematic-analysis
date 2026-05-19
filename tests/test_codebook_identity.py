@@ -1,7 +1,6 @@
 """Tests for codebook object identity (regression tests for falsy codebook bug)."""
 
 from thematic_analysis.agents import (
-    CodeAggregatorAgent,
     CoderAgent,
     ReviewerAgent,
     ThemeCoderAgent,
@@ -36,16 +35,6 @@ class TestCodebookIdentityBug:
         original_id = id(codebook)
 
         agent = ReviewerAgent(codebook=codebook)
-
-        assert id(agent.codebook) == original_id
-        assert agent.codebook is codebook
-
-    def test_aggregator_agent_preserves_codebook_identity(self):
-        """CodeAggregatorAgent should use the exact codebook passed to it."""
-        codebook = Codebook(use_mock_embeddings=True)
-        original_id = id(codebook)
-
-        agent = CodeAggregatorAgent(codebook=codebook)
 
         assert id(agent.codebook) == original_id
         assert agent.codebook is codebook

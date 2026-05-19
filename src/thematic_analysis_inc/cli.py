@@ -816,7 +816,6 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
     try:
         res = workers.test_aggregate_segment(
             args.segment_id,
-            use_mock_embeddings=args.mock_embeddings,
         )
     except ValueError as e:
         print(str(e), file=sys.stderr)
@@ -847,49 +846,6 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
                 if len(qt) > 160:
                     qt = qt[:157] + "..."
                 print(f"      \"{qt}\"")
-    print()
-
-    print(sep)
-    print("Negotiation (consensus)")
-    print(sep)
-    agreed = res["agreed_codes"]
-    if agreed is None:
-        print("(no negotiation applied — single coder, or no consensus)")
-    else:
-        print(f"agreed codes ({len(agreed)}):")
-        for c in sorted(agreed):
-            print(f"  - {c}")
-    print()
-
-    print(sep)
-    print("Codes after negotiation, with quotes")
-    print(sep)
-    code_quotes = res["code_quotes"]
-    if not code_quotes:
-        print("(no codes — aggregator would return empty result)")
-    for code, quotes in code_quotes.items():
-        print(f"- {code}  ({len(quotes)} quote(s))")
-    print()
-
-    print(sep)
-    print("Pairwise similarity scores")
-    print(sep)
-    sims = sorted(res["similarities"], key=lambda x: -x[2])
-    if not sims:
-        print("(no pairs)")
-    for a, b, s in sims:
-        marker = "  <-- merge candidate" if s >= 0.8 else ""
-        print(f"  {s:.3f}  {a!r}  ~  {b!r}{marker}")
-    print()
-
-    print(sep)
-    print("Similar groups (threshold 0.8)")
-    print(sep)
-    for i, group in enumerate(res["similar_groups"], 1):
-        if len(group) > 1:
-            print(f"  Group {i}: {', '.join(group)}")
-        else:
-            print(f"  Standalone: {group[0]}")
     print()
 
     print(sep)
@@ -1806,19 +1762,11 @@ def _cli_test_code(
 def _cli_test_aggregate(
     ctx: typer.Context,
     segment_id: Annotated[int, typer.Argument(help="segment_id to aggregate")],
-    mock_embeddings: Annotated[
-        bool,
-        typer.Option(
-            "--mock-embeddings",
-            help="use deterministic mock embeddings (testing / no-network)",
-        ),
-    ] = False,
 ) -> None:
     _run(
         ctx,
         _cmd_test_aggregate,
         segment_id=segment_id,
-        mock_embeddings=mock_embeddings,
     )
 
 
