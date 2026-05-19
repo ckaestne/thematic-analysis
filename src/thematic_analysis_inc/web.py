@@ -172,9 +172,16 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
             }
         )
 
-    agg_codes_all = db_aggregation.list_aggregator_codes_for_segment(segment_id)
-    agg_codes = [c for c in agg_codes_all if not is_sentinel_code(c)]
-    aggregator_no_codes = bool(agg_codes_all) and not agg_codes
+    # `list_aggregator_codes_for_segment` already filters out the empty-
+    # aggregation sentinel. To detect the "ran, produced nothing" state
+    # we ask `segment_has_aggregator_code` (which counts the sentinel as
+    # well) and report no_codes when an aggregator row exists but no real
+    # ones came back.
+    agg_codes = db_aggregation.list_aggregator_codes_for_segment(segment_id)
+    aggregator_no_codes = (
+        db_aggregation.segment_has_aggregator_code(segment_id)
+        and not agg_codes
+    )
     agg_payload: list[dict[str, Any]] = []
     for ac in agg_codes:
         quotes = db_aggregation.load_aggregated_code_quotes(ac.code_id)

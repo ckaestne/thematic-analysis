@@ -312,11 +312,11 @@ async def drain_code_async(
 
 # ── Aggregator worker ────────────────────────────────────────────────────────
 
-AggregatorFactory = Callable[[DomainCodebook], Any]
+AggregatorFactory = Callable[[], CodeAggregatorAgent]
 
 
-def default_aggregator_factory(codebook: DomainCodebook) -> CodeAggregatorAgent:
-    return CodeAggregatorAgent(config=AggregatorConfig(), codebook=codebook)
+def default_aggregator_factory() -> CodeAggregatorAgent:
+    return CodeAggregatorAgent(config=AggregatorConfig())
 
 
 def _grouped_coder_codes(
@@ -342,55 +342,57 @@ def aggregate_one(
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    coder_codes = db_coding.load_segment_coder_codes(seg)
-    # Drop sentinel rows — they mean "this coder produced nothing"; they
-    # are not real input codes for the aggregator.
+    target_cb, target_rc = db_aggregation._target_versions()
+    coder_codes = db_coding.load_segment_coder_codes(
+        seg, codebook_version=target_cb, rc_version=target_rc
+    )
+    # Drop coder sentinel rows — they mean "this coder produced nothing"
+    # and must not be treated as real input codes for the aggregator. A
+    # coder whose only row is a sentinel is dropped from the input map
+    # entirely, so the `not coder_codes` branch below short-circuits to
+    # an aggregator sentinel without calling the LLM.
     coder_codes = {
         cid: [c for c in codes if not is_sentinel_code(c)]
         for cid, codes in coder_codes.items()
     }
     coder_codes = {cid: codes for cid, codes in coder_codes.items() if codes}
-    # Build (coder_id, code_text) -> Code for source resolution.
     code_map: dict[tuple[int, str], Code] = {}
     for cid, codes in coder_codes.items():
         for c in codes:
             code_map[(cid, c.code)] = c
 
     n_in = sum(len(v) for v in coder_codes.values())
-    # If every coder produced only sentinels (or nothing), short-circuit:
-    # skip the LLM and persist an aggregator sentinel directly.
-    if n_in == 0:
-        if db_aggregation.segment_has_aggregator_code(segment_id):
-            return {
-                "ok": False,
-                "segment_id": segment_id,
-                "error": "aggregator code already exists (race)",
-                "skipped": True,
-            }
-        db_aggregation.record_aggregation_result(seg, [])
-        return {
-            "ok": True,
-            "segment_id": segment_id,
-            "n_in": 0,
-            "n_merged": 0,
-            "n_retained": 0,
-            "elapsed": 0.0,
-            "no_codes": True,
-        }
     try:
-        domain_cb = DomainCodebook(use_mock_embeddings=use_mock_embeddings)
-        factory = agent_factory or default_aggregator_factory
-        agent = factory(domain_cb)
-        t0 = time.monotonic()
-        result = agent.aggregate(_grouped_coder_codes(coder_codes))
-
-        if db_aggregation.segment_has_aggregator_code(segment_id):
+        if db_aggregation.segment_has_aggregator_code(
+            segment_id, codebook_version=target_cb, rc_version=target_rc
+        ):
             return {
                 "ok": False,
                 "segment_id": segment_id,
                 "error": "aggregator code already exists (race)",
                 "skipped": True,
             }
+
+        t0 = time.monotonic()
+        if not coder_codes:
+            # No coder codes at this version: mark the segment aggregated
+            # with the empty-aggregation sentinel so we don't re-pick it.
+            db_aggregation.record_aggregation_result(
+                seg, [], codebook_version=target_cb, rc_version=target_rc
+            )
+            return {
+                "ok": True,
+                "segment_id": segment_id,
+                "n_in": 0,
+                "n_merged": 0,
+                "n_retained": 0,
+                "elapsed": time.monotonic() - t0,
+                "empty": True,
+            }
+
+        factory = agent_factory or default_aggregator_factory
+        agent = factory()
+        result = agent.aggregate(_grouped_coder_codes(coder_codes))
 
         merged: list[db_aggregation.AggregatorMergeInput] = []
         for mc in result.all_codes():
@@ -411,7 +413,9 @@ def aggregate_one(
                 )
             )
 
-        db_aggregation.record_aggregation_result(seg, merged)
+        db_aggregation.record_aggregation_result(
+            seg, merged, codebook_version=target_cb, rc_version=target_rc
+        )
         return {
             "ok": True,
             "segment_id": segment_id,
@@ -419,21 +423,18 @@ def aggregate_one(
             "n_merged": len(result.merged_codes),
             "n_retained": len(result.retained_codes),
             "elapsed": time.monotonic() - t0,
+            "empty": not merged,
         }
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
         return {"ok": False, "segment_id": segment_id, "error": msg}
 
 
-def test_aggregate_segment(
-    segment_id: int,
-    *,
-    use_mock_embeddings: bool = False,
-) -> dict[str, Any]:
+def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     """Run the aggregator on one segment with full instrumentation, but do
     not write any results. Returns a dict with the segment, per-coder input
-    codes, negotiation result, similarity groups, prompts, raw LLM response,
-    and parsed AggregationResult."""
+    codes, the JSON prompt payload, the raw LLM response, and the parsed
+    AggregationResult."""
     seg = db.get_segment(segment_id)
     if seg is None:
         raise ValueError(f"unknown segment_id: {segment_id}")
@@ -442,32 +443,16 @@ def test_aggregate_segment(
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    coder_codes = db_coding.load_segment_coder_codes(seg)
+    target_cb, target_rc = db_aggregation._target_versions()
+    coder_codes = db_coding.load_segment_coder_codes(
+        seg, codebook_version=target_cb, rc_version=target_rc
+    )
     grouped = _grouped_coder_codes(coder_codes)
 
-    domain_cb = DomainCodebook(use_mock_embeddings=use_mock_embeddings)
-    agent = CodeAggregatorAgent(config=AggregatorConfig(), codebook=domain_cb)
+    agent = CodeAggregatorAgent(config=AggregatorConfig())
     _apply_research_context(agent)
 
-    # Replicate `agent.aggregate(...)` step by step so we can surface every
-    # intermediate value.
-    agreed_codes: set[str] | None = None
-    if len(grouped) > 1:
-        agreed_codes = agent._apply_negotiation_strategy(grouped)
-        if not agreed_codes:
-            agreed_codes = None
-
-    code_quotes = agent._collect_codes_with_quotes(grouped, agreed_codes)
-    code_labels = list(code_quotes.keys())
-
-    # Per-pair similarity scores for transparency.
-    similarities: list[tuple[str, str, float]] = []
-    for i, a in enumerate(code_labels):
-        for b in code_labels[i + 1 :]:
-            sim = domain_cb.embedding_service.compute_similarity(a, b)
-            similarities.append((a, b, float(sim)))
-
-    similar_groups = agent._find_similar_groups(code_labels)
+    payload, code_index, quote_index = agent._build_prompt_payload(grouped)
 
     system_prompt = agent.get_system_prompt()
     user_prompt = ""
@@ -475,18 +460,10 @@ def test_aggregate_segment(
     result = None
     llm_error: str | None = None
     elapsed = 0.0
-    if code_quotes:
-        from thematic_analysis.agents.aggregator import (
-            AGGREGATOR_RESPONSE_SCHEMA,
-            AGGREGATOR_USER_PROMPT,
-        )
+    if code_index:
+        from thematic_analysis.agents.aggregator import AGGREGATOR_RESPONSE_SCHEMA
 
-        user_prompt = AGGREGATOR_USER_PROMPT.format(
-            codes_section=agent._format_codes_section(code_quotes),
-            similar_groups_section=agent._format_similar_groups_section(
-                similar_groups
-            ),
-        )
+        user_prompt = json.dumps(payload, indent=2)
         t0 = time.monotonic()
         try:
             raw_response = agent._call_llm(
@@ -494,7 +471,7 @@ def test_aggregate_segment(
                 user_prompt,
                 response_format=AGGREGATOR_RESPONSE_SCHEMA,
             )
-            result = agent._parse_response(raw_response, code_quotes)
+            result = agent._parse_response(raw_response, code_index, quote_index)
         except Exception as exc:
             llm_error = f"{type(exc).__name__}: {exc}"
         elapsed = time.monotonic() - t0
@@ -504,10 +481,7 @@ def test_aggregate_segment(
         "segment_text": seg.content,
         "codebook_version": latest.version,
         "coder_codes": coder_codes,
-        "agreed_codes": agreed_codes,
-        "code_quotes": code_quotes,
-        "similarities": similarities,
-        "similar_groups": similar_groups,
+        "prompt_payload": payload,
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
         "raw_response": raw_response,

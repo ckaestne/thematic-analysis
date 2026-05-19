@@ -55,11 +55,10 @@ def _coder_factory():
 class _StubAggregator:
     """Merges all `*-only` codes into 'unique' and retains 'shared'."""
 
-    def __init__(self, codebook):
-        self.codebook = codebook
+    def __init__(self):
         self.last_assignments = None
 
-    def aggregate(self, coder_codes, apply_negotiation=True):
+    def aggregate(self, coder_codes):
         self.last_assignments = coder_codes
         all_unique = sorted(
             {c.code for codes in coder_codes for c in codes if c.code.endswith("-only")}
@@ -86,8 +85,8 @@ class _StubAggregator:
 
 
 def _agg_factory():
-    def f(cb):
-        return _StubAggregator(cb)
+    def f():
+        return _StubAggregator()
     return f
 
 
@@ -135,7 +134,7 @@ def test_next_segment_none_with_no_coders(tmp_path: Path) -> None:
 def test_next_segment_excludes_already_aggregated(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_two_coders_done(conn, n=1)
-    workers.aggregate_one(conn, use_mock_embeddings=True, agent_factory=_agg_factory())
+    workers.aggregate_one(conn, agent_factory=_agg_factory())
     assert store.aggregation.next_segment_to_aggregate() is None
     # Aggregator codes exist for this segment.
     assert store.aggregation.segment_has_aggregator_code(sids[0])
@@ -150,9 +149,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_two_coders_done(conn, n=1)
 
-    res = workers.aggregate_one(
-        conn, use_mock_embeddings=True, agent_factory=_agg_factory()
-    )
+    res = workers.aggregate_one(conn, agent_factory=_agg_factory())
     assert res is not None and res["ok"] is True
     assert res["n_merged"] == 1
     assert res["n_retained"] == 1
@@ -197,22 +194,18 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
     sids = _seed_two_coders_done(conn, n=1)
 
     class _Empty:
-        def __init__(self, cb): pass
-        def aggregate(self, assignments, apply_negotiation=True):
+        def aggregate(self, assignments):
             return AggregationResult(merged_codes=[], retained_codes=[])
 
-    res = workers.aggregate_one(conn, agent_factory=lambda cb: _Empty(cb))
+    res = workers.aggregate_one(conn, agent_factory=_Empty)
     assert res is not None and res["ok"]
-    # An empty aggregation result writes a sentinel aggregator code (id -1)
-    # so the segment is marked done (nothing left to review).
+    # An empty aggregation result still records a sentinel aggregator row
+    # (empty `code`) so the segment is marked aggregated for this
+    # codebook version. The sentinel is not reviewable, so the segment is
+    # "done".
+    assert store.aggregation.segment_has_aggregator_code(sids[0])
     s = store.status.derive_segment_status(sids[0])
     assert s == "done"
-    n_sentinel = conn.execute(
-        "SELECT COUNT(*) AS n FROM code "
-        "WHERE coder_id = 0 AND segment_id = ? AND code = '-1'",
-        (sids[0],),
-    ).fetchone()["n"]
-    assert n_sentinel == 1
 
 
 class _EmptyCoder:
@@ -243,7 +236,7 @@ def test_coder_writes_sentinel_when_no_codes(tmp_path: Path) -> None:
         "SELECT code FROM code WHERE segment_id = ? AND coder_id >= 1",
         (sids[0],),
     ).fetchall()
-    assert [r["code"] for r in rows] == ["-1"]
+    assert [r["code"] for r in rows] == [""]
 
 
 def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
@@ -262,19 +255,18 @@ def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
     called = {"n": 0}
 
     class _ShouldNotRun:
-        def __init__(self, cb): pass
-        def aggregate(self, coder_codes, apply_negotiation=True):
+        def aggregate(self, coder_codes):
             called["n"] += 1
             return AggregationResult(merged_codes=[], retained_codes=[])
 
-    res = workers.aggregate_one(conn, agent_factory=lambda cb: _ShouldNotRun(cb))
+    res = workers.aggregate_one(conn, agent_factory=_ShouldNotRun)
     assert res is not None and res["ok"] is True
-    assert res.get("no_codes") is True
+    assert res.get("empty") is True
     assert called["n"] == 0
-    # Aggregator sentinel persisted.
+    # Aggregator sentinel persisted as a single empty-code row.
     n_sent = conn.execute(
         "SELECT COUNT(*) AS n FROM code "
-        "WHERE coder_id = 0 AND segment_id = ? AND code = '-1'",
+        "WHERE coder_id = 0 AND segment_id = ? AND code = ''",
         (sids[0],),
     ).fetchone()["n"]
     assert n_sent == 1
@@ -320,7 +312,7 @@ def test_cli_aggregate_runs_against_stub(
 
     monkeypatch.setattr(workers, "default_coder_factory", _coder_factory())
     monkeypatch.setattr(
-        workers, "default_aggregator_factory", lambda cb: _StubAggregator(cb)
+        workers, "default_aggregator_factory", lambda: _StubAggregator()
     )
 
     # Reviewer is the same stub used in step4; here we just need a no-op

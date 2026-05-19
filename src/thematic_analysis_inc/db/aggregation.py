@@ -38,9 +38,21 @@ class AggregatorMergeInput:
     source_codes: list[Code] = field(default_factory=list)
 
 
+def _target_versions() -> tuple[int, int | None]:
+    """Resolve (codebook_version, research_context_version) for a new
+    aggregation. Raises if no codebook exists yet."""
+    cb = latest_codebook()
+    if cb is None:
+        raise RuntimeError("no codebook revision exists")
+    return cb.version, latest_research_context_version()
+
+
 def next_segment_to_aggregate() -> Segment | None:
-    """Next Segment whose every queue row is finished without error and
-    that has no aggregator code yet. Returns None if none is ready."""
+    """Next Segment whose every queue row is finished without error,
+    that has at least one coder code at the current (codebook,
+    research_context) version, and that has not yet been aggregated
+    *at that version*. Returns None if none is ready."""
+    cb_version, rc_version = _target_versions()
     with session() as s:
         # Need at least one real coder.
         from thematic_analysis_inc.db.models import Coder
@@ -54,7 +66,6 @@ def next_segment_to_aggregate() -> Segment | None:
         )
         if n_coders == 0:
             return None
-        # Subqueries.
         has_unfinished = (
             select(CodingQueueEntry.segment_id)
             .where(
@@ -69,25 +80,34 @@ def next_segment_to_aggregate() -> Segment | None:
             .where(CodingQueueEntry.segment_id == Segment.segment_id)
             .exists()
         )
-        has_agg = (
+        has_agg_at_version = (
             select(Code.code_id)
             .where(
                 Code.segment_id == Segment.segment_id,
                 Code.coder_id == SYSTEM_AGGREGATOR_ID,
+                Code.codebook_used_id == cb_version,
+                Code.research_context_used_id == rc_version,
             )
             .exists()
         )
-        has_coder_code = (
+        has_coder_code_at_version = (
             select(Code.code_id)
             .where(
                 Code.segment_id == Segment.segment_id,
                 Code.coder_id >= 1,
+                Code.codebook_used_id == cb_version,
+                Code.research_context_used_id == rc_version,
             )
             .exists()
         )
         seg = s.exec(
             select(Segment)
-            .where(has_any_queue, ~has_unfinished, ~has_agg, has_coder_code)
+            .where(
+                has_any_queue,
+                ~has_unfinished,
+                ~has_agg_at_version,
+                has_coder_code_at_version,
+            )
             .order_by(Segment.segment_id)
             .limit(1)
         ).first()
@@ -97,27 +117,50 @@ def next_segment_to_aggregate() -> Segment | None:
         return seg
 
 
-def segment_has_aggregator_code(segment_id: int) -> bool:
+def segment_has_aggregator_code(
+    segment_id: int,
+    codebook_version: int | None = None,
+    rc_version: int | None = None,
+) -> bool:
+    """Whether the segment already has any aggregator row. When
+    ``codebook_version`` is given, only rows at that version (and
+    ``rc_version``) count."""
     with session() as s:
-        row = s.exec(
-            select(Code.code_id).where(
-                Code.segment_id == segment_id,
-                Code.coder_id == SYSTEM_AGGREGATOR_ID,
-            ).limit(1)
-        ).first()
-        return row is not None
+        q = select(Code.code_id).where(
+            Code.segment_id == segment_id,
+            Code.coder_id == SYSTEM_AGGREGATOR_ID,
+        )
+        if codebook_version is not None:
+            q = q.where(
+                Code.codebook_used_id == codebook_version,
+                Code.research_context_used_id == rc_version,
+            )
+        return s.exec(q.limit(1)).first() is not None
 
 
 def record_aggregation_result(
-    segment: Segment, merged: list[AggregatorMergeInput]
+    segment: Segment,
+    merged: list[AggregatorMergeInput],
+    *,
+    codebook_version: int | None = None,
+    rc_version: int | None = None,
 ) -> list[Code]:
     """For each merged code: insert Quote rows, an aggregator Code row,
     quote links, and ``CodesDerived('A', ...)`` edges per source. Returns
-    the new aggregator Codes (detached)."""
-    cb = latest_codebook()
-    if cb is None:
-        raise RuntimeError("no codebook revision exists")
-    rc_version = latest_research_context_version()
+    the new aggregator Codes (detached).
+
+    If ``merged`` is empty, a single sentinel aggregator row is inserted
+    (see :data:`SENTINEL_CODE_LABEL`) so the segment is marked as
+    aggregated for this version even though no codes were produced.
+
+    ``codebook_version`` / ``rc_version`` default to the latest of each.
+    """
+    if codebook_version is None:
+        codebook_version, rc_version = _target_versions()
+
+    if not merged:
+        merged = [AggregatorMergeInput(code=SENTINEL_CODE_LABEL)]
+
     out_ids: list[int] = []
     out_texts: list[tuple[str, str, str]] = []
     with session() as s:
@@ -125,7 +168,7 @@ def record_aggregation_result(
             agg_code = Code(
                 segment_id=segment.segment_id,
                 coder_id=SYSTEM_AGGREGATOR_ID,
-                codebook_used_id=cb.version,
+                codebook_used_id=codebook_version,
                 research_context_used_id=rc_version,
                 code=inp.code,
                 description=inp.description or "",
@@ -158,28 +201,12 @@ def record_aggregation_result(
             out_texts.append(
                 (inp.code, inp.description or "", inp.rationale or "")
             )
-        if not merged:
-            sentinel = Code(
-                segment_id=segment.segment_id,
-                coder_id=SYSTEM_AGGREGATOR_ID,
-                codebook_used_id=cb.version,
-                research_context_used_id=rc_version,
-                code=SENTINEL_CODE_LABEL,
-                description="",
-                rationale="",
-            )
-            s.add(sentinel)
-            s.commit()
-            s.refresh(sentinel)
-            out_ids.append(sentinel.code_id)
-            out_texts.append((SENTINEL_CODE_LABEL, "", ""))
-    # Build detached Code objects for the caller (no session attachment).
     return [
         Code(
             code_id=cid,
             segment_id=segment.segment_id,
             coder_id=SYSTEM_AGGREGATOR_ID,
-            codebook_used_id=cb.version,
+            codebook_used_id=codebook_version,
             research_context_used_id=rc_version,
             code=code,
             description=desc,
@@ -207,6 +234,8 @@ def load_aggregated_code_quotes(code_id: int) -> list[dict]:
 
 
 def list_aggregator_codes_for_segment(segment_id: int) -> list[Code]:
+    """Aggregator codes for a segment, excluding the empty-aggregation
+    sentinel row."""
     with session() as s:
         rows = list(
             s.exec(
@@ -214,6 +243,7 @@ def list_aggregator_codes_for_segment(segment_id: int) -> list[Code]:
                 .where(
                     Code.segment_id == segment_id,
                     Code.coder_id == SYSTEM_AGGREGATOR_ID,
+                    Code.code != SENTINEL_CODE_LABEL,
                 )
                 .order_by(Code.code_id)
             ).all()

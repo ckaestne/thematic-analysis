@@ -58,10 +58,10 @@ class _StubCoder:
 class _StubAggregator:
     """Returns two retained codes: 'alpha' and 'beta'."""
 
-    def __init__(self, codebook):
+    def __init__(self):
         pass
 
-    def aggregate(self, coder_codes, apply_negotiation=True):
+    def aggregate(self, coder_codes):
         from thematic_analysis.agents.aggregator import (
             AggregationResult,
             MergedCode,
@@ -101,7 +101,7 @@ def _seed_ready_to_review(conn, n: int = 1) -> list[int]:
             pass
     while workers.aggregate_one(
         conn, use_mock_embeddings=True,
-        agent_factory=lambda cb: _StubAggregator(cb),
+        agent_factory=lambda: _StubAggregator(),
     ) is not None:
         pass
     return sids

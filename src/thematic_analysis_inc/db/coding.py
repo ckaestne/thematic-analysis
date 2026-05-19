@@ -239,6 +239,11 @@ def record_coding_result(
     ``code.supporting_quotes`` (their ``text`` is read; ``segment_id``
     is set here). Inserts ``Quote`` rows and ``codes_supporting_quotes``
     link rows alongside each Code. Marks the queue entry done.
+
+    If ``codes`` is empty, a single sentinel ``Code`` row with
+    ``code = SENTINEL_CODE_LABEL`` (the empty string) is recorded so we
+    can later distinguish "this assignment has not run yet" from "it ran
+    and produced no codes" without consulting the queue.
     """
     with session() as s:
         a = s.get(CodingQueueEntry, _assignment_pk(assignment))
@@ -333,23 +338,36 @@ def reset_assignment(
         s.commit()
 
 
-def load_segment_coder_codes(segment: Segment) -> dict[int, list[Code]]:
+def load_segment_coder_codes(
+    segment: Segment,
+    *,
+    codebook_version: int | None = None,
+    rc_version: int | None = None,
+) -> dict[int, list[Code]]:
     """Map coder_id → list[Code] for real coders only (id ≥ 1).
 
-    Eagerly loads each code's ``supporting_quotes`` so callers (e.g.
-    the aggregator) can read them after the session closes.
+    When ``codebook_version`` is given, only codes produced under that
+    codebook revision **and** ``rc_version`` are returned (aggregation
+    must not mix codes from different codebook / research-context
+    versions). Eagerly loads each code's ``supporting_quotes`` so
+    callers (e.g. the aggregator) can read them after the session
+    closes.
     """
     from sqlalchemy.orm import selectinload
 
     with session() as s:
-        rows = list(
-            s.exec(
-                select(Code)
-                .where(Code.segment_id == segment.segment_id, Code.coder_id >= 1)
-                .options(selectinload(Code.supporting_quotes))  # type: ignore[arg-type]
-                .order_by(Code.coder_id, Code.code_id)
-            ).all()
+        q = (
+            select(Code)
+            .where(Code.segment_id == segment.segment_id, Code.coder_id >= 1)
+            .options(selectinload(Code.supporting_quotes))  # type: ignore[arg-type]
+            .order_by(Code.coder_id, Code.code_id)
         )
+        if codebook_version is not None:
+            q = q.where(
+                Code.codebook_used_id == codebook_version,
+                Code.research_context_used_id == rc_version,
+            )
+        rows = list(s.exec(q).all())
         # Touch the relationship before expunging so it's materialised.
         for r in rows:
             _ = list(r.supporting_quotes)
