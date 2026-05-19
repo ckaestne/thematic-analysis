@@ -11,13 +11,13 @@ Updated for the refactored schema:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db.models import Code, Quote
 from thematic_analysis_inc.db.schema import create_schema
 
 
@@ -187,13 +187,10 @@ def test_enqueue_creates_new_row_when_codebook_changes(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _StubAssignment:
-    segment_id: str
-    segment_text: str
-    codes: list[str] = field(default_factory=list)
-    rationales: list[str] = field(default_factory=list)
-    is_new_code: list[bool] = field(default_factory=list)
+def _stub_code(label: str, quote_text: str) -> Code:
+    c = Code(code=label, description=f"desc: {label}")
+    c.supporting_quotes = [Quote(text=quote_text)]
+    return c
 
 
 class _StubAgent:
@@ -207,13 +204,10 @@ class _StubAgent:
     def code_segment(self, segment_id, text):
         if self.raise_on is not None and str(segment_id) == self.raise_on:
             raise RuntimeError("boom")
-        return _StubAssignment(
-            segment_id=segment_id,
-            segment_text=text,
-            codes=[f"{self.coder.coder_id}::{segment_id}::a", "shared"],
-            rationales=["because a", "because shared"],
-            is_new_code=[True, False],
-        )
+        return [
+            _stub_code(f"{self.coder.coder_id}::{segment_id}::a", text[:10] or "q"),
+            _stub_code("shared", text[:10] or "q"),
+        ]
 
     async def code_segment_async(self, segment_id, text):
         return self.code_segment(segment_id, text)

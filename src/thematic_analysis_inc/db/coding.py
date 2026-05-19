@@ -25,7 +25,9 @@ from thematic_analysis_inc.db.models import (
     Code,
     Codebook,
     Coder,
+    CodesSupportingQuotes,
     CodingQueueEntry,
+    Quote,
     Segment,
 )
 from thematic_analysis_inc.db.research_context import (
@@ -195,11 +197,16 @@ def _assignment_pk(a: CodingQueueEntry) -> tuple[int, int, int, int | None]:
 
 
 def record_coding_result(
-    assignment: CodingQueueEntry, codes: list[tuple[str, str]]
+    assignment: CodingQueueEntry, codes: list[Code]
 ) -> list[Code]:
-    """For each ``(code_text, rationale)`` insert a Code row attributed to
-    ``assignment.coder_id``. Marks the queue entry done. Returns the
-    persisted Codes."""
+    """Persist the coder's transient ``Code`` rows for this assignment.
+
+    Each input ``Code`` should carry ``code`` and ``description``, plus
+    any number of transient ``Quote`` instances on
+    ``code.supporting_quotes`` (their ``text`` is read; ``segment_id``
+    is set here). Inserts ``Quote`` rows and ``codes_supporting_quotes``
+    link rows alongside each Code. Marks the queue entry done.
+    """
     with session() as s:
         a = s.get(CodingQueueEntry, _assignment_pk(assignment))
         if a is None:
@@ -207,17 +214,28 @@ def record_coding_result(
                 f"assignment {_assignment_pk(assignment)} not found"
             )
         out: list[Code] = []
-        for code_text, rationale in codes:
+        for src in codes:
+            quote_texts = [
+                q.text for q in (src.supporting_quotes or []) if q.text
+            ]
             c = Code(
                 segment_id=a.segment_id,
                 coder_id=a.coder_id,
                 codebook_used_id=a.codebook_used_id,
                 research_context_used_id=a.research_context_used_id,
-                code=code_text,
-                description="",
-                rationale=rationale,
+                code=src.code,
+                description=src.description or "",
+                rationale="",
             )
             s.add(c)
+            s.flush()  # assign code_id
+            for qt in quote_texts:
+                q = Quote(segment_id=a.segment_id, text=qt)
+                s.add(q)
+                s.flush()  # assign quote_id
+                s.add(
+                    CodesSupportingQuotes(code_id=c.code_id, quote_id=q.quote_id)
+                )
             out.append(c)
         a.finished_at = _utcnow()
         s.add(a)
@@ -270,15 +288,25 @@ def reset_assignment(
 
 
 def load_segment_coder_codes(segment: Segment) -> dict[int, list[Code]]:
-    """Map coder_id → list[Code] for real coders only (id ≥ 1)."""
+    """Map coder_id → list[Code] for real coders only (id ≥ 1).
+
+    Eagerly loads each code's ``supporting_quotes`` so callers (e.g.
+    the aggregator) can read them after the session closes.
+    """
+    from sqlalchemy.orm import selectinload
+
     with session() as s:
         rows = list(
             s.exec(
                 select(Code)
                 .where(Code.segment_id == segment.segment_id, Code.coder_id >= 1)
+                .options(selectinload(Code.supporting_quotes))  # type: ignore[arg-type]
                 .order_by(Code.coder_id, Code.code_id)
             ).all()
         )
+        # Touch the relationship before expunging so it's materialised.
+        for r in rows:
+            _ = list(r.supporting_quotes)
         for r in rows:
             s.expunge(r)
         out: dict[int, list[Code]] = {}

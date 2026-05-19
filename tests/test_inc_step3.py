@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from thematic_analysis.agents.aggregator import AggregationResult, MergedCode
@@ -28,13 +27,12 @@ def _add_segments(conn, doc, n: int) -> list[int]:
     return [s.segment_id for s in segs]
 
 
-@dataclass
-class _StubAssignment:
-    segment_id: str
-    segment_text: str
-    codes: list[str] = field(default_factory=list)
-    rationales: list[str] = field(default_factory=list)
-    is_new_code: list[bool] = field(default_factory=list)
+def _stub_code(label: str, quote_text: str):
+    from thematic_analysis_inc.db.models import Code, Quote as DBQuote
+
+    c = Code(code=label, description=f"desc: {label}")
+    c.supporting_quotes = [DBQuote(text=quote_text or "q")]
+    return c
 
 
 class _StubCoder:
@@ -42,13 +40,10 @@ class _StubCoder:
         self.coder = coder
 
     def code_segment(self, segment_id, text):
-        return _StubAssignment(
-            segment_id=segment_id,
-            segment_text=text,
-            codes=[f"c{self.coder.coder_id}-only", "shared"],
-            rationales=["rA", "rB"],
-            is_new_code=[True, False],
-        )
+        return [
+            _stub_code(f"c{self.coder.coder_id}-only", text[:10] or "q"),
+            _stub_code("shared", text[:10] or "q"),
+        ]
 
 
 def _coder_factory():
@@ -64,23 +59,28 @@ class _StubAggregator:
         self.codebook = codebook
         self.last_assignments = None
 
-    def aggregate(self, assignments, apply_negotiation=True):
-        self.last_assignments = assignments
+    def aggregate(self, coder_codes, apply_negotiation=True):
+        self.last_assignments = coder_codes
         all_unique = sorted(
-            {c for a in assignments for c in a.codes if c.endswith("-only")}
+            {c.code for codes in coder_codes for c in codes if c.code.endswith("-only")}
         )
-        seg_id = assignments[0].segment_id
-        seg_text = assignments[0].segment_text
+        # All codes belong to the same segment.
+        seg_id = str(coder_codes[0][0].segment_id)
+        sample_quote_text = (
+            coder_codes[0][0].supporting_quotes[0].text
+            if coder_codes[0][0].supporting_quotes
+            else ""
+        )
         merged = MergedCode(
             code="unique",
             original_codes=all_unique,
-            quotes=[Quote(quote_id=seg_id, text=seg_text)],
+            quotes=[Quote(quote_id=seg_id, text=sample_quote_text)],
             merge_rationale="combined uniques",
         )
         retained = MergedCode(
             code="shared",
             original_codes=["shared"],
-            quotes=[Quote(quote_id=seg_id, text=seg_text)],
+            quotes=[Quote(quote_id=seg_id, text=sample_quote_text)],
         )
         return AggregationResult(merged_codes=[merged], retained_codes=[retained])
 

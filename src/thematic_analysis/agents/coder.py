@@ -1,14 +1,29 @@
-"""Coder agent for assigning codes to text segments."""
+"""Coder agent for assigning codes to text segments.
+
+Following Thematic-LM (Sec. 3 and Appendix "Main Prompts"), the coder
+writes 1–3 codes per segment. For each code, it provides a short
+description of the analytic concept and extracts one or more verbatim
+quotes from the segment as evidence.
+
+The agent returns transient (un-persisted) ``Code`` SQLModel instances
+with attached ``Quote`` instances on ``supporting_quotes``. Persistence
+(segment_id, coder_id, codebook version, etc.) is the caller's
+responsibility.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook
+from thematic_analysis.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT
+from thematic_analysis_inc.db.models import Code, Quote
 
 
 if TYPE_CHECKING:
@@ -22,69 +37,26 @@ class CoderConfig(AgentConfig):
 
     max_codes_per_segment: int = 5
     similarity_threshold: float = 0.7
-    include_rationale: bool = True  # Chain-of-thought for better alignment
-    include_6rs_guidance: bool = True  # Include 6Rs code quality criteria
-    custom_prompts: CoderPrompts | None = None  # Custom prompts (Issue #38)
+    include_rationale: bool = True  # kept for backwards-compatible config
+    include_6rs_guidance: bool = True
+    custom_prompts: CoderPrompts | None = None
 
 
-@dataclass
-class CodeAssignment:
-    """Result of coding a text segment."""
+class _CodeItem(BaseModel):
+    """Pydantic shape mirroring the JSON-schema item the LLM returns."""
 
-    segment_id: str
-    segment_text: str
-    codes: list[str]
-    rationales: list[str] = field(default_factory=list)
-    is_new_code: list[bool] = field(default_factory=list)
+    code: str
+    description: str
+    quotes: list[str]
+
+    model_config = {"extra": "ignore"}
 
 
-CODER_SYSTEM_PROMPT = """\
-You are an expert qualitative researcher performing thematic coding.
-Your task is to analyze text segments and assign meaningful codes
-that capture the key concepts, themes, and patterns **relevant to the
-research focus**.
+class _CoderResponse(BaseModel):
+    codes: list[_CodeItem]
 
-## Guidelines for Coding:
-1. **Read carefully**: Understand the full meaning and context of the text
-2. **Stay on topic**: Only code content that speaks to the research focus.
-   Source texts often range broadly; ignore unrelated material rather than
-   stretching codes to cover it.
-3. **Identify key concepts**: Look for important ideas, experiences, or
-   patterns relevant to the research questions
-4. **Create descriptive codes**: Codes should be concise but meaningful labels
-5. **Consider existing codes**: When possible, use or adapt existing codes
-6. **Be consistent**: Apply codes consistently across similar content
+    model_config = {"extra": "ignore"}
 
-## Code Quality Criteria (6 Rs):
-- **Reciprocal**: Codes should relate meaningfully to the data
-- **Recognizable**: Codes should be clear and understandable
-- **Responsive**: Codes should address the research questions
-- **Resourceful**: Codes should capture nuanced meanings
-
-## Off-topic Segments:
-If a segment is wholly unrelated to the research focus, return an empty
-"codes" list and a single rationale starting with "OUT_OF_SCOPE:" briefly
-explaining why. Do NOT invent codes to cover off-topic material.
-If only part of the segment is relevant, code only that part and ignore the
-rest. Codes must be grounded in content that addresses the research focus —
-not in tangential or background material.
-
-{identity_section}
-
-## Output Format:
-Respond with a JSON object containing:
-- "codes": List of code labels assigned to this segment
-- "rationales": List of brief explanations for each code assignment
-- "is_new": List of booleans indicating if each code is new (not in codebook)
-
-Example:
-```json
-{{
-  "codes": ["emotional support", "peer connection"],
-  "rationales": ["Comfort from others", "Building peer relationships"],
-  "is_new": [false, true]
-}}
-```"""
 
 CODER_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -95,40 +67,34 @@ CODER_RESPONSE_SCHEMA = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "codes": {"type": "array", "items": {"type": "string"}},
-                "rationales": {"type": "array", "items": {"type": "string"}},
-                "is_new": {"type": "array", "items": {"type": "boolean"}},
+                "codes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "code": {"type": "string"},
+                            "description": {"type": "string"},
+                            "quotes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["code", "description", "quotes"],
+                    },
+                },
             },
-            "required": ["codes", "rationales", "is_new"],
+            "required": ["codes"],
         },
     },
 }
 
 
-CODER_USER_PROMPT = """\
-## Current Codebook:
-{codebook_section}
-
-## Text Segment to Code:
-ID: {segment_id}
-Text: "{segment_text}"
-
-{similar_codes_section}
-
-First check whether this segment relates to the research focus. If it does
-not, return an empty "codes" list with a single rationale starting with
-"OUT_OF_SCOPE:". Otherwise assign codes only to the parts that address the
-research focus. Provide your response as JSON."""
-
-
 class CoderAgent(BaseAgent):
     """Agent that assigns codes to text segments.
 
-    The Coder agent analyzes text and assigns codes from an existing codebook
-    or creates new codes when needed. It uses semantic similarity to find
-    relevant existing codes.
-
-    Supports methodology-aware coding with research context (Naeem et al. 2025).
+    Returns a list of transient ``Code`` instances with attached
+    transient ``Quote`` instances (via ``code.supporting_quotes``).
     """
 
     def __init__(
@@ -137,28 +103,15 @@ class CoderAgent(BaseAgent):
         codebook: Codebook | None = None,
         research_context: ResearchContext | None = None,
     ):
-        """Initialize the Coder agent.
-
-        Args:
-            config: Coder configuration.
-            codebook: Initial codebook to use. Created if not provided.
-            research_context: Research context for methodology-aware coding.
-        """
         super().__init__(config or CoderConfig())
         self.coder_config: CoderConfig = self.config  # type: ignore
         self.codebook = codebook if codebook is not None else Codebook()
         self.research_context = research_context
 
     def set_research_context(self, context: ResearchContext) -> None:
-        """Set or update the research context.
-
-        Args:
-            context: The research context to use for coding.
-        """
         self.research_context = context
 
     def get_system_prompt(self) -> str:
-        """Get the system prompt with optional identity and research context."""
         identity_section = ""
         if self.config.identity:
             identity_section = f"""
@@ -167,7 +120,6 @@ You are coding from the following perspective: {self.config.identity}
 Let this perspective inform how you interpret and code the data, while maintaining
 analytical rigor and staying grounded in the text."""
 
-        # Add research context if available
         research_section = ""
         if self.research_context and not self.research_context.is_empty():
             research_section = (
@@ -176,7 +128,6 @@ analytical rigor and staying grounded in the text."""
                 + "\n"
             )
 
-        # Use custom prompts if provided (Issue #38), otherwise use default
         base_prompt = CODER_SYSTEM_PROMPT
         if self.coder_config.custom_prompts is not None:
             base_prompt = self.coder_config.custom_prompts.system_prompt
@@ -189,16 +140,11 @@ analytical rigor and staying grounded in the text."""
         return prompt
 
     def _get_user_prompt_template(self) -> str:
-        """Get the user prompt template.
-
-        Returns custom template if configured, otherwise default.
-        """
         if self.coder_config.custom_prompts is not None:
             return self.coder_config.custom_prompts.user_prompt
         return CODER_USER_PROMPT
 
     def _format_codebook_section(self) -> str:
-        """Format the current codebook for the prompt."""
         if len(self.codebook) == 0:
             return "The codebook is currently empty. Create new codes as needed."
 
@@ -208,7 +154,6 @@ analytical rigor and staying grounded in the text."""
         return f"Existing codes ({len(self.codebook)} total):\n{codes_list}"
 
     def _format_similar_codes_section(self, text: str) -> str:
-        """Find and format similar codes for the given text."""
         if len(self.codebook) == 0:
             return ""
 
@@ -230,22 +175,20 @@ analytical rigor and staying grounded in the text."""
             f"Consider using these relevant codes:\n{similar_list}"
         )
 
-    def _parse_response(self, response: str, segment_id: str) -> CodeAssignment | None:
-        """Parse the LLM response into a CodeAssignment.
+    def _parse_response(
+        self, response: str, segment_text: str
+    ) -> list[Code] | None:
+        """Parse the LLM JSON into transient ``Code`` rows with quotes.
 
-        Args:
-            response: The raw LLM response.
-            segment_id: The ID of the segment being coded.
-
-        Returns:
-            CodeAssignment if parsing succeeds, None otherwise.
+        Uses pydantic to validate the response shape. Truncates to
+        ``max_codes_per_segment``, drops quotes that aren't a substring
+        of ``segment_text`` (best-effort verbatim check), and drops a
+        code if no surviving quotes remain.
         """
-        # Extract JSON from response (handle markdown code blocks)
         json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1).strip()
         else:
-            # Try to find raw JSON object
             json_match = re.search(r"\{.*\}", response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
@@ -253,37 +196,31 @@ analytical rigor and staying grounded in the text."""
                 return None
 
         try:
-            data = json.loads(json_str)
-            codes = data.get("codes", [])
-            rationales = data.get("rationales", [])
-            is_new = data.get("is_new", [True] * len(codes))
-
-            # Ensure lists are the same length
-            while len(rationales) < len(codes):
-                rationales.append("")
-            while len(is_new) < len(codes):
-                is_new.append(True)
-
-            return CodeAssignment(
-                segment_id=segment_id,
-                segment_text="",  # Will be filled by caller
-                codes=codes[: self.coder_config.max_codes_per_segment],
-                rationales=rationales[: self.coder_config.max_codes_per_segment],
-                is_new_code=is_new[: self.coder_config.max_codes_per_segment],
-            )
-        except json.JSONDecodeError:
+            parsed = _CoderResponse.model_validate_json(json_str)
+        except (json.JSONDecodeError, ValidationError):
             return None
 
+        out: list[Code] = []
+        for item in parsed.codes[: self.coder_config.max_codes_per_segment]:
+            code_text = item.code.strip()
+            if not code_text:
+                continue
+            quotes: list[Quote] = []
+            seen: set[str] = set()
+            for q in item.quotes:
+                qt = q.strip()
+                if not qt or qt in seen or qt not in segment_text:
+                    continue
+                seen.add(qt)
+                quotes.append(Quote(text=qt))
+            if not quotes:
+                continue
+            code = Code(code=code_text, description=item.description.strip())
+            code.supporting_quotes = quotes
+            out.append(code)
+        return out
+
     def _build_user_prompt(self, segment_id: str, text: str) -> str:
-        """Build the user prompt for coding a segment.
-
-        Args:
-            segment_id: Unique identifier for the segment.
-            text: The text to code.
-
-        Returns:
-            Formatted user prompt string.
-        """
         template = self._get_user_prompt_template()
         return template.format(
             codebook_section=self._format_codebook_section(),
@@ -292,99 +229,34 @@ analytical rigor and staying grounded in the text."""
             similar_codes_section=self._format_similar_codes_section(text),
         )
 
-    def _process_response(
-        self, response: str, segment_id: str, text: str
-    ) -> CodeAssignment:
-        """Process LLM response into a CodeAssignment.
+    def _process_response(self, response: str, text: str) -> list[Code]:
+        parsed = self._parse_response(response, text)
+        return parsed if parsed is not None else []
 
-        Args:
-            response: The LLM response text.
-            segment_id: The segment ID.
-            text: The segment text.
-
-        Returns:
-            CodeAssignment with assigned codes.
-        """
-        assignment = self._parse_response(response, segment_id)
-
-        if assignment is None:
-            # Fallback: return empty assignment
-            assignment = CodeAssignment(
-                segment_id=segment_id,
-                segment_text=text,
-                codes=[],
-                rationales=[],
-                is_new_code=[],
-            )
-        else:
-            assignment.segment_text = text
-
-        return assignment
-
-    def code_segment(self, segment_id: str, text: str) -> CodeAssignment:
-        """Code a single text segment (synchronous).
-
-        Args:
-            segment_id: Unique identifier for the segment.
-            text: The text to code.
-
-        Returns:
-            CodeAssignment with assigned codes.
-        """
+    def code_segment(self, segment_id: str, text: str) -> list[Code]:
         user_prompt = self._build_user_prompt(segment_id, text)
         response = self._call_llm(
             self.get_system_prompt(),
             user_prompt,
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, segment_id, text)
+        return self._process_response(response, text)
 
-    async def code_segment_async(self, segment_id: str, text: str) -> CodeAssignment:
-        """Code a single text segment (asynchronous).
-
-        Args:
-            segment_id: Unique identifier for the segment.
-            text: The text to code.
-
-        Returns:
-            CodeAssignment with assigned codes.
-        """
+    async def code_segment_async(self, segment_id: str, text: str) -> list[Code]:
         user_prompt = self._build_user_prompt(segment_id, text)
         response = await self._call_llm_async(
             self.get_system_prompt(),
             user_prompt,
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, segment_id, text)
+        return self._process_response(response, text)
 
-    def code_segments(self, segments: list[tuple[str, str]]) -> list[CodeAssignment]:
-        """Code multiple text segments (synchronous).
-
-        Note: Per the paper's architecture (Figure 2), coders produce assignments
-        which flow to the Aggregator, then Reviewer. Codebook updates should
-        happen through the ReviewerAgent, not here.
-
-        Args:
-            segments: List of (segment_id, text) tuples.
-
-        Returns:
-            List of CodeAssignments.
-        """
+    def code_segments(self, segments: list[tuple[str, str]]) -> list[list[Code]]:
         return [self.code_segment(seg_id, text) for seg_id, text in segments]
 
     async def code_segments_async(
         self, segments: list[tuple[str, str]]
-    ) -> list[CodeAssignment]:
-        """Code multiple text segments (asynchronous, parallel).
-
-        Runs all segment coding in parallel using asyncio.gather.
-
-        Args:
-            segments: List of (segment_id, text) tuples.
-
-        Returns:
-            List of CodeAssignments.
-        """
+    ) -> list[list[Code]]:
         import asyncio
 
         tasks = [self.code_segment_async(seg_id, text) for seg_id, text in segments]

@@ -17,7 +17,7 @@ from thematic_analysis.agents.aggregator import (
     AggregatorConfig,
     CodeAggregatorAgent,
 )
-from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
+from thematic_analysis.agents.coder import CoderAgent, CoderConfig
 from thematic_analysis.agents.reviewer import (
     ReviewDecision,
     ReviewerAgent,
@@ -127,17 +127,14 @@ def _code_one_impl(
         _apply_research_context(agent)
         t0 = time.monotonic()
         result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(
-            assignment,
-            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
-        )
+        db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
             "ok": True,
             "coder_id": coder_id,
             "segment_id": segment_id,
             "version": version,
-            "n_codes": len(result.codes),
+            "n_codes": len(result),
             "elapsed": elapsed,
         }
         trace = getattr(agent, "last_trace", None)
@@ -200,17 +197,14 @@ async def code_one_async(
             result = await agent.code_segment_async(str(segment_id), text)
         else:
             result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(
-            assignment,
-            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
-        )
+        db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
             "ok": True,
             "coder_id": coder_id,
             "segment_id": segment_id,
             "version": version,
-            "n_codes": len(result.codes),
+            "n_codes": len(result),
             "elapsed": elapsed,
         }
         trace = getattr(agent, "last_trace", None)
@@ -279,19 +273,11 @@ def default_aggregator_factory(codebook: DomainCodebook) -> CodeAggregatorAgent:
     return CodeAggregatorAgent(config=AggregatorConfig(), codebook=codebook)
 
 
-def _build_assignments(
-    segment_id: int, text: str, coder_codes: dict[int, list[Code]]
-) -> list[CodeAssignment]:
-    return [
-        CodeAssignment(
-            segment_id=str(segment_id),
-            segment_text=text,
-            codes=[c.code for c in codes],
-            rationales=[c.rationale for c in codes],
-            is_new_code=[False] * len(codes),
-        )
-        for _cid, codes in sorted(coder_codes.items())
-    ]
+def _grouped_coder_codes(
+    coder_codes: dict[int, list[Code]],
+) -> list[list[Code]]:
+    """Return the per-coder code lists in coder_id order."""
+    return [codes for _cid, codes in sorted(coder_codes.items())]
 
 
 def aggregate_one(
@@ -323,8 +309,7 @@ def aggregate_one(
         factory = agent_factory or default_aggregator_factory
         agent = factory(domain_cb)
         t0 = time.monotonic()
-        assignments = _build_assignments(segment_id, text, coder_codes)
-        result = agent.aggregate(assignments)
+        result = agent.aggregate(_grouped_coder_codes(coder_codes))
 
         if db_aggregation.segment_has_aggregator_code(segment_id):
             return {
