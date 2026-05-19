@@ -14,8 +14,9 @@ from thematic_analysis.agents.theme_aggregator import (
 )
 from thematic_analysis.codebook import Codebook
 
-from thematic_analysis_inc import cli_stage2, store, workers
-from thematic_analysis_inc.schema import create_schema
+from thematic_analysis_inc import cli_stage2, workers
+from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db.schema import create_schema
 
 
 # ---------------------------------------------------------------------------

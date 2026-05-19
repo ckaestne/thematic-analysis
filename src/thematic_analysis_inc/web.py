@@ -1,13 +1,9 @@
 """FastAPI web server for inspecting and editing the thematic-analysis pipeline.
 
-Exposes a JSON REST API over the SQLite store plus serves a pre-built React
-SPA from ``src/thematic_analysis_inc/web_static``. Run with::
-
-    ta-web --db analysis.sqlite
-
-The frontend is read-mostly with surgical mutations: edit research context,
-edit code text, and delete runs/aggregations/decisions so the pipeline
-re-computes them on the next worker run.
+Stage-1 endpoints use the SQLModel-backed helpers in
+:mod:`thematic_analysis_inc.db` directly (no ``conn`` threading).
+Stage-2 endpoints still open a ``sqlite3.Connection`` for the
+``theme_*`` tables.
 """
 
 from __future__ import annotations
@@ -24,23 +20,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
-from thematic_analysis_inc import store
-
-
-# ---------------------------------------------------------------------------
-# App factory + DB dependency
-# ---------------------------------------------------------------------------
+from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db import (
+    aggregation as db_aggregation,
+    cascades as db_cascades,
+    coding as db_coding,
+    documents as db_documents,
+    review as db_review,
+    status as db_status,
+    theme as db_theme,
+)
 
 
 _DB_PATH: Path | None = None
-
-
-def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return None if row is None else dict(row)
-
-
-def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-    return [dict(r) for r in rows]
 
 
 def _conn() -> sqlite3.Connection:
@@ -49,9 +41,13 @@ def _conn() -> sqlite3.Connection:
     return store.connect(_DB_PATH)
 
 
-# ---------------------------------------------------------------------------
-# Pydantic models for request bodies (responses are plain dicts)
-# ---------------------------------------------------------------------------
+def _ensure_connected() -> None:
+    """Open the engine + sqlite layer for the current request. The sqlite
+    connection is closed; the engine stays cached."""
+    if _DB_PATH is None:
+        raise RuntimeError("DB path not configured")
+    c = store.connect(_DB_PATH)
+    c.close()
 
 
 class ResearchContextIn(BaseModel):
@@ -60,7 +56,6 @@ class ResearchContextIn(BaseModel):
 
 
 class CoderIn(BaseModel):
-    coder_id: str
     identity: str
 
 
@@ -68,40 +63,46 @@ class CodeEdit(BaseModel):
     code: str
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _coder_payload(c) -> dict[str, Any]:
+    return {
+        "coder_id": c.coder_id,
+        "identity": c.identity,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
 
 
-def _seg_status_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    rows = conn.execute(
-        "SELECT status, COUNT(*) AS n FROM segments GROUP BY status"
-    ).fetchall()
-    return {r["status"]: r["n"] for r in rows}
+def _segment_summary(seg) -> dict[str, Any]:
+    return {
+        "segment_id": seg.segment_id,
+        "document_id": seg.document_id,
+        "line_from": seg.line_from,
+        "line_to": seg.line_to,
+        "position": seg.position,
+        "preview": seg.content[:240],
+        "len": len(seg.content),
+    }
 
 
-def _coder_run_progress(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Per-coder: how many segments coded / total."""
-    coders = conn.execute(
-        "SELECT coder_id, identity FROM coders ORDER BY coder_id"
-    ).fetchall()
-    total = conn.execute("SELECT COUNT(*) AS n FROM segments").fetchone()["n"]
+def _coder_progress() -> list[dict[str, Any]]:
+    coders = store.list_coders()
+    total_segments = 0
+    with store.session() as s:
+        from sqlalchemy import func
+        from sqlmodel import select
+        total_segments = int(
+            s.exec(select(func.count()).select_from(store.Segment)).one()
+        )
     out = []
     for c in coders:
-        by = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM coder_runs "
-            "WHERE coder_id = ? GROUP BY status",
-            (c["coder_id"],),
-        ).fetchall()
-        d = {r["status"]: r["n"] for r in by}
+        prog = db_coding.coder_progress(c)
         out.append(
             {
-                "coder_id": c["coder_id"],
-                "identity": c["identity"],
-                "segments_total": total,
-                "runs_done": d.get("done", 0),
-                "runs_running": d.get("running", 0),
-                "runs_failed": d.get("failed", 0),
+                "coder_id": c.coder_id,
+                "identity": c.identity,
+                "segments_total": total_segments,
+                "runs_done": prog.get("done", 0),
+                "runs_running": prog.get("running", 0),
+                "runs_failed": prog.get("failed", 0),
             }
         )
     return out
@@ -110,18 +111,12 @@ def _coder_run_progress(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 def _theme_coder_progress(
     conn: sqlite3.Connection, codebook_version: int
 ) -> list[dict[str, Any]]:
-    coders = conn.execute(
-        "SELECT theme_coder_id, identity FROM theme_coders ORDER BY theme_coder_id"
-    ).fetchall()
+    coders = db_theme.list_theme_coders_rows(conn)
     out = []
     for c in coders:
-        run = conn.execute(
-            "SELECT id, status, claimed_at, finished_at, error "
-            "FROM theme_coder_runs "
-            "WHERE theme_coder_id = ? AND codebook_version = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (c["theme_coder_id"], codebook_version),
-        ).fetchone()
+        run = db_theme.latest_theme_coder_run(
+            conn, c["theme_coder_id"], codebook_version
+        )
         out.append(
             {
                 "theme_coder_id": c["theme_coder_id"],
@@ -132,47 +127,131 @@ def _theme_coder_progress(
     return out
 
 
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
+def _segment_payload(segment_id: int) -> dict[str, Any]:
+    seg = store.get_segment(segment_id)
+    if seg is None:
+        raise HTTPException(status_code=404, detail="segment not found")
+    coder_codes = db_coding.load_segment_coder_codes(seg)
+    coder_blocks: list[dict[str, Any]] = []
+    for cid in sorted(coder_codes):
+        q = db_coding.get_queue_entry(segment_id, cid)
+        status = q.status if q is not None else "pending"
+        coder_blocks.append(
+            {
+                "coder_id": cid,
+                "status": status,
+                "codes": [
+                    {
+                        "code_id": c.code_id,
+                        "code": c.code,
+                        "rationale": c.rationale,
+                        "description": c.description,
+                    }
+                    for c in coder_codes[cid]
+                ],
+            }
+        )
+
+    agg_codes = db_aggregation.list_aggregator_codes_for_segment(segment_id)
+    agg_payload: list[dict[str, Any]] = []
+    for ac in agg_codes:
+        quotes = db_aggregation.load_aggregated_code_quotes(ac.code_id)
+        # Find the review edge (if any).
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import CodesDerived
+        with store.session() as s:
+            edge = s.exec(
+                select(CodesDerived).where(
+                    CodesDerived.source_code_id == ac.code_id,
+                    CodesDerived.derivation_type == "R",
+                )
+            ).first()
+            edge_payload = (
+                {
+                    "new_code_id": edge.new_code_id,
+                    "decision": edge.decision,
+                    "rationale": edge.rationale,
+                }
+                if edge is not None
+                else None
+            )
+        agg_payload.append(
+            {
+                "code_id": ac.code_id,
+                "code": ac.code,
+                "description": ac.description,
+                "rationale": ac.rationale,
+                "quotes": quotes,
+                "review": edge_payload,
+            }
+        )
+    return {
+        "segment_id": seg.segment_id,
+        "document_id": seg.document_id,
+        "content": seg.content,
+        "line_from": seg.line_from,
+        "line_to": seg.line_to,
+        "position": seg.position,
+        "status": db_status.derive_segment_status(seg),
+        "coder_codes": coder_blocks,
+        "aggregator_codes": agg_payload,
+    }
 
 
 def create_app(db_path: str | Path) -> FastAPI:
     global _DB_PATH
     _DB_PATH = Path(db_path)
-    # Pre-create / migrate schema.
     store.init_db(_DB_PATH).close()
 
-    app = FastAPI(title="Thematic Analysis Inspector", version="0.1.0")
-
-    # ── status / dashboard ────────────────────────────────────────────────
+    app = FastAPI(title="Thematic Analysis Inspector", version="0.2.0")
 
     @app.get("/api/status")
     def get_status() -> dict[str, Any]:
         conn = _conn()
         try:
-            s1 = store.status_counts(conn)
-            latest = store.latest_codebook_version(conn)
+            s1 = store.status_counts()
+            latest = store.latest_codebook()
             codebook_version = latest.version if latest else 0
             s2 = store.stage2_status_counts(conn, codebook_version)
-            ctx = store.get_research_context(conn)
+            rc_row = store.get_research_context()
+            ctx = (
+                store.research_context_to_domain(rc_row)
+                if rc_row is not None
+                else None
+            )
+            latest_rc_version = (
+                rc_row.research_context_version if rc_row is not None else None
+            )
             db_size = _DB_PATH.stat().st_size if _DB_PATH and _DB_PATH.exists() else 0
             return {
                 "db_path": str(_DB_PATH),
                 "db_size_bytes": db_size,
                 "research_context_set": ctx is not None,
+                "latest_research_context_version": latest_rc_version,
                 "stage1": {
                     "segments_total": s1.segments_total,
                     "segments_by_status": s1.segments_by_status,
                     "coders_total": s1.coders_total,
-                    "coder_runs_total": s1.coder_runs_total,
-                    "coder_runs_by_status": s1.coder_runs_by_status,
-                    "aggregations_total": s1.aggregations_total,
-                    "aggregations_by_status": s1.aggregations_by_status,
-                    "review_decisions_total": s1.review_decisions_total,
-                    "review_decisions_applied": s1.review_decisions_applied,
+                    "coding_queue_total": s1.coding_queue_total,
+                    "coding_queue_by_status": s1.coding_queue_by_status,
+                    "aggregator_codes_total": s1.aggregator_codes_total,
+                    "aggregator_segments_total": s1.aggregator_segments_total,
+                    "reviewer_codes_total": s1.reviewer_codes_total,
+                    "review_decisions_by_kind": s1.review_decisions_by_kind,
                     "codebook_version": s1.codebook_version,
                     "codebook_codes": s1.codebook_codes,
+                    # Legacy aliases the bundled SPA references.
+                    "coder_runs_total": s1.coding_queue_total,
+                    "coder_runs_by_status": s1.coding_queue_by_status,
+                    "aggregations_total": s1.aggregator_segments_total,
+                    "aggregations_by_status": (
+                        {"done": s1.aggregator_segments_total}
+                        if s1.aggregator_segments_total
+                        else {}
+                    ),
+                    "review_decisions_total": sum(
+                        s1.review_decisions_by_kind.values()
+                    ),
                 },
                 "stage2": {
                     "codebook_version": s2.codebook_version,
@@ -183,713 +262,387 @@ def create_app(db_path: str | Path) -> FastAPI:
                     "theme_aggregations_by_status": s2.theme_aggregations_by_status,
                     "themes_in_result": s2.themes_in_result,
                 },
-                "per_coder": _coder_run_progress(conn),
+                "per_coder": _coder_progress(),
                 "per_theme_coder": _theme_coder_progress(conn, codebook_version),
             }
         finally:
             conn.close()
 
-    # ── research context ──────────────────────────────────────────────────
+    def _rc_payload(rc) -> dict[str, Any]:
+        ctx = store.research_context_to_domain(rc)
+        return {
+            "research_context_version": rc.research_context_version,
+            "description": ctx.description,
+            "tailored_prompts": dict(ctx.tailored_prompts),
+            "roles": list(AGENT_ROLES),
+        }
 
     @app.get("/api/research-context")
     def get_research_context() -> dict[str, Any] | None:
-        conn = _conn()
-        try:
-            ctx = store.get_research_context(conn)
-            if ctx is None:
-                return None
-            return {
-                "description": ctx.description,
-                "tailored_prompts": dict(ctx.tailored_prompts),
-                "roles": list(AGENT_ROLES),
+        _ensure_connected()
+        rc = store.get_research_context()
+        return _rc_payload(rc) if rc is not None else None
+
+    @app.get("/api/research-context/versions")
+    def list_research_context_versions() -> list[dict[str, Any]]:
+        _ensure_connected()
+        return [
+            {
+                "research_context_version": r.research_context_version,
+                "description": r.description or "",
+                "created_at": (
+                    r.created_at.isoformat() if r.created_at else None
+                ),
             }
-        finally:
-            conn.close()
+            for r in store.list_research_context_versions()
+        ]
+
+    @app.get("/api/research-context/versions/{v}")
+    def get_research_context_version(v: int) -> dict[str, Any]:
+        _ensure_connected()
+        rc = store.get_research_context(version=v)
+        if rc is None:
+            raise HTTPException(
+                status_code=404, detail="research context version not found"
+            )
+        return _rc_payload(rc)
 
     @app.put("/api/research-context")
     def put_research_context(body: ResearchContextIn) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            existing = store.get_research_context(conn)
-            tailored = dict(body.tailored_prompts)
-            # If the description changed, drop stored tailored prompts so
-            # they cannot drift out of sync. The user (or the regenerate
-            # endpoint) supplies new ones.
-            if existing is not None and existing.description != body.description:
-                tailored = {
-                    k: v
-                    for k, v in tailored.items()
-                    if k in existing.tailored_prompts
-                    and v == existing.tailored_prompts[k]
-                }
-            ctx = ResearchContext(
-                description=body.description,
-                tailored_prompts={
-                    k: v for k, v in tailored.items() if k in AGENT_ROLES and v
-                },
-            )
-            store.set_research_context(conn, ctx)
-            return {
-                "status": "ok",
-                "description": ctx.description,
-                "tailored_prompts": dict(ctx.tailored_prompts),
-            }
-        finally:
-            conn.close()
+        _ensure_connected()
+        ctx = ResearchContext(
+            description=body.description,
+            tailored_prompts={
+                k: v
+                for k, v in body.tailored_prompts.items()
+                if k in AGENT_ROLES and v
+            },
+        )
+        rc = store.set_research_context(ctx)
+        return {
+            "status": "ok",
+            "research_context_version": rc.research_context_version,
+            "description": ctx.description,
+            "tailored_prompts": dict(ctx.tailored_prompts),
+        }
 
     @app.delete("/api/research-context")
     def delete_research_context() -> dict[str, bool]:
-        conn = _conn()
-        try:
-            return {"removed": store.clear_research_context(conn)}
-        finally:
-            conn.close()
+        _ensure_connected()
+        return {"removed": store.clear_research_context()}
 
     @app.post("/api/research-context/regenerate-prompts")
     def regenerate_tailored_prompts() -> dict[str, Any]:
-        """Generate a tailored prompt section for every agent role from the
-        currently stored research-context description, persist them, and
-        return the new map."""
         from thematic_analysis.research_context_tailor import (
             generate_all_tailored_prompts,
         )
 
-        conn = _conn()
-        try:
-            ctx = store.get_research_context(conn)
-            if ctx is None or ctx.is_empty():
-                raise HTTPException(
-                    status_code=400,
-                    detail="no research context description set",
-                )
-            prompts = generate_all_tailored_prompts(ctx.description)
-            new_ctx = ResearchContext(
-                description=ctx.description,
-                tailored_prompts=prompts,
+        _ensure_connected()
+        rc = store.get_research_context()
+        ctx = (
+            store.research_context_to_domain(rc) if rc is not None else None
+        )
+        if ctx is None or ctx.is_empty():
+            raise HTTPException(
+                status_code=400,
+                detail="no research context description set",
             )
-            store.set_research_context(conn, new_ctx)
-            return {
-                "description": new_ctx.description,
-                "tailored_prompts": dict(new_ctx.tailored_prompts),
-                "roles": list(AGENT_ROLES),
-            }
-        finally:
-            conn.close()
+        prompts = generate_all_tailored_prompts(ctx.description)
+        new_ctx = ResearchContext(
+            description=ctx.description, tailored_prompts=prompts
+        )
+        new_rc = store.set_research_context(new_ctx)
+        return {
+            "research_context_version": new_rc.research_context_version,
+            "description": new_ctx.description,
+            "tailored_prompts": dict(new_ctx.tailored_prompts),
+            "roles": list(AGENT_ROLES),
+        }
 
-    # ── segments ──────────────────────────────────────────────────────────
-
+    # ── segments ─────────────────────────────────────────────────────────
     @app.get("/api/segments")
     def list_segments(
-        status: str | None = None,
-        batch: int | None = None,
         q: str | None = None,
         limit: int = Query(default=100, le=1000),
         offset: int = 0,
     ) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            where = []
-            params: list[Any] = []
-            if status:
-                where.append("status = ?")
-                params.append(status)
-            if batch is not None:
-                where.append("batch = ?")
-                params.append(batch)
-            if q:
-                where.append("(segment_id LIKE ? OR text LIKE ?)")
-                params.extend([f"%{q}%", f"%{q}%"])
-            clause = ("WHERE " + " AND ".join(where)) if where else ""
-            total = conn.execute(
-                f"SELECT COUNT(*) AS n FROM segments {clause}", params
-            ).fetchone()["n"]
-            rows = conn.execute(
-                f"SELECT segment_id, batch, status, title, document_id, "
-                f"  substr(text, 1, 240) AS preview, length(text) AS len "
-                f"FROM segments {clause} ORDER BY segment_id "
-                f"LIMIT ? OFFSET ?",
-                params + [limit, offset],
-            ).fetchall()
-            return {
-                "total": total,
-                "items": _rows_to_dicts(rows),
-                "status_counts": _seg_status_counts(conn),
-            }
-        finally:
-            conn.close()
+        _ensure_connected()
+        total, rows = db_documents.list_segments(q=q, limit=limit, offset=offset)
+        items = []
+        for seg in rows:
+            d = _segment_summary(seg)
+            d["status"] = db_status.derive_segment_status(seg)
+            items.append(d)
+        return {
+            "total": total,
+            "items": items,
+            "status_counts": db_status.segments_by_derived_status(),
+        }
 
     @app.get("/api/segments/{segment_id}")
-    def get_segment(segment_id: str) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            seg = conn.execute(
-                "SELECT segment_id, text, title, document_id, batch, status "
-                "FROM segments WHERE segment_id = ?",
-                (segment_id,),
-            ).fetchone()
-            if seg is None:
-                raise HTTPException(status_code=404, detail="segment not found")
-            return _segment_coding_payload(conn, dict(seg))
-        finally:
-            conn.close()
+    def get_segment(segment_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        return _segment_payload(segment_id)
 
     @app.delete("/api/segments/{segment_id}")
-    def delete_segment(segment_id: str) -> dict[str, Any]:
-        """Delete a segment and every derived row that points at it.
+    def delete_segment(segment_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        seg = store.get_segment(segment_id)
+        if seg is None:
+            raise HTTPException(status_code=404, detail="segment not found")
+        ok = db_cascades.delete_segment_cascade(seg)
+        if not ok:
+            raise HTTPException(status_code=404, detail="segment not found")
+        return {"removed_segment": True}
 
-        Useful when a segment was loaded by mistake. Cascades:
-        review_decisions → aggregated_codes → aggregations,
-        coder_codes → coder_runs, then segments.
-        """
-        conn = _conn()
-        try:
-            conn.execute("BEGIN")
-            agg_ids = [
-                r["id"]
-                for r in conn.execute(
-                    "SELECT id FROM aggregations WHERE segment_id = ?",
-                    (segment_id,),
-                ).fetchall()
-            ]
-            run_ids = [
-                r["id"]
-                for r in conn.execute(
-                    "SELECT id FROM coder_runs WHERE segment_id = ?",
-                    (segment_id,),
-                ).fetchall()
-            ]
-            if agg_ids:
-                ph = ",".join("?" * len(agg_ids))
-                conn.execute(
-                    f"DELETE FROM review_decisions WHERE aggregated_code_id IN "
-                    f"(SELECT id FROM aggregated_codes WHERE aggregation_id IN ({ph}))",
-                    agg_ids,
-                )
-                conn.execute(
-                    f"DELETE FROM aggregated_codes WHERE aggregation_id IN ({ph})",
-                    agg_ids,
-                )
-                conn.execute(
-                    f"DELETE FROM aggregations WHERE id IN ({ph})", agg_ids
-                )
-            if run_ids:
-                ph = ",".join("?" * len(run_ids))
-                conn.execute(
-                    f"DELETE FROM coder_codes WHERE coder_run_id IN ({ph})",
-                    run_ids,
-                )
-                conn.execute(
-                    f"DELETE FROM coder_runs WHERE id IN ({ph})", run_ids
-                )
-            cur = conn.execute(
-                "DELETE FROM segments WHERE segment_id = ?", (segment_id,)
-            )
-            removed = cur.rowcount
-            conn.execute("COMMIT")
-            if removed == 0:
-                raise HTTPException(status_code=404, detail="segment not found")
-            return {
-                "removed_segment": True,
-                "removed_aggregations": len(agg_ids),
-                "removed_coder_runs": len(run_ids),
-            }
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
-
-    # ── documents ─────────────────────────────────────────────────────────
-
+    # ── documents ────────────────────────────────────────────────────────
     @app.get("/api/documents")
     def list_documents() -> dict[str, Any]:
-        conn = _conn()
-        try:
-            rows = conn.execute(
-                "SELECT d.document_id, d.filename, d.created_at, "
-                "  length(d.content) AS size_bytes, "
-                "  COUNT(s.segment_id) AS segments_total "
-                "FROM documents d "
-                "LEFT JOIN segments s ON s.document_id = d.document_id "
-                "GROUP BY d.document_id "
-                "ORDER BY d.document_id DESC"
-            ).fetchall()
-            # Per-(document, coder) run-status counts in one query.
-            progress_rows = conn.execute(
-                "SELECT s.document_id, cr.coder_id, cr.status, "
-                "  COUNT(*) AS n "
-                "FROM segments s "
-                "JOIN coder_runs cr ON cr.segment_id = s.segment_id "
-                "WHERE s.document_id IS NOT NULL "
-                "GROUP BY s.document_id, cr.coder_id, cr.status"
-            ).fetchall()
-            # Aggregation status counts per document.
-            agg_rows = conn.execute(
-                "SELECT s.document_id, a.status, COUNT(*) AS n "
-                "FROM segments s "
-                "JOIN aggregations a ON a.segment_id = s.segment_id "
-                "WHERE s.document_id IS NOT NULL "
-                "GROUP BY s.document_id, a.status"
-            ).fetchall()
-            coders_all = conn.execute(
-                "SELECT coder_id FROM coders ORDER BY coder_id"
-            ).fetchall()
-            coder_ids = [c["coder_id"] for c in coders_all]
-
-            by_doc: dict[int, dict[str, dict[str, int]]] = {}
-            for r in progress_rows:
-                d = by_doc.setdefault(r["document_id"], {})
-                c = d.setdefault(
-                    r["coder_id"], {"done": 0, "running": 0, "failed": 0}
-                )
-                c[r["status"]] = c.get(r["status"], 0) + r["n"]
-            agg_by_doc: dict[int, dict[str, int]] = {}
-            for r in agg_rows:
-                agg_by_doc.setdefault(r["document_id"], {})[r["status"]] = r["n"]
-
-            items = []
-            for row in _rows_to_dicts(rows):
-                doc_id = row["document_id"]
-                per_coder = []
-                for cid in coder_ids:
-                    d = by_doc.get(doc_id, {}).get(
-                        cid, {"done": 0, "running": 0, "failed": 0}
-                    )
-                    per_coder.append(
-                        {
-                            "coder_id": cid,
-                            "runs_done": d.get("done", 0),
-                            "runs_running": d.get("running", 0),
-                            "runs_failed": d.get("failed", 0),
-                        }
-                    )
-                row["per_coder"] = per_coder
-                row["aggregations_by_status"] = agg_by_doc.get(doc_id, {})
-                items.append(row)
-            return {"items": items, "coder_ids": coder_ids}
-        finally:
-            conn.close()
+        _ensure_connected()
+        docs = store.list_documents()
+        items = []
+        for d in docs:
+            items.append(
+                {
+                    "document_id": d.document_id,
+                    "filename": d.filename,
+                    "created_at": (
+                        d.created_at.isoformat() if d.created_at else None
+                    ),
+                    "segments_total": len(d.segments),
+                }
+            )
+        coder_ids = [c.coder_id for c in store.list_coders()]
+        return {"items": items, "coder_ids": coder_ids}
 
     @app.get("/api/documents/{document_id}")
     def get_document(document_id: int) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            doc = conn.execute(
-                "SELECT document_id, filename, created_at, length(content) AS size_bytes "
-                "FROM documents WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
+        _ensure_connected()
+        with store.session() as s:
+            doc = s.get(store.Document, document_id)
             if doc is None:
-                raise HTTPException(status_code=404, detail="document not found")
-            segs = conn.execute(
-                "SELECT segment_id, title, status, text, batch, "
-                "  length(text) AS len "
-                "FROM segments WHERE document_id = ? "
-                "ORDER BY position IS NULL, position, segment_id",
-                (document_id,),
-            ).fetchall()
-            seg_list: list[dict[str, Any]] = []
-            for seg in segs:
-                seg_list.append(_segment_coding_payload(conn, dict(seg)))
-            return {**dict(doc), "segments": seg_list}
-        finally:
-            conn.close()
+                raise HTTPException(
+                    status_code=404, detail="document not found"
+                )
+            seg_ids = [seg.segment_id for seg in doc.segments]
+            doc_payload = {
+                "document_id": doc.document_id,
+                "filename": doc.filename,
+                "created_at": (
+                    doc.created_at.isoformat() if doc.created_at else None
+                ),
+            }
+        seg_list = [_segment_payload(sid) for sid in seg_ids]
+        return {**doc_payload, "segments": seg_list}
 
     @app.delete("/api/documents/{document_id}")
     def delete_document(document_id: int) -> dict[str, Any]:
-        """Delete a document and every segment + derived row that came from it."""
-        conn = _conn()
-        try:
-            doc = conn.execute(
-                "SELECT document_id FROM documents WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
+        _ensure_connected()
+        with store.session() as s:
+            doc = s.get(store.Document, document_id)
             if doc is None:
-                raise HTTPException(status_code=404, detail="document not found")
-            seg_ids = [
-                r["segment_id"]
-                for r in conn.execute(
-                    "SELECT segment_id FROM segments WHERE document_id = ?",
-                    (document_id,),
-                ).fetchall()
-            ]
-            conn.execute("BEGIN")
-            removed_aggs = 0
-            removed_runs = 0
-            if seg_ids:
-                ph = ",".join("?" * len(seg_ids))
-                agg_ids = [
-                    r["id"]
-                    for r in conn.execute(
-                        f"SELECT id FROM aggregations WHERE segment_id IN ({ph})",
-                        seg_ids,
-                    ).fetchall()
-                ]
-                run_ids = [
-                    r["id"]
-                    for r in conn.execute(
-                        f"SELECT id FROM coder_runs WHERE segment_id IN ({ph})",
-                        seg_ids,
-                    ).fetchall()
-                ]
-                if agg_ids:
-                    aph = ",".join("?" * len(agg_ids))
-                    conn.execute(
-                        f"DELETE FROM review_decisions WHERE aggregated_code_id IN "
-                        f"(SELECT id FROM aggregated_codes WHERE aggregation_id IN ({aph}))",
-                        agg_ids,
-                    )
-                    conn.execute(
-                        f"DELETE FROM aggregated_codes WHERE aggregation_id IN ({aph})",
-                        agg_ids,
-                    )
-                    conn.execute(
-                        f"DELETE FROM aggregations WHERE id IN ({aph})", agg_ids
-                    )
-                    removed_aggs = len(agg_ids)
-                if run_ids:
-                    rph = ",".join("?" * len(run_ids))
-                    conn.execute(
-                        f"DELETE FROM coder_codes WHERE coder_run_id IN ({rph})",
-                        run_ids,
-                    )
-                    conn.execute(
-                        f"DELETE FROM coder_runs WHERE id IN ({rph})", run_ids
-                    )
-                    removed_runs = len(run_ids)
-                conn.execute(
-                    f"DELETE FROM segments WHERE segment_id IN ({ph})", seg_ids
+                raise HTTPException(
+                    status_code=404, detail="document not found"
                 )
-            conn.execute(
-                "DELETE FROM documents WHERE document_id = ?", (document_id,)
-            )
-            conn.execute("COMMIT")
-            return {
-                "removed_document": True,
-                "removed_segments": len(seg_ids),
-                "removed_coder_runs": removed_runs,
-                "removed_aggregations": removed_aggs,
-            }
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+            s.expunge(doc)
+        removed, n_segs = db_cascades.delete_document_cascade(doc)
+        if not removed:
+            raise HTTPException(status_code=404, detail="document not found")
+        return {"removed_document": True, "removed_segments": n_segs}
 
-    # ── coders (stage 1) ──────────────────────────────────────────────────
-
+    # ── coders ───────────────────────────────────────────────────────────
     @app.get("/api/coders")
     def get_coders() -> list[dict[str, Any]]:
-        conn = _conn()
-        try:
-            return [vars(c) for c in store.list_coders(conn)]
-        finally:
-            conn.close()
+        _ensure_connected()
+        return [_coder_payload(c) for c in store.list_coders()]
 
+    @app.put("/api/coders")
+    def put_coder(body: CoderIn) -> dict[str, Any]:
+        _ensure_connected()
+        coder = store.add_coder(body.identity)
+        return {
+            "inserted": True,
+            "coder_id": coder.coder_id,
+            "identity": coder.identity,
+        }
+
+    # Legacy POST alias for clients that haven't migrated to PUT yet.
     @app.post("/api/coders")
     def post_coder(body: CoderIn) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            inserted = store.add_coder(conn, body.coder_id, body.identity)
-            return {"inserted": inserted, "coder_id": body.coder_id}
-        finally:
-            conn.close()
+        return put_coder(body)
 
     @app.delete("/api/coders/{coder_id}")
-    def delete_coder(coder_id: str, force: bool = False) -> dict[str, Any]:
-        conn = _conn()
+    def delete_coder(coder_id: int, force: bool = False) -> dict[str, Any]:
+        _ensure_connected()
+        coder = store.get_coder(coder_id)
+        if coder is None:
+            raise HTTPException(status_code=404, detail="coder not found")
         try:
-            try:
-                removed, runs_deleted = store.remove_coder(
-                    conn, coder_id, force=force
-                )
-            except RuntimeError as e:
-                raise HTTPException(status_code=409, detail=str(e))
-            if not removed:
-                raise HTTPException(status_code=404, detail="coder not found")
-            return {"removed": True, "runs_deleted": runs_deleted}
-        finally:
-            conn.close()
+            removed, n = db_cascades.delete_coder_cascade(coder, force=force)
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if not removed:
+            raise HTTPException(status_code=404, detail="coder not found")
+        return {"removed": True, "queue_rows_deleted": n}
 
-    # ── coder runs ────────────────────────────────────────────────────────
-
-    @app.get("/api/coder-runs")
-    def list_coder_runs(
-        coder_id: str | None = None,
-        status: str | None = None,
+    # ── coding queue (replaces coder-runs) ───────────────────────────────
+    @app.get("/api/coding-queue")
+    def list_coding_queue(
+        coder_id: int | None = None,
         limit: int = Query(default=100, le=1000),
         offset: int = 0,
     ) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            where: list[str] = []
-            params: list[Any] = []
-            if coder_id:
-                where.append("cr.coder_id = ?")
-                params.append(coder_id)
-            if status:
-                where.append("cr.status = ?")
-                params.append(status)
-            clause = ("WHERE " + " AND ".join(where)) if where else ""
-            total = conn.execute(
-                f"SELECT COUNT(*) AS n FROM coder_runs cr {clause}", params
-            ).fetchone()["n"]
-            rows = conn.execute(
-                f"SELECT cr.id, cr.segment_id, cr.coder_id, cr.codebook_version, "
-                f"  cr.status, cr.claimed_at, cr.finished_at, cr.error, "
-                f"  (SELECT COUNT(*) FROM coder_codes WHERE coder_run_id = cr.id) "
-                f"    AS n_codes "
-                f"FROM coder_runs cr {clause} "
-                f"ORDER BY cr.id DESC LIMIT ? OFFSET ?",
-                params + [limit, offset],
-            ).fetchall()
-            return {"total": total, "items": _rows_to_dicts(rows)}
-        finally:
-            conn.close()
+        _ensure_connected()
+        coder = store.get_coder(coder_id) if coder_id is not None else None
+        total, entries = db_coding.list_queue_entries(
+            coder, limit=limit, offset=offset
+        )
+        items = []
+        for q in entries:
+            with store.session() as s:
+                from sqlalchemy import func
+                from sqlmodel import select
 
-    @app.delete("/api/coder-runs/{run_id}")
-    def delete_coder_run(run_id: int) -> dict[str, Any]:
-        """Delete a single coder_run row (and its codes). The pipeline will
-        recreate it next time `ta code <coder_id>` runs."""
-        conn = _conn()
-        try:
-            row = conn.execute(
-                "SELECT segment_id FROM coder_runs WHERE id = ?", (run_id,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="run not found")
-            segment_id = row["segment_id"]
-            conn.execute("BEGIN")
-            conn.execute(
-                "DELETE FROM coder_codes WHERE coder_run_id = ?", (run_id,)
+                n_codes = int(
+                    s.exec(
+                        select(func.count())
+                        .select_from(store.Code)
+                        .where(
+                            store.Code.segment_id == q.segment_id,
+                            store.Code.coder_id == q.coder_id,
+                        )
+                    ).one()
+                )
+            items.append(
+                {
+                    "segment_id": q.segment_id,
+                    "coder_id": q.coder_id,
+                    "codebook_version": q.codebook_used_id,
+                    "research_context_version": q.research_context_used_id,
+                    "claimed_at": (
+                        q.claimed_at.isoformat() if q.claimed_at else None
+                    ),
+                    "finished_at": (
+                        q.finished_at.isoformat() if q.finished_at else None
+                    ),
+                    "error": q.error,
+                    "n_codes": n_codes,
+                    "status": q.status,
+                }
             )
-            conn.execute("DELETE FROM coder_runs WHERE id = ?", (run_id,))
-            # Also drop any downstream aggregation for this segment if present,
-            # because the aggregator key is (segment_id) and the previous
-            # aggregation no longer corresponds to current coder output.
-            agg = conn.execute(
-                "SELECT id FROM aggregations WHERE segment_id = ?", (segment_id,)
-            ).fetchone()
-            removed_agg = False
-            if agg is not None:
-                _cascade_delete_aggregation(conn, agg["id"])
-                removed_agg = True
-            # Reset segment status so it gets picked up again.
-            conn.execute(
-                "UPDATE segments SET status='pending' WHERE segment_id = ?",
-                (segment_id,),
-            )
-            conn.execute("COMMIT")
-            return {"removed": True, "removed_aggregation": removed_agg}
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+        return {"total": total, "items": items}
 
-    @app.patch("/api/coder-codes/{run_id}/{position}")
-    def edit_coder_code(
-        run_id: int, position: int, body: CodeEdit
-    ) -> dict[str, str]:
-        conn = _conn()
-        try:
-            cur = conn.execute(
-                "UPDATE coder_codes SET code = ? "
-                "WHERE coder_run_id = ? AND position = ?",
-                (body.code, run_id, position),
-            )
-            if cur.rowcount == 0:
+    @app.delete("/api/coding-queue/{segment_id}/{coder_id}")
+    def reset_coding_assignment(
+        segment_id: int, coder_id: int
+    ) -> dict[str, Any]:
+        _ensure_connected()
+        q = db_coding.get_queue_entry(segment_id, coder_id)
+        if q is None:
+            raise HTTPException(status_code=404, detail="queue row not found")
+        ok = db_cascades.reset_coding_assignment_cascade(q)
+        if not ok:
+            raise HTTPException(status_code=404, detail="queue row not found")
+        return {"removed": True}
+
+    @app.patch("/api/codes/{code_id}")
+    def edit_code(code_id: int, body: CodeEdit) -> dict[str, str]:
+        _ensure_connected()
+        with store.session() as s:
+            c = s.get(store.Code, code_id)
+            if c is None:
                 raise HTTPException(status_code=404, detail="code not found")
-            return {"status": "ok"}
-        finally:
-            conn.close()
+            s.expunge(c)
+        ok = db_coding.edit_code_text(c, body.code)
+        if not ok:
+            raise HTTPException(status_code=404, detail="code not found")
+        return {"status": "ok"}
 
-    # ── aggregations ──────────────────────────────────────────────────────
-
+    # ── aggregations ─────────────────────────────────────────────────────
     @app.get("/api/aggregations")
     def list_aggregations(
-        status: str | None = None,
-        limit: int = Query(default=100, le=1000),
-        offset: int = 0,
+        limit: int = Query(default=100, le=1000), offset: int = 0
     ) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            where = "WHERE status = ?" if status else ""
-            params: list[Any] = [status] if status else []
-            total = conn.execute(
-                f"SELECT COUNT(*) AS n FROM aggregations {where}", params
-            ).fetchone()["n"]
-            rows = conn.execute(
-                f"SELECT a.id, a.segment_id, a.status, a.created_at, "
-                f"  a.finished_at, a.error, "
-                f"  (SELECT COUNT(*) FROM aggregated_codes WHERE aggregation_id = a.id) "
-                f"    AS n_codes "
-                f"FROM aggregations a {where} "
-                f"ORDER BY a.id DESC LIMIT ? OFFSET ?",
-                params + [limit, offset],
-            ).fetchall()
-            return {"total": total, "items": _rows_to_dicts(rows)}
-        finally:
-            conn.close()
+        _ensure_connected()
+        total, items = db_aggregation.list_aggregations(
+            limit=limit, offset=offset
+        )
+        return {"total": total, "items": items}
 
-    @app.delete("/api/aggregations/{agg_id}")
-    def delete_aggregation(agg_id: int) -> dict[str, Any]:
-        """Delete an aggregation row + its aggregated_codes + review_decisions.
-        The segment goes back to status='coding' so `aggregate` picks it up."""
-        conn = _conn()
-        try:
-            row = conn.execute(
-                "SELECT segment_id FROM aggregations WHERE id = ?", (agg_id,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="aggregation not found")
-            segment_id = row["segment_id"]
-            conn.execute("BEGIN")
-            _cascade_delete_aggregation(conn, agg_id)
-            conn.execute(
-                "UPDATE segments SET status='coding' WHERE segment_id = ?",
-                (segment_id,),
-            )
-            conn.execute("COMMIT")
-            return {"removed": True}
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+    @app.delete("/api/aggregations/segment/{segment_id}")
+    def delete_aggregation(segment_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        seg = store.get_segment(segment_id)
+        if seg is None:
+            return {"removed_aggregator_codes": 0}
+        n = db_cascades.delete_aggregation_for_segment_cascade(seg)
+        return {"removed_aggregator_codes": n}
 
-    @app.patch("/api/aggregated-codes/{ac_id}")
-    def edit_aggregated_code(ac_id: int, body: CodeEdit) -> dict[str, str]:
-        conn = _conn()
-        try:
-            cur = conn.execute(
-                "UPDATE aggregated_codes SET code = ? WHERE id = ?",
-                (body.code, ac_id),
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="code not found")
-            return {"status": "ok"}
-        finally:
-            conn.close()
-
-    @app.delete("/api/aggregated-codes/{ac_id}")
-    def delete_aggregated_code(ac_id: int) -> dict[str, str]:
-        conn = _conn()
-        try:
-            conn.execute("BEGIN")
-            conn.execute(
-                "DELETE FROM review_decisions WHERE aggregated_code_id = ?",
-                (ac_id,),
-            )
-            cur = conn.execute(
-                "DELETE FROM aggregated_codes WHERE id = ?", (ac_id,)
-            )
-            conn.execute("COMMIT")
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="code not found")
-            return {"status": "ok"}
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
-
-    # ── review decisions ──────────────────────────────────────────────────
-
+    # ── review decisions ─────────────────────────────────────────────────
     @app.get("/api/review-decisions")
     def list_review_decisions(
         decision: str | None = None,
         limit: int = Query(default=100, le=1000),
         offset: int = 0,
     ) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            where = "WHERE rd.decision = ?" if decision else ""
-            params: list[Any] = [decision] if decision else []
-            total = conn.execute(
-                f"SELECT COUNT(*) AS n FROM review_decisions rd {where}", params
-            ).fetchone()["n"]
-            rows = conn.execute(
-                f"SELECT rd.id, rd.aggregated_code_id, rd.decision, "
-                f"  rd.target_code, rd.rationale, rd.applied, "
-                f"  rd.resulting_version, rd.created_at, "
-                f"  ac.code AS aggregated_code, a.segment_id "
-                f"FROM review_decisions rd "
-                f"JOIN aggregated_codes ac ON ac.id = rd.aggregated_code_id "
-                f"JOIN aggregations a ON a.id = ac.aggregation_id "
-                f"{where} ORDER BY rd.id DESC LIMIT ? OFFSET ?",
-                params + [limit, offset],
-            ).fetchall()
-            return {"total": total, "items": _rows_to_dicts(rows)}
-        finally:
-            conn.close()
+        _ensure_connected()
+        total, rows = db_review.list_review_decisions(
+            decision, limit=limit, offset=offset
+        )
+        items = []
+        with store.session() as s:
+            for d in rows:
+                src = s.get(store.Code, d.source_code_id)
+                new = s.get(store.Code, d.new_code_id)
+                items.append(
+                    {
+                        "new_code_id": d.new_code_id,
+                        "source_code_id": d.source_code_id,
+                        "decision": d.decision,
+                        "rationale": d.rationale,
+                        "source_code": src.code if src else None,
+                        "segment_id": src.segment_id if src else None,
+                        "new_code": new.code if new else None,
+                    }
+                )
+        return {"total": total, "items": items}
 
-    @app.delete("/api/review-decisions/{rd_id}")
-    def delete_review_decision(rd_id: int) -> dict[str, str]:
-        conn = _conn()
-        try:
-            cur = conn.execute(
-                "DELETE FROM review_decisions WHERE id = ?", (rd_id,)
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(status_code=404, detail="decision not found")
-            return {"status": "ok"}
-        finally:
-            conn.close()
-
-    # ── codebook versions ─────────────────────────────────────────────────
-
+    # ── codebook versions ────────────────────────────────────────────────
     @app.get("/api/codebook/versions")
     def list_codebook_versions() -> list[dict[str, Any]]:
-        conn = _conn()
-        try:
-            rows = conn.execute(
-                "SELECT version, parent_version, created_by, created_at, "
-                "  length(snapshot_json) AS bytes "
-                "FROM codebook_versions ORDER BY version DESC"
-            ).fetchall()
-            out = []
-            for r in rows:
-                # Cheap: parse snapshot once to count codes.
-                snap = conn.execute(
-                    "SELECT snapshot_json FROM codebook_versions WHERE version = ?",
-                    (r["version"],),
-                ).fetchone()
-                n = len(json.loads(snap["snapshot_json"]).get("codes", []))
-                out.append({**dict(r), "n_codes": n})
-            return out
-        finally:
-            conn.close()
+        _ensure_connected()
+        out = []
+        for cv in store.list_codebooks():
+            snap = json.loads(store.codebook_to_json_for_version(cv.version))
+            out.append(
+                {
+                    "version": cv.version,
+                    "parent_version": cv.parent_version,
+                    "created_at": (
+                        cv.created_at.isoformat() if cv.created_at else None
+                    ),
+                    "n_codes": len(snap.get("codes", [])),
+                }
+            )
+        return out
 
     @app.get("/api/codebook/versions/{version}")
     def get_codebook_version(version: int) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            cv = store.get_codebook_version(conn, version)
-            if cv is None:
-                raise HTTPException(status_code=404, detail="version not found")
-            return {
-                "version": cv.version,
-                "parent_version": cv.parent_version,
-                "created_by": cv.created_by,
-                "created_at": cv.created_at,
-                "codebook": json.loads(cv.snapshot_json),
-            }
-        finally:
-            conn.close()
+        _ensure_connected()
+        cv = store.get_codebook(version)
+        if cv is None:
+            raise HTTPException(status_code=404, detail="version not found")
+        snapshot = store.codebook_to_json_for_version(version)
+        return {
+            "version": cv.version,
+            "parent_version": cv.parent_version,
+            "created_at": (
+                cv.created_at.isoformat() if cv.created_at else None
+            ),
+            "codebook": json.loads(snapshot),
+        }
 
-    # ── stage 2: theme coders ─────────────────────────────────────────────
-
+    # ── stage 2: theme coders ────────────────────────────────────────────
     @app.get("/api/theme-coders")
     def get_theme_coders() -> list[dict[str, Any]]:
         conn = _conn()
@@ -899,11 +652,15 @@ def create_app(db_path: str | Path) -> FastAPI:
             conn.close()
 
     @app.post("/api/theme-coders")
-    def post_theme_coder(body: CoderIn) -> dict[str, Any]:
+    def post_theme_coder(body: dict) -> dict[str, Any]:
         conn = _conn()
         try:
-            inserted = store.add_theme_coder(conn, body.coder_id, body.identity)
-            return {"inserted": inserted, "theme_coder_id": body.coder_id}
+            name = body.get("name") or body.get("coder_id") or ""
+            identity = body.get("identity", "")
+            if not name:
+                raise HTTPException(status_code=422, detail="name required")
+            inserted = store.add_theme_coder(conn, name, identity)
+            return {"inserted": inserted, "theme_coder_id": name}
         finally:
             conn.close()
 
@@ -934,19 +691,12 @@ def create_app(db_path: str | Path) -> FastAPI:
         conn = _conn()
         try:
             if codebook_version is None:
-                latest = store.latest_codebook_version(conn)
+                latest = store.latest_codebook()
                 codebook_version = latest.version if latest else 0
-            rows = conn.execute(
-                "SELECT id, theme_coder_id, codebook_version, status, "
-                "  claimed_at, finished_at, error, "
-                "  CASE WHEN result_json IS NULL THEN 0 "
-                "       ELSE length(result_json) END AS result_bytes "
-                "FROM theme_coder_runs "
-                "WHERE codebook_version = ? "
-                "ORDER BY theme_coder_id",
-                (codebook_version,),
-            ).fetchall()
-            return _rows_to_dicts(rows)
+            rows = db_theme.list_theme_coder_runs_for_version(
+                conn, codebook_version
+            )
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
@@ -954,17 +704,14 @@ def create_app(db_path: str | Path) -> FastAPI:
     def get_theme_coder_run(run_id: int) -> dict[str, Any]:
         conn = _conn()
         try:
-            row = conn.execute(
-                "SELECT id, theme_coder_id, codebook_version, status, "
-                "  claimed_at, finished_at, error, result_json, raw_response "
-                "FROM theme_coder_runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
+            row = db_theme.get_theme_coder_run(conn, run_id)
             if row is None:
                 raise HTTPException(status_code=404, detail="run not found")
             d = dict(row)
             d["result"] = (
-                json.loads(d.pop("result_json")) if d.get("result_json") else None
+                json.loads(d.pop("result_json"))
+                if d.get("result_json")
+                else None
             )
             return d
         finally:
@@ -974,27 +721,12 @@ def create_app(db_path: str | Path) -> FastAPI:
     def delete_theme_coder_run(run_id: int) -> dict[str, str]:
         conn = _conn()
         try:
-            conn.execute("BEGIN")
-            conn.execute(
-                "DELETE FROM theme_aggregation_inputs WHERE theme_coder_run_id = ?",
-                (run_id,),
-            )
-            cur = conn.execute(
-                "DELETE FROM theme_coder_runs WHERE id = ?", (run_id,)
-            )
-            conn.execute("COMMIT")
-            if cur.rowcount == 0:
+            ok = db_theme.delete_theme_coder_run(conn, run_id)
+            if not ok:
                 raise HTTPException(status_code=404, detail="run not found")
             return {"status": "ok"}
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
         finally:
             conn.close()
-
-    # ── stage 2: theme aggregation / final themes ─────────────────────────
 
     @app.get("/api/theme-aggregation")
     def get_theme_aggregation(
@@ -1003,14 +735,16 @@ def create_app(db_path: str | Path) -> FastAPI:
         conn = _conn()
         try:
             if codebook_version is None:
-                latest = store.latest_codebook_version(conn)
+                latest = store.latest_codebook()
                 codebook_version = latest.version if latest else 0
             row = store.latest_theme_aggregation(conn, codebook_version)
             if row is None:
                 return None
             d = dict(row)
             d["result"] = (
-                json.loads(d.pop("result_json")) if d.get("result_json") else None
+                json.loads(d.pop("result_json"))
+                if d.get("result_json")
+                else None
             )
             return d
         finally:
@@ -1020,33 +754,18 @@ def create_app(db_path: str | Path) -> FastAPI:
     def delete_theme_aggregation(agg_id: int) -> dict[str, str]:
         conn = _conn()
         try:
-            conn.execute("BEGIN")
-            conn.execute(
-                "DELETE FROM theme_aggregation_inputs WHERE theme_aggregation_id = ?",
-                (agg_id,),
-            )
-            cur = conn.execute(
-                "DELETE FROM theme_aggregations WHERE id = ?", (agg_id,)
-            )
-            conn.execute("COMMIT")
-            if cur.rowcount == 0:
+            ok = db_theme.delete_theme_aggregation(conn, agg_id)
+            if not ok:
                 raise HTTPException(
                     status_code=404, detail="aggregation not found"
                 )
             return {"status": "ok"}
-        except HTTPException:
-            raise
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
         finally:
             conn.close()
 
-    # ── static SPA ────────────────────────────────────────────────────────
-
+    # ── static SPA ───────────────────────────────────────────────────────
     static_dir = Path(__file__).parent / "web_static"
     if static_dir.exists() and (static_dir / "index.html").exists():
-        # SPA: mount built assets, fall back to index.html for client routes.
         assets_dir = static_dir / "assets"
         if assets_dir.exists():
             app.mount(
@@ -1061,7 +780,6 @@ def create_app(db_path: str | Path) -> FastAPI:
 
         @app.get("/{full_path:path}")
         def _spa_fallback(full_path: str) -> Any:
-            # Don't swallow unknown /api/* — surface a 404.
             if full_path.startswith("api/") or full_path == "api":
                 raise HTTPException(status_code=404, detail="not found")
             candidate = static_dir / full_path
@@ -1086,105 +804,21 @@ def create_app(db_path: str | Path) -> FastAPI:
     return app
 
 
-def _segment_coding_payload(
-    conn: sqlite3.Connection, seg: dict[str, Any]
-) -> dict[str, Any]:
-    """Augment a segment row with its coder_runs (+codes) and aggregation
-    (+aggregated_codes/reviews) — the structure consumed by SegmentDetail and
-    by the per-segment cards on the document page."""
-    segment_id = seg["segment_id"]
-    runs = conn.execute(
-        "SELECT id, coder_id, codebook_version, status, "
-        "  claimed_at, finished_at, error, raw_response "
-        "FROM coder_runs WHERE segment_id = ? ORDER BY coder_id",
-        (segment_id,),
-    ).fetchall()
-    run_list: list[dict[str, Any]] = []
-    for r in runs:
-        codes = conn.execute(
-            "SELECT position, code, rationale, is_new "
-            "FROM coder_codes WHERE coder_run_id = ? ORDER BY position",
-            (r["id"],),
-        ).fetchall()
-        run_list.append({**dict(r), "codes": _rows_to_dicts(codes)})
-
-    agg = conn.execute(
-        "SELECT id, status, created_at, finished_at, error "
-        "FROM aggregations WHERE segment_id = ?",
-        (segment_id,),
-    ).fetchone()
-    agg_codes: list[dict[str, Any]] = []
-    if agg is not None:
-        acs = conn.execute(
-            "SELECT id, code, quotes_json, source_coders_json "
-            "FROM aggregated_codes WHERE aggregation_id = ? ORDER BY id",
-            (agg["id"],),
-        ).fetchall()
-        for ac in acs:
-            rd = conn.execute(
-                "SELECT id, decision, target_code, rationale, applied, "
-                "  resulting_version, created_at "
-                "FROM review_decisions WHERE aggregated_code_id = ?",
-                (ac["id"],),
-            ).fetchone()
-            agg_codes.append(
-                {
-                    "id": ac["id"],
-                    "code": ac["code"],
-                    "quotes": json.loads(ac["quotes_json"] or "[]"),
-                    "source_coders": json.loads(
-                        ac["source_coders_json"] or "[]"
-                    ),
-                    "review": dict(rd) if rd else None,
-                }
-            )
-    return {
-        **seg,
-        "coder_runs": run_list,
-        "aggregation": dict(agg) if agg else None,
-        "aggregated_codes": agg_codes,
-    }
-
-
-def _cascade_delete_aggregation(conn: sqlite3.Connection, agg_id: int) -> None:
-    conn.execute(
-        "DELETE FROM review_decisions WHERE aggregated_code_id IN "
-        "(SELECT id FROM aggregated_codes WHERE aggregation_id = ?)",
-        (agg_id,),
-    )
-    conn.execute(
-        "DELETE FROM aggregated_codes WHERE aggregation_id = ?", (agg_id,)
-    )
-    conn.execute("DELETE FROM aggregations WHERE id = ?", (agg_id,))
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ta-web",
-        description="Inspect and edit a thematic-analysis SQLite database via "
-        "a web UI.",
+        description=(
+            "Inspect and edit a thematic-analysis SQLite database via a web UI."
+        ),
     )
-    parser.add_argument(
-        "--db", required=True, help="Path to the SQLite database file."
-    )
+    parser.add_argument("--db", required=True, help="Path to the SQLite DB.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        help="Enable uvicorn auto-reload (dev only).",
-    )
+    parser.add_argument("--reload", action="store_true")
     args = parser.parse_args(argv)
 
     db_path = Path(args.db).resolve()
     if not db_path.exists():
-        # Allow pointing at a brand-new path — the schema is created on first
-        # connect, so an empty DB is still useful (init + status pages work).
         print(f"note: {db_path} does not exist; it will be created", flush=True)
 
     try:

@@ -1,8 +1,7 @@
-"""Research context storage + injection into _inc workers."""
+"""Versioned research-context storage + injection into _inc workers."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from thematic_analysis.agents.theme_coder import Theme, ThemeResult
@@ -12,7 +11,8 @@ from thematic_analysis.agents.theme_aggregator import (
 )
 from thematic_analysis.research_context import ResearchContext
 
-from thematic_analysis_inc import store, workers
+from thematic_analysis_inc import workers
+from thematic_analysis_inc import db as store
 
 
 CTX_DESCRIPTION = (
@@ -28,32 +28,48 @@ def _ctx() -> ResearchContext:
 
 
 def test_set_get_clear_research_context(tmp_path: Path) -> None:
-    conn = store.init_db(tmp_path / "rc.sqlite")
+    store.init_db(tmp_path / "rc.sqlite")
 
-    assert store.get_research_context(conn) is None
+    assert store.get_research_context() is None
+    assert store.latest_research_context_version() is None
 
     ctx = _ctx()
-    store.set_research_context(conn, ctx)
+    rc1 = store.set_research_context(ctx)
+    assert rc1.research_context_version == 1
 
-    loaded = store.get_research_context(conn)
-    assert loaded is not None
-    assert loaded.description == CTX_DESCRIPTION
-    assert loaded.tailored_prompts == {}
+    got1 = store.get_research_context()
+    assert got1 is not None
+    assert got1.research_context_version == 1
+    domain1 = store.research_context_to_domain(got1)
+    assert domain1.description == CTX_DESCRIPTION
+    assert domain1.tailored_prompts == {}
+    assert store.latest_research_context_version() == 1
 
-    # Upsert overwrites
-    ctx2 = ResearchContext(description="different focus")
-    store.set_research_context(conn, ctx2)
-    loaded2 = store.get_research_context(conn)
-    assert loaded2 is not None
-    assert loaded2.description == "different focus"
+    # Setting again produces a NEW version (history preserved).
+    rc2 = store.set_research_context(ResearchContext(description="different focus"))
+    assert rc2.research_context_version == 2
+    got2 = store.get_research_context()
+    assert got2 is not None
+    assert got2.research_context_version == 2
+    assert got2.description == "different focus"
 
-    assert store.clear_research_context(conn) is True
-    assert store.get_research_context(conn) is None
-    assert store.clear_research_context(conn) is False
+    # Original version still retrievable by id.
+    by_v1 = store.get_research_context(version=1)
+    assert by_v1 is not None
+    assert by_v1.research_context_version == 1
+    assert by_v1.description == CTX_DESCRIPTION
+
+    versions = store.list_research_context_versions()
+    assert [r.research_context_version for r in versions] == [1, 2]
+
+    assert store.clear_research_context() is True
+    assert store.get_research_context() is None
+    assert store.list_research_context_versions() == []
+    assert store.clear_research_context() is False
 
 
 def test_tailored_prompts_round_trip(tmp_path: Path) -> None:
-    conn = store.init_db(tmp_path / "rc.sqlite")
+    store.init_db(tmp_path / "rc.sqlite")
     ctx = ResearchContext(
         description="study X",
         tailored_prompts={
@@ -61,42 +77,52 @@ def test_tailored_prompts_round_trip(tmp_path: Path) -> None:
             "reviewer": "reviewer section",
         },
     )
-    store.set_research_context(conn, ctx)
-    loaded = store.get_research_context(conn)
-    assert loaded is not None
-    assert loaded.tailored_prompts["coder"] == "coder section"
-    assert loaded.tailored_prompts["reviewer"] == "reviewer section"
+    store.set_research_context(ctx)
+    rc = store.get_research_context()
+    assert rc is not None
+    got = store.research_context_to_domain(rc)
+    assert got.tailored_prompts["coder"] == "coder section"
+    assert got.tailored_prompts["reviewer"] == "reviewer section"
 
 
-def test_legacy_shape_folded_into_description(tmp_path: Path) -> None:
-    """A DB row written by the old 9-field code should still load."""
-    conn = store.init_db(tmp_path / "legacy.sqlite")
-    legacy_json = json.dumps(
-        {
-            "title": "Climate Study",
-            "aim": "Understand discourse",
-            "research_questions": ["What strategies are used?"],
-            "theoretical_framework": "Social constructionism",
-            "paradigm": "interpretivist",
-            "methodology": "thematic_analysis",
-            "domain": "climate change",
-            "background": "",
-            "keywords": ["climate", "skepticism"],
-        }
+def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
+    """Each code/coding_queue row should record the RC version that was
+    current when it was produced, and producing more codes after a new RC
+    is set should reference the new RC version."""
+    conn = store.init_db(tmp_path / "rc.sqlite")
+    store.add_coder("x")
+
+    # Set initial RC.
+    rc_v1 = store.set_research_context(
+        ResearchContext(description="first RC")
+    ).research_context_version
+
+    # Seed a segment and run the queue sync.
+    doc = store.add_document("doc.md")
+    store.enqueue_segments(doc, [("seg one", 0, 0, 0)])
+    store.coding.sync_coding_queue()
+
+    rows = conn.execute(
+        "SELECT research_context_used_id FROM coding_queue"
+    ).fetchall()
+    assert rows and all(
+        int(r["research_context_used_id"]) == rc_v1 for r in rows
     )
-    conn.execute(
-        "INSERT INTO research_context (id, context_json, updated_at) "
-        "VALUES (1, ?, '2020-01-01T00:00:00+00:00')",
-        (legacy_json,),
-    )
-    loaded = store.get_research_context(conn)
-    assert loaded is not None
-    assert "Climate Study" in loaded.description
-    assert "Understand discourse" in loaded.description
-    assert "What strategies are used?" in loaded.description
-    assert "Social constructionism" in loaded.description
-    assert "climate, skepticism" in loaded.description
-    assert loaded.tailored_prompts == {}
+
+    # Set a new RC and add another segment; its new queue row picks up v2.
+    rc_v2 = store.set_research_context(
+        ResearchContext(description="second RC")
+    ).research_context_version
+    store.enqueue_segments(doc, [("seg two", 0, 0, 1)])
+    store.coding.sync_coding_queue()
+    rows_by_seg = {
+        int(r["segment_id"]): int(r["research_context_used_id"])
+        for r in conn.execute(
+            "SELECT segment_id, research_context_used_id FROM coding_queue"
+        ).fetchall()
+    }
+    # 2 segments, both queue rows present; older one keeps v1; new one is v2.
+    assert set(rows_by_seg.values()) == {rc_v1, rc_v2}
 
 
 class _CapturingThemeCoder:
@@ -134,7 +160,7 @@ class _CapturingThemeAggregator:
 def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "tc.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(conn, _ctx())
+    store.set_research_context(_ctx())
 
     _CapturingThemeCoder.last_seen = None
     res = workers.theme_code_one(
@@ -148,11 +174,19 @@ def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
     assert seen is not None
     assert "rhetorical strategies" in seen.description
 
+    # The theme_coder_run row should reference the latest RC version.
+    row = conn.execute(
+        "SELECT research_context_version FROM theme_coder_runs "
+        "WHERE id = ?",
+        (res["run_id"],),
+    ).fetchone()
+    assert row is not None and int(row["research_context_version"]) == 1
+
 
 def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "ta.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(conn, _ctx())
+    store.set_research_context(_ctx())
 
     workers.theme_code_one(
         conn,
@@ -171,6 +205,13 @@ def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
     seen = _CapturingThemeAggregator.last_seen
     assert seen is not None
     assert "climate" in seen.description.lower()
+
+    row = conn.execute(
+        "SELECT research_context_version FROM theme_aggregations "
+        "WHERE id = ?",
+        (res["aggregation_id"],),
+    ).fetchone()
+    assert row is not None and int(row["research_context_version"]) == 1
 
 
 def test_workers_skip_injection_when_no_context(tmp_path: Path) -> None:

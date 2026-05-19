@@ -266,20 +266,25 @@ The output is a JSON object:
 
 ## Database schema overview
 
-```
-codebook_versions   — append-only codebook snapshots (JSON blobs)
-coders              — registered Stage 1 coder identities
-segments            — input text segments (pending → coding → aggregating → reviewing → done)
-coder_runs          — one row per (segment, coder); status running|done|failed
-coder_codes         — individual codes produced by each coder run
-aggregations        — one row per segment after all coders finish
-aggregated_codes    — merged codes produced by the aggregator
-review_decisions    — reviewer's decision per aggregated code
+See [`data-schema.md`](./data-schema.md) for the authoritative reference.
+All SQL lives in the `db/` sub-package; nothing outside `db/` contains
+raw SQL.
 
-theme_coders        — registered Stage 2 theme coder identities
-theme_coder_runs    — one row per (theme_coder, codebook_version); status running|done|failed
-theme_aggregations  — one row per codebook_version after all theme coders finish
-theme_aggregation_inputs — links each aggregation to the runs that fed it
+```
+research_context    — singleton row with the freeform research context
+codebook_versions   — append-only metadata; membership stored separately
+coders              — INTEGER ids; rows 0 (aggregator) and -1 (reviewer) are seeded
+documents           — uploaded source documents (BLOB content)
+segments            — INTEGER-keyed text segments
+codes               — every code (Stage-A, aggregator, reviewer); coder_id picks the kind
+quotes              — quote text per segment
+codes_supporting_quotes  — n:m link from codes to quotes
+codes_derived       — provenance edges: 'A' = aggregation, 'R' = review (decision A/M/U)
+codebook            — which reviewer codes belong to which codebook version
+coding_queue        — replaces coder_runs; status derived from claimed_at/finished_at/error
+
+theme_coders, theme_coder_runs, theme_aggregations, theme_aggregation_inputs
+                    — Stage 2 (unchanged)
 ```
 
 ---
