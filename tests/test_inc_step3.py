@@ -266,12 +266,7 @@ def test_cli_aggregate_runs_against_stub(
 
     monkeypatch.setattr(workers, "default_reviewer_factory", lambda cb: _Reviewer(cb))
 
-    assert cli.main(
-        ["--db", str(db), "code", "1", "--mock-embeddings"]
-    ) == 0
-    assert cli.main(
-        ["--db", str(db), "code", "2", "--mock-embeddings"]
-    ) == 0
+    assert cli.main(["--db", str(db), "code", "--mock-embeddings"]) == 0
     capsys.readouterr()
 
     rc = cli.main(["--db", str(db), "update-codebook", "--mock-embeddings"])

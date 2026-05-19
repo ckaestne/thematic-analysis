@@ -466,9 +466,7 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
     monkeypatch.setattr(workers, "default_coder_factory", _stub_factory())
 
     capsys.readouterr()
-    rc = cli.main(
-        ["--db", str(db), "code", "1", "--mock-embeddings"]
-    )
+    rc = cli.main(["--db", str(db), "code", "--mock-embeddings"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "todo=3" in out
@@ -528,11 +526,12 @@ def test_cli_test_code_prints_trace_without_db_writes(
     assert queue_after == queue_before == 0
 
 
-def test_cli_code_unknown_coder(tmp_path: Path) -> None:
+def test_cli_code_without_coders_is_noop(tmp_path: Path, capsys) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
-    rc = cli.main(["--db", str(db), "code", "nope"])
-    assert rc == 1
+    rc = cli.main(["--db", str(db), "code"])
+    assert rc == 0
+    assert "(no coders)" in capsys.readouterr().out
 
 
 def test_cli_export_codebook(tmp_path: Path) -> None:

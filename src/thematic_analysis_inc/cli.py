@@ -471,73 +471,100 @@ def _cmd_enqueue(args: SimpleNamespace) -> int:
 
 def _cmd_code(args: SimpleNamespace) -> int:
     store.connect(args.db)
-    cid = _parse_coder_id(args.coder_id)
-    if cid is None:
-        print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
-        return 1
-    coder = store.get_coder(cid)
+    coders = store.list_coders()
+    if not coders:
+        print("(no coders)")
+        return 0
 
     if args.recode:
-        n = store.coding.reset_all_assignments(coder)
-        if n:
-            print(f"[code] cleared {n} existing queue row(s) for recoding")
+        n_total = 0
+        for coder in coders:
+            n_total += store.coding.reset_all_assignments(coder)
+        if n_total:
+            print(f"[code] cleared {n_total} existing queue row(s) for recoding")
     elif args.retry_failed:
-        n = store.coding.reset_failed_assignments(coder)
-        if n:
-            print(f"[code] cleared {n} failed queue row(s) for retry")
+        n_total = 0
+        for coder in coders:
+            n_total += store.coding.reset_failed_assignments(coder)
+        if n_total:
+            print(f"[code] cleared {n_total} failed queue row(s) for retry")
 
     n_workers = _resolve_workers(args.workers)
 
-    todo = store.coding.pending_count(coder)
+    per_coder_todo = [
+        (coder, store.coding.pending_count(coder)) for coder in coders
+    ]
+    total_todo = sum(todo for _, todo in per_coder_todo)
+    active_coders = [(coder, todo) for coder, todo in per_coder_todo if todo > 0]
+
     print(
-        f"[code] coder={args.coder_id} todo={todo} workers={n_workers}"
+        f"[code] todo={total_todo} coders={len(active_coders)} workers={n_workers}"
         + (f" limit={args.limit}" if args.limit else "")
     )
-    if todo == 0:
+    if total_todo == 0:
         return 0
 
-    bar_total = min(todo, args.limit) if args.limit else todo
-    with _make_progress(f"[code] coder={args.coder_id}") as prog:
-        task = prog.add_task("", total=bar_total)
+    done_total = 0
+    failed_total = 0
+    for coder, todo in active_coders:
+        remaining = None
+        if args.limit is not None:
+            remaining = args.limit - (done_total + failed_total)
+            if remaining <= 0:
+                break
+        coder_limit = min(todo, remaining) if remaining is not None else None
+        print(
+            f"[code] coder={coder.coder_id} todo={todo}"
+            + (f" limit={coder_limit}" if coder_limit else "")
+        )
+        bar_total = coder_limit if coder_limit else todo
+        with _make_progress(f"[code] coder={coder.coder_id}") as prog:
+            task = prog.add_task("", total=bar_total)
 
-        def on_event(res: dict, c: dict) -> None:
-            n = c["done"] + c["failed"]
-            if res["ok"]:
-                if args.trace and res.get("trace") is not None:
-                    _print_trace(res["segment_id"], res["trace"])
-                print(
-                    f"[code] {res['segment_id']} coder={res['coder_id']} "
-                    f"codes={res['n_codes']} v={res['version']} "
-                    f"({n}/{todo} ok={c['done']} failed={c['failed']} "
-                    f"{res['elapsed']:.1f}s)"
+            def on_event(res: dict, c: dict) -> None:
+                n = c["done"] + c["failed"]
+                if res["ok"]:
+                    if args.trace and res.get("trace") is not None:
+                        _print_trace(res["segment_id"], res["trace"])
+                    print(
+                        f"[code] {res['segment_id']} coder={res['coder_id']} "
+                        f"codes={res['n_codes']} v={res['version']} "
+                        f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
+                        f"{res['elapsed']:.1f}s)"
+                    )
+                else:
+                    print(
+                        f"[code] {res['segment_id']} coder={res['coder_id']} "
+                        f"FAILED v={res['version']}: {res['error']}",
+                        file=sys.stderr,
+                    )
+                prog.advance(task)
+
+            async def _run() -> dict:
+                # Each segment fires up to 3 concurrent LLM calls via the refining
+                # coder; size the thread pool so workers aren't blocked queueing on it.
+                from concurrent.futures import ThreadPoolExecutor
+                loop = asyncio.get_running_loop()
+                loop.set_default_executor(
+                    ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
                 )
-            else:
-                print(
-                    f"[code] {res['segment_id']} coder={res['coder_id']} "
-                    f"FAILED v={res['version']}: {res['error']}",
-                    file=sys.stderr,
+                return await workers.drain_code_async(
+                    None,
+                    coder.coder_id,
+                    workers=n_workers,
+                    limit=coder_limit,
+                    use_mock_embeddings=args.mock_embeddings,
+                    on_event=on_event,
                 )
-            prog.advance(task)
 
-        async def _run() -> dict:
-            # Each segment fires up to 3 concurrent LLM calls via the refining
-            # coder; size the thread pool so workers aren't blocked queueing on it.
-            from concurrent.futures import ThreadPoolExecutor
-            loop = asyncio.get_running_loop()
-            loop.set_default_executor(
-                ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
-            )
-            return await workers.drain_code_async(
-                None,
-                cid,
-                workers=n_workers,
-                limit=args.limit,
-                use_mock_embeddings=args.mock_embeddings,
-                on_event=on_event,
-            )
-
-        counters = asyncio.run(_run())
-    print(f"[code] done: {counters['done']} ok, {counters['failed']} failed")
+            counters = asyncio.run(_run())
+        print(
+            f"[code] coder={coder.coder_id} done: "
+            f"{counters['done']} ok, {counters['failed']} failed"
+        )
+        done_total += counters["done"]
+        failed_total += counters["failed"]
+    print(f"[code] done: {done_total} ok, {failed_total} failed")
     return 0
 
 
@@ -1392,11 +1419,10 @@ def _cli_enqueue(
 @app.command(
     name="code",
     rich_help_panel=PANEL_S1_PIPELINE,
-    help="code all unprocessed segments for a coder",
+    help="code all queued segments for all coders",
 )
 def _cli_code(
     ctx: typer.Context,
-    coder_id: str,
     limit: Annotated[int | None, typer.Option("--limit")] = None,
     workers: Annotated[
         str,
@@ -1443,7 +1469,6 @@ def _cli_code(
     _run(
         ctx,
         _cmd_code,
-        coder_id=coder_id,
         limit=limit,
         workers=workers,
         retry_failed=retry_failed,
