@@ -256,6 +256,9 @@ def create_app(db_path: str | Path) -> FastAPI:
                     "review_decisions_total": sum(
                         s1.review_decisions_by_kind.values()
                     ),
+                    "review_decisions_applied": sum(
+                        s1.review_decisions_by_kind.values()
+                    ),
                 },
                 "stage2": {
                     "codebook_version": s2.codebook_version,
@@ -580,6 +583,45 @@ def create_app(db_path: str | Path) -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail="queue row not found")
         return {"removed": True}
+
+    # Legacy aliases the bundled SPA references. The queue's primary key is
+    # composite (segment_id, coder_id, codebook_used_id, ...), so we encode
+    # it into a single string `id` of the form "{segment_id}_{coder_id}".
+    @app.get("/api/coder-runs")
+    def list_coder_runs(
+        coder_id: str | None = None,
+        status: str | None = None,
+        limit: int = Query(default=100, le=1000),
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        cid: int | None = None
+        if coder_id:
+            try:
+                cid = int(coder_id)
+            except ValueError:
+                c = store.get_coder_by_external_id(coder_id) if hasattr(
+                    store, "get_coder_by_external_id"
+                ) else None
+                cid = c.coder_id if c is not None else None
+                if cid is None:
+                    return {"total": 0, "items": []}
+        payload = list_coding_queue(coder_id=cid, limit=limit, offset=offset)
+        items = []
+        for q in payload["items"]:
+            if status and q["status"] != status:
+                continue
+            items.append({"id": f"{q['segment_id']}_{q['coder_id']}", **q})
+        return {"total": payload["total"], "items": items}
+
+    @app.delete("/api/coder-runs/{run_id}")
+    def delete_coder_run(run_id: str) -> dict[str, Any]:
+        try:
+            seg_str, coder_str = run_id.split("_", 1)
+            seg_id = int(seg_str)
+            cid = int(coder_str)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="run not found")
+        return reset_coding_assignment(seg_id, cid)
 
     @app.patch("/api/codes/{code_id}")
     def edit_code(code_id: int, body: CodeEdit) -> dict[str, str]:
