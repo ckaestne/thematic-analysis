@@ -11,34 +11,34 @@ from thematic_analysis.agents import (
     CodeAggregatorAgent,
     MergedCode,
 )
-from thematic_analysis.codebook import Codebook, Quote
+from thematic_analysis.codebook import Quote
 from thematic_analysis_inc.db.models import Code as DBCode, Quote as DBQuote
 
 
-def _code(label: str, segment_id: int, quote_texts: list[str]) -> DBCode:
-    c = DBCode(code=label, description=f"desc:{label}", segment_id=segment_id)
-    c.supporting_quotes = [DBQuote(text=t, segment_id=segment_id) for t in quote_texts]
+def _code(label: str, coder_id: int, quote_texts: list[str]) -> DBCode:
+    c = DBCode(
+        code=label,
+        description=f"desc:{label}",
+        segment_id=1,
+        coder_id=coder_id,
+    )
+    c.supporting_quotes = [DBQuote(text=t, segment_id=1) for t in quote_texts]
     return c
 
 
 class TestAggregatorConfig:
     def test_default_config(self):
         config = AggregatorConfig()
-        assert config.similarity_threshold == 0.8
         assert config.max_quotes_per_code == 10
 
     def test_custom_config(self):
-        config = AggregatorConfig(
-            similarity_threshold=0.9,
-            max_quotes_per_code=5,
-        )
-        assert config.similarity_threshold == 0.9
+        config = AggregatorConfig(max_quotes_per_code=5)
         assert config.max_quotes_per_code == 5
 
 
 class TestMergedCode:
     def test_merged_code_creation(self):
-        quotes = [Quote("q1", "text1"), Quote("q2", "text2")]
+        quotes = [Quote("1", "text1"), Quote("2", "text2")]
         merged = MergedCode(
             code="merged code",
             original_codes=["code1", "code2"],
@@ -52,49 +52,22 @@ class TestMergedCode:
 
 
 class TestAggregationResult:
-    def test_aggregation_result_creation(self):
-        merged = MergedCode(
-            code="merged",
-            original_codes=["a", "b"],
-            quotes=[Quote("q1", "text")],
-        )
-        retained = MergedCode(
-            code="standalone",
-            original_codes=["standalone"],
-            quotes=[Quote("q2", "text2")],
-        )
-        result = AggregationResult(
-            merged_codes=[merged],
-            retained_codes=[retained],
-        )
-        assert len(result.merged_codes) == 1
-        assert len(result.retained_codes) == 1
-
     def test_to_json(self):
         merged = MergedCode(
             code="merged",
             original_codes=["a", "b"],
-            quotes=[Quote("q1", "text1")],
+            quotes=[Quote("1", "text1")],
             merge_rationale="Same concept",
         )
-        result = AggregationResult(
-            merged_codes=[merged],
-            retained_codes=[],
-        )
-        json_str = result.to_json()
-        data = json.loads(json_str)
-        assert "merged_codes" in data
-        assert len(data["merged_codes"]) == 1
+        result = AggregationResult(merged_codes=[merged], retained_codes=[])
+        data = json.loads(result.to_json())
         assert data["merged_codes"][0]["code"] == "merged"
         assert data["merged_codes"][0]["merge_rationale"] == "Same concept"
 
     def test_all_codes(self):
         merged = MergedCode("m1", ["a"], [])
         retained = MergedCode("r1", ["b"], [])
-        result = AggregationResult(
-            merged_codes=[merged],
-            retained_codes=[retained],
-        )
+        result = AggregationResult(merged_codes=[merged], retained_codes=[retained])
         assert len(result.all_codes()) == 2
 
 
@@ -105,7 +78,6 @@ class TestCodeAggregatorAgent:
 
     @pytest.fixture
     def sample_coder_codes(self) -> list[list[DBCode]]:
-        """Per-coder lists of Code rows for one (notional) segment."""
         return [
             [
                 _code("peer support", 1, ["I felt really supported by my friends"]),
@@ -121,107 +93,114 @@ class TestCodeAggregatorAgent:
         ]
 
     def test_initialization(self, agent: CodeAggregatorAgent):
-        assert agent.codebook is not None
         assert isinstance(agent.aggregator_config, AggregatorConfig)
 
     def test_get_system_prompt(self, agent: CodeAggregatorAgent):
         prompt = agent.get_system_prompt()
-        assert "qualitative researcher" in prompt
+        assert "aggregator coder" in prompt
         assert "merge_groups" in prompt
-        assert "retain_codes" in prompt
+        assert "retain_code_ids" in prompt
+        # Codes from the same coder must not be merged with each other.
+        assert "same coder" in prompt
 
-    def test_collect_codes_with_quotes(
+    def test_build_prompt_payload_assigns_sequential_ids(
         self,
         agent: CodeAggregatorAgent,
         sample_coder_codes: list[list[DBCode]],
     ):
-        code_quotes = agent._collect_codes_with_quotes(sample_coder_codes)
-        assert "peer support" in code_quotes
-        # Two distinct quote texts across the two coders.
-        assert len(code_quotes["peer support"]) == 2
-        assert "emotional comfort" in code_quotes
-        assert "time pressure" in code_quotes
+        payload, code_index, quote_index = agent._build_prompt_payload(
+            sample_coder_codes
+        )
 
-    def test_collect_codes_dedupes_quote_text(self, agent: CodeAggregatorAgent):
-        # Two coders producing the same code with the same quote text.
-        coder_codes = [
-            [_code("c1", 1, ["same quote"])],
-            [_code("c1", 1, ["same quote"])],
+        # Codes are numbered 1..5 (2 + 2 + 1), one per input code.
+        assert sorted(code_index.keys()) == [1, 2, 3, 4, 5]
+        # Coder attribution preserved.
+        coders = payload["coders"]
+        assert [c["coder_id"] for c in coders] == [1, 2, 3]
+        assert [c["label"] for c in coders[0]["codes"]] == [
+            "peer support",
+            "emotional comfort",
         ]
-        code_quotes = agent._collect_codes_with_quotes(coder_codes)
-        assert len(code_quotes["c1"]) == 1
-
-    def test_find_similar_groups_single_code(self, agent: CodeAggregatorAgent):
-        groups = agent._find_similar_groups(["single code"])
-        assert groups == [["single code"]]
-
-    def test_find_similar_groups_empty(self, agent: CodeAggregatorAgent):
-        assert agent._find_similar_groups([]) == []
-
-    def test_format_codes_section(self, agent: CodeAggregatorAgent):
-        code_quotes = {
-            "test code": [Quote("q1", "sample quote text")],
+        # Quotes are deduped by text and listed under a unique id.
+        quote_texts = {q["text"] for q in payload["quotes"]}
+        assert quote_texts == {
+            "I felt really supported by my friends",
+            "My classmates helped me through it",
+            "Time pressure was overwhelming",
         }
-        section = agent._format_codes_section(code_quotes)
-        assert "test code" in section
-        assert "1 quotes" in section
+        # The two codes from coder 1 share the same quote text → same id.
+        ids_coder1 = {tuple(c["quote_ids"]) for c in coders[0]["codes"]}
+        assert ids_coder1 == {tuple(coders[0]["codes"][0]["quote_ids"])}
 
-    def test_format_similar_groups_section(self, agent: CodeAggregatorAgent):
-        groups = [["code1", "code2"], ["standalone"]]
-        section = agent._format_similar_groups_section(groups)
-        assert "Group 1:" in section
-        assert "code1, code2" in section
-        assert "Standalone:" in section
+    def test_build_prompt_payload_full_quote_text(self, agent: CodeAggregatorAgent):
+        long_text = "x" * 500
+        coder_codes = [[_code("c", 1, [long_text])]]
+        payload, _, _ = agent._build_prompt_payload(coder_codes)
+        assert payload["quotes"][0]["text"] == long_text  # not truncated
 
-    def test_format_similar_groups_empty(self, agent: CodeAggregatorAgent):
-        assert "No similar groups" in agent._format_similar_groups_section([])
-
-    def test_parse_response_valid_json(self, agent: CodeAggregatorAgent):
-        code_quotes = {
-            "code1": [Quote("q1", "text1")],
-            "code2": [Quote("q2", "text2")],
-            "standalone": [Quote("q3", "text3")],
-        }
-        response = """```json
-{
-  "merge_groups": [
-    {
-      "merged_code": "combined code",
-      "original_codes": ["code1", "code2"],
-      "rationale": "Similar concepts"
-    }
-  ],
-  "retain_codes": ["standalone"]
-}
-```"""
-        result = agent._parse_response(response, code_quotes)
+    def test_parse_response_merges_by_id(
+        self,
+        agent: CodeAggregatorAgent,
+        sample_coder_codes: list[list[DBCode]],
+    ):
+        _, code_index, quote_index = agent._build_prompt_payload(sample_coder_codes)
+        response = json.dumps(
+            {
+                "merge_groups": [
+                    {
+                        "merged_code": "peer support system",
+                        "original_code_ids": [1, 3],
+                        "rationale": "across coders",
+                    }
+                ],
+                "retain_code_ids": [2, 4, 5],
+            }
+        )
+        result = agent._parse_response(response, code_index, quote_index)
         assert result is not None
         assert len(result.merged_codes) == 1
-        assert result.merged_codes[0].code == "combined code"
-        assert len(result.merged_codes[0].original_codes) == 2
-        assert len(result.retained_codes) == 1
-        assert result.retained_codes[0].code == "standalone"
+        assert result.merged_codes[0].code == "peer support system"
+        assert set(result.merged_codes[0].original_codes) == {"peer support"}
+        # The two "peer support" rows share quote text via dedup, so the
+        # merged code has one unique quote.
+        assert len(result.merged_codes[0].quotes) == 2  # one per source row
+        labels = {rc.code for rc in result.retained_codes}
+        assert labels == {"emotional comfort", "academic help", "time pressure"}
 
-    def test_parse_response_raw_json(self, agent: CodeAggregatorAgent):
-        code_quotes = {"code1": [Quote("q1", "text")]}
-        response = '{"merge_groups": [], "retain_codes": ["code1"]}'
-        result = agent._parse_response(response, code_quotes)
+    def test_parse_response_unknown_ids_ignored(
+        self, agent: CodeAggregatorAgent
+    ):
+        coder_codes = [[_code("c1", 1, ["t"])]]
+        _, code_index, quote_index = agent._build_prompt_payload(coder_codes)
+        response = json.dumps(
+            {
+                "merge_groups": [
+                    {
+                        "merged_code": "ignored",
+                        "original_code_ids": [999, 1000],
+                        "rationale": "n/a",
+                    }
+                ],
+                "retain_code_ids": [1, 9999],
+            }
+        )
+        result = agent._parse_response(response, code_index, quote_index)
         assert result is not None
-        assert len(result.retained_codes) == 1
-
-    def test_parse_response_invalid_json(self, agent: CodeAggregatorAgent):
-        assert agent._parse_response("Not JSON", {}) is None
+        assert result.merged_codes == []  # all originals unknown → group dropped
+        assert [rc.code for rc in result.retained_codes] == ["c1"]
 
     def test_parse_response_respects_max_quotes(self):
         config = AggregatorConfig(max_quotes_per_code=2)
         agent = CodeAggregatorAgent(config=config)
-        code_quotes = {
-            "code1": [Quote(f"q{i}", f"text{i}") for i in range(5)],
-        }
-        response = '{"merge_groups": [], "retain_codes": ["code1"]}'
-        result = agent._parse_response(response, code_quotes)
+        coder_codes = [[_code("c1", 1, [f"q{i}" for i in range(5)])]]
+        _, code_index, quote_index = agent._build_prompt_payload(coder_codes)
+        response = '{"merge_groups": [], "retain_code_ids": [1]}'
+        result = agent._parse_response(response, code_index, quote_index)
         assert result is not None
         assert len(result.retained_codes[0].quotes) == 2
+
+    def test_parse_response_invalid_json(self, agent: CodeAggregatorAgent):
+        assert agent._parse_response("Not JSON", {}, {}) is None
 
     @patch.object(CodeAggregatorAgent, "_call_llm")
     def test_aggregate(
@@ -235,44 +214,28 @@ class TestCodeAggregatorAgent:
                 "merge_groups": [
                     {
                         "merged_code": "peer support system",
-                        "original_codes": ["peer support", "emotional comfort"],
-                        "rationale": "Both relate to support from peers",
+                        "original_code_ids": [1, 3],
+                        "rationale": "cross-coder match",
                     }
                 ],
-                "retain_codes": ["academic help", "time pressure"],
+                "retain_code_ids": [2, 4, 5],
             }
         )
-        result = agent.aggregate(sample_coder_codes, apply_negotiation=False)
+        result = agent.aggregate(sample_coder_codes)
         assert len(result.merged_codes) == 1
         assert result.merged_codes[0].code == "peer support system"
-        assert len(result.retained_codes) == 2
+        assert len(result.retained_codes) == 3
         mock_llm.assert_called_once()
-
-    @patch.object(CodeAggregatorAgent, "_call_llm")
-    def test_aggregate_with_negotiation(
-        self,
-        mock_llm,
-        agent: CodeAggregatorAgent,
-        sample_coder_codes: list[list[DBCode]],
-    ):
-        """With CONSENSUS, only 'peer support' (2/3 coders) is kept."""
-        mock_llm.return_value = json.dumps(
-            {
-                "merge_groups": [],
-                "retain_codes": ["peer support"],
-            }
-        )
-        result = agent.aggregate(sample_coder_codes, apply_negotiation=True)
-        assert len(result.merged_codes) == 0
-        assert len(result.retained_codes) == 1
-        assert result.retained_codes[0].code == "peer support"
-        mock_llm.assert_called_once()
+        # The user prompt is a JSON dump of the payload.
+        user_prompt = mock_llm.call_args[0][1]
+        payload = json.loads(user_prompt)
+        assert "coders" in payload and "quotes" in payload
 
     @patch.object(CodeAggregatorAgent, "_call_llm")
     def test_aggregate_empty_input(self, mock_llm, agent: CodeAggregatorAgent):
         result = agent.aggregate([])
-        assert len(result.merged_codes) == 0
-        assert len(result.retained_codes) == 0
+        assert result.merged_codes == []
+        assert result.retained_codes == []
         mock_llm.assert_not_called()
 
     @patch.object(CodeAggregatorAgent, "_call_llm")
@@ -284,66 +247,5 @@ class TestCodeAggregatorAgent:
     ):
         mock_llm.return_value = "Invalid response"
         result = agent.aggregate(sample_coder_codes)
-        # Should return all codes as retained
-        assert len(result.merged_codes) == 0
+        assert result.merged_codes == []
         assert len(result.retained_codes) > 0
-
-    def test_update_codebook(self, agent: CodeAggregatorAgent):
-        merged = MergedCode(
-            code="merged code",
-            original_codes=["a", "b"],
-            quotes=[Quote("q1", "text1")],
-        )
-        retained = MergedCode(
-            code="retained code",
-            original_codes=["c"],
-            quotes=[Quote("q2", "text2")],
-        )
-        result = AggregationResult(
-            merged_codes=[merged],
-            retained_codes=[retained],
-        )
-        new_codebook = agent.update_codebook(result)
-        assert len(new_codebook) == 2
-        assert "merged code" in new_codebook.codes
-        assert "retained code" in new_codebook.codes
-
-
-class TestCodeAggregatorIntegration:
-    """Integration tests for CodeAggregatorAgent with Codebook."""
-
-    def test_similarity_grouping_with_real_embeddings(self):
-        """Test similarity grouping uses real embeddings."""
-        codebook = Codebook()
-        codebook.add_code("test", [Quote("q1", "test")])
-
-        agent = CodeAggregatorAgent(codebook=codebook)
-        groups = agent._find_similar_groups(
-            ["peer support", "friend assistance", "time pressure"]
-        )
-        assert len(groups) >= 1
-
-    @patch.object(CodeAggregatorAgent, "_call_llm")
-    def test_full_aggregation_workflow(self, mock_llm):
-        codebook = Codebook()
-        codebook.add_code("test", [Quote("q1", "test")])
-
-        agent = CodeAggregatorAgent(codebook=codebook)
-        coder_codes = [
-            [_code("peer support", 1, ["supported"])],
-            [_code("friend help", 2, ["helped me"])],
-        ]
-        mock_llm.return_value = json.dumps(
-            {
-                "merge_groups": [
-                    {
-                        "merged_code": "peer support",
-                        "original_codes": ["peer support", "friend help"],
-                        "rationale": "Same concept",
-                    }
-                ],
-                "retain_codes": [],
-            }
-        )
-        result = agent.aggregate(coder_codes, apply_negotiation=False)
-        assert len(result.merged_codes) == 1
