@@ -53,6 +53,7 @@ from thematic_analysis_inc.db.models import (
     DECISION_ADD,
     DECISION_MERGE,
     DECISION_UPDATE,
+    is_sentinel_code,
 )
 from thematic_analysis_inc.refinement import wrap_with_refinement
 
@@ -342,6 +343,13 @@ def aggregate_one(
         raise RuntimeError("no codebook revision exists; run init first")
 
     coder_codes = db_coding.load_segment_coder_codes(seg)
+    # Drop sentinel rows — they mean "this coder produced nothing"; they
+    # are not real input codes for the aggregator.
+    coder_codes = {
+        cid: [c for c in codes if not is_sentinel_code(c)]
+        for cid, codes in coder_codes.items()
+    }
+    coder_codes = {cid: codes for cid, codes in coder_codes.items() if codes}
     # Build (coder_id, code_text) -> Code for source resolution.
     code_map: dict[tuple[int, str], Code] = {}
     for cid, codes in coder_codes.items():
@@ -349,6 +357,26 @@ def aggregate_one(
             code_map[(cid, c.code)] = c
 
     n_in = sum(len(v) for v in coder_codes.values())
+    # If every coder produced only sentinels (or nothing), short-circuit:
+    # skip the LLM and persist an aggregator sentinel directly.
+    if n_in == 0:
+        if db_aggregation.segment_has_aggregator_code(segment_id):
+            return {
+                "ok": False,
+                "segment_id": segment_id,
+                "error": "aggregator code already exists (race)",
+                "skipped": True,
+            }
+        db_aggregation.record_aggregation_result(seg, [])
+        return {
+            "ok": True,
+            "segment_id": segment_id,
+            "n_in": 0,
+            "n_merged": 0,
+            "n_retained": 0,
+            "elapsed": 0.0,
+            "no_codes": True,
+        }
     try:
         domain_cb = DomainCodebook(use_mock_embeddings=use_mock_embeddings)
         factory = agent_factory or default_aggregator_factory

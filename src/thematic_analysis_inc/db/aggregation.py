@@ -20,6 +20,7 @@ from thematic_analysis_inc.db.models import (
     DERIVATION_AGGREGATION,
     Quote,
     Segment,
+    SENTINEL_CODE_LABEL,
 )
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
@@ -157,6 +158,21 @@ def record_aggregation_result(
             out_texts.append(
                 (inp.code, inp.description or "", inp.rationale or "")
             )
+        if not merged:
+            sentinel = Code(
+                segment_id=segment.segment_id,
+                coder_id=SYSTEM_AGGREGATOR_ID,
+                codebook_used_id=cb.version,
+                research_context_used_id=rc_version,
+                code=SENTINEL_CODE_LABEL,
+                description="",
+                rationale="",
+            )
+            s.add(sentinel)
+            s.commit()
+            s.refresh(sentinel)
+            out_ids.append(sentinel.code_id)
+            out_texts.append((SENTINEL_CODE_LABEL, "", ""))
     # Build detached Code objects for the caller (no session attachment).
     return [
         Code(

@@ -203,10 +203,83 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
 
     res = workers.aggregate_one(conn, agent_factory=lambda cb: _Empty(cb))
     assert res is not None and res["ok"]
-    # With no aggregator codes the segment can't progress to reviewing — it
-    # stays at "aggregating" in the derived view (no agg codes recorded).
+    # An empty aggregation result writes a sentinel aggregator code (id -1)
+    # so the segment is marked done (nothing left to review).
     s = store.status.derive_segment_status(sids[0])
-    assert s == "aggregating"
+    assert s == "done"
+    n_sentinel = conn.execute(
+        "SELECT COUNT(*) AS n FROM code "
+        "WHERE coder_id = 0 AND segment_id = ? AND code = '-1'",
+        (sids[0],),
+    ).fetchone()["n"]
+    assert n_sentinel == 1
+
+
+class _EmptyCoder:
+    def __init__(self, codebook, coder):
+        pass
+
+    def code_segment(self, segment_id, text):
+        return []
+
+
+def _empty_coder_factory():
+    def f(cb, coder):
+        return _EmptyCoder(cb, coder)
+    return f
+
+
+def test_coder_writes_sentinel_when_no_codes(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    store.add_coder("id-a")
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    store.coding.enqueue_document(doc.document_id)
+    res = workers.code_one(
+        conn, agent_factory=_empty_coder_factory()
+    )
+    assert res is not None and res["ok"] is True
+    rows = conn.execute(
+        "SELECT code FROM code WHERE segment_id = ? AND coder_id >= 1",
+        (sids[0],),
+    ).fetchall()
+    assert [r["code"] for r in rows] == ["-1"]
+
+
+def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    store.add_coder("id-a")
+    store.add_coder("id-b")
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    store.coding.enqueue_document(doc.document_id)
+    for c in store.list_coders():
+        while workers.code_one(
+            conn, c.coder_id, agent_factory=_empty_coder_factory()
+        ) is not None:
+            pass
+
+    called = {"n": 0}
+
+    class _ShouldNotRun:
+        def __init__(self, cb): pass
+        def aggregate(self, coder_codes, apply_negotiation=True):
+            called["n"] += 1
+            return AggregationResult(merged_codes=[], retained_codes=[])
+
+    res = workers.aggregate_one(conn, agent_factory=lambda cb: _ShouldNotRun(cb))
+    assert res is not None and res["ok"] is True
+    assert res.get("no_codes") is True
+    assert called["n"] == 0
+    # Aggregator sentinel persisted.
+    n_sent = conn.execute(
+        "SELECT COUNT(*) AS n FROM code "
+        "WHERE coder_id = 0 AND segment_id = ? AND code = '-1'",
+        (sids[0],),
+    ).fetchone()["n"]
+    assert n_sent == 1
+    # And the segment is done.
+    assert store.status.derive_segment_status(sids[0]) == "done"
 
 
 def test_drain_aggregate_processes_all_segments(tmp_path: Path) -> None:

@@ -174,6 +174,7 @@ export type ApiSegmentPayload = {
     codebook_version: number;
     research_context_version: number;
     finished_at: string | null;
+    no_codes: boolean;
     codes: Array<{
       code_id: number;
       code: string;
@@ -193,6 +194,7 @@ export type ApiSegmentPayload = {
       rationale: string | null;
     };
   }>;
+  aggregator_no_codes: boolean;
 };
 
 export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {

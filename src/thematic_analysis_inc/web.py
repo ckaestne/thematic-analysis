@@ -140,12 +140,16 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     seg = store.get_segment(segment_id)
     if seg is None:
         raise HTTPException(status_code=404, detail="segment not found")
+    from thematic_analysis_inc.db.models import is_sentinel_code
+
     coder_codes = db_coding.load_segment_coder_codes(seg)
     queue_entries = db_coding.list_queue_entries_for_segment(segment_id)
     queue_entries.sort(key=lambda q: q.coder_id)
     coder_blocks: list[dict[str, Any]] = []
     for q in queue_entries:
         codes_for_coder = coder_codes.get(q.coder_id, [])
+        real_codes = [c for c in codes_for_coder if not is_sentinel_code(c)]
+        no_codes = bool(codes_for_coder) and not real_codes
         coder_blocks.append(
             {
                 "coder_id": q.coder_id,
@@ -155,6 +159,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                 "finished_at": (
                     q.finished_at.isoformat() if q.finished_at else None
                 ),
+                "no_codes": no_codes,
                 "codes": [
                     {
                         "code_id": c.code_id,
@@ -162,12 +167,14 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                         "rationale": c.rationale,
                         "description": c.description,
                     }
-                    for c in codes_for_coder
+                    for c in real_codes
                 ],
             }
         )
 
-    agg_codes = db_aggregation.list_aggregator_codes_for_segment(segment_id)
+    agg_codes_all = db_aggregation.list_aggregator_codes_for_segment(segment_id)
+    agg_codes = [c for c in agg_codes_all if not is_sentinel_code(c)]
+    aggregator_no_codes = bool(agg_codes_all) and not agg_codes
     agg_payload: list[dict[str, Any]] = []
     for ac in agg_codes:
         quotes = db_aggregation.load_aggregated_code_quotes(ac.code_id)
@@ -211,6 +218,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
         "status": db_status.derive_segment_status(seg),
         "coder_codes": coder_blocks,
         "aggregator_codes": agg_payload,
+        "aggregator_no_codes": aggregator_no_codes,
     }
 
 

@@ -29,6 +29,7 @@ from thematic_analysis_inc.db.models import (
     CodingQueueEntry,
     Quote,
     Segment,
+    SENTINEL_CODE_LABEL,
 )
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
@@ -269,6 +270,19 @@ def record_coding_result(
                     CodesSupportingQuotes(code_id=c.code_id, quote_id=q.quote_id)
                 )
             out.append(c)
+        if not out:
+            sentinel = Code(
+                segment_id=a.segment_id,
+                coder_id=a.coder_id,
+                codebook_used_id=a.codebook_used_id,
+                research_context_used_id=a.research_context_used_id,
+                code=SENTINEL_CODE_LABEL,
+                description="",
+                rationale="",
+            )
+            s.add(sentinel)
+            s.flush()
+            out.append(sentinel)
         a.finished_at = _utcnow()
         s.add(a)
         s.commit()

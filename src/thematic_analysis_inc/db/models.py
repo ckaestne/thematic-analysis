@@ -72,6 +72,16 @@ DECISION_ADD = "A"
 DECISION_MERGE = "M"
 DECISION_UPDATE = "U"
 
+# Reserved `Code.code` label used as a sentinel for "this coder ran and
+# produced no codes" (or "this aggregation merged to nothing"). Persisted
+# so we can distinguish "not yet processed" from "processed, no result"
+# without inspecting the queue separately.
+SENTINEL_CODE_LABEL = "-1"
+
+
+def is_sentinel_code(code: "Code") -> bool:
+    return code.code == SENTINEL_CODE_LABEL
+
 
 # ===========================================================================
 # Entities
@@ -522,4 +532,6 @@ __all__ = [
     "DECISION_ADD",
     "DECISION_MERGE",
     "DECISION_UPDATE",
+    "SENTINEL_CODE_LABEL",
+    "is_sentinel_code",
 ]
