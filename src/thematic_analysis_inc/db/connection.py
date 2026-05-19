@@ -107,6 +107,16 @@ def _create_sqlmodel_tables(engine: Engine) -> None:
         s.commit()
 
 
+def _migrate_sqlmodel_tables(engine: Engine) -> None:
+    with engine.begin() as conn:
+        cols = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info('segment')")
+        }
+        if "title" not in cols:
+            conn.exec_driver_sql("ALTER TABLE segment ADD COLUMN title TEXT")
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open an autocommit sqlite3 connection AND set up the SQLAlchemy
     engine, both pointing at ``path``. Both layers' schemas are applied
@@ -119,6 +129,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
     engine = _ensure_engine(path)
     _create_sqlmodel_tables(engine)
+    _migrate_sqlmodel_tables(engine)
 
     conn = sqlite3.connect(str(path), isolation_level=None)
     conn.row_factory = sqlite3.Row

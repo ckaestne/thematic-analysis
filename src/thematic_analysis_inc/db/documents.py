@@ -52,15 +52,16 @@ def list_documents() -> list[Document]:
 
 
 def enqueue_segments(
-    document: Document, segments: list[tuple[str, int, int, int]]
+    document: Document, segments: list[tuple[str | None, str, int, int, int]]
 ) -> list[Segment]:
     """Persist a batch of Segments under ``document``. Each tuple is
-    ``(content, line_from, line_to, position)``."""
+    ``(title, content, line_from, line_to, position)``."""
     with session() as s:
         out: list[Segment] = []
-        for content, line_from, line_to, position in segments:
+        for title, content, line_from, line_to, position in segments:
             seg = Segment(
                 document_id=document.document_id,
+                title=title,
                 content=content,
                 line_from=line_from,
                 line_to=line_to,

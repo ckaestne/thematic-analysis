@@ -30,7 +30,7 @@ def _add_segments(conn, doc, n: int):
         with session() as s:
             doc = s.get(Document, doc)
             s.expunge(doc)
-    rows = [(f"text {i}", 0, 0, i) for i in range(n)]
+    rows = [(None, f"text {i}", 0, 0, i) for i in range(n)]
     segs = store.enqueue_segments(doc, rows)
     return [s.segment_id for s in segs]
 
@@ -216,6 +216,35 @@ class _StubAgent:
 def _stub_factory(raise_on: str | None = None):
     def factory(codebook, coder):
         return _StubAgent(codebook, coder, raise_on=raise_on)
+    return factory
+
+
+class _TraceStubAgent:
+    def __init__(self, codebook, coder):
+        self.codebook = codebook
+        self.coder = coder
+        self.last_trace = None
+
+    def code_segment(self, segment_id, text):
+        codes = [_stub_code(f"{self.coder.coder_id}::{segment_id}::trace", text)]
+        self.last_trace = {
+            "segment_text": text,
+            "first": codes,
+            "critique": "critic says tighten the label",
+            "refined": codes,
+            "coder_system_prompt": "coder system",
+            "coder_user_prompt": "coder user",
+            "critic_system_prompt": "critic system",
+            "critic_user_prompt": "critic user",
+            "refinement_user_prompt": "refine this",
+        }
+        return codes
+
+
+def _trace_stub_factory():
+    def factory(codebook, coder):
+        return _TraceStubAgent(codebook, coder)
+
     return factory
 
 
@@ -450,6 +479,53 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
         "SELECT COUNT(*) AS n FROM coding_queue WHERE finished_at IS NOT NULL"
     ).fetchone()["n"]
     assert n_done == 3
+
+
+def test_cli_test_code_prints_trace_without_db_writes(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = tmp_path / "x.sqlite"
+    conn = store.init_db(db)
+    coder = store.add_coder("voice")
+    doc = _seed_document(conn)
+    seg_id = _add_segments(conn, doc, 1)[0]
+
+    monkeypatch.setattr(workers, "default_coder_factory", _trace_stub_factory())
+
+    codes_before = conn.execute(
+        "SELECT COUNT(*) AS n FROM code"
+    ).fetchone()["n"]
+    queue_before = conn.execute(
+        "SELECT COUNT(*) AS n FROM coding_queue"
+    ).fetchone()["n"]
+
+    rc = cli.main(
+        [
+            "--db",
+            str(db),
+            "test-code",
+            str(seg_id),
+            str(coder.coder_id),
+            "--mock-embeddings",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"VERBOSE TRACE  segment={seg_id}" in out
+    assert "Coder system prompt:" in out
+    assert "Critic system prompt:" in out
+    assert "Critique (challenger):" in out
+    assert "Refined codes (coder after critique):" in out
+    assert f"[test-code] segment={seg_id} coder={coder.coder_id} codes=1 v=1" in out
+
+    codes_after = conn.execute(
+        "SELECT COUNT(*) AS n FROM code"
+    ).fetchone()["n"]
+    queue_after = conn.execute(
+        "SELECT COUNT(*) AS n FROM coding_queue"
+    ).fetchone()["n"]
+    assert codes_after == codes_before == 0
+    assert queue_after == queue_before == 0
 
 
 def test_cli_code_unknown_coder(tmp_path: Path) -> None:

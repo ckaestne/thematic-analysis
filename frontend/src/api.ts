@@ -154,6 +154,100 @@ export type SegmentDetail = {
   aggregated_codes: AggregatedCode[];
 };
 
+// The shape `/api/segments/{id}` and `/api/documents/{id}.segments[]` actually
+// return today — different field names + flatter nesting than `SegmentDetail`.
+// Kept narrow + close to the backend payload so the adapter below is the only
+// place that needs to know about the gap.
+export type ApiSegmentPayload = {
+  segment_id: number;
+  document_id: number | null;
+  title: string | null;
+  content: string;
+  line_from: number;
+  line_to: number;
+  position: number;
+  status: string;
+  coder_codes: Array<{
+    coder_id: number;
+    status: string;
+    codes: Array<{
+      code_id: number;
+      code: string;
+      rationale: string | null;
+      description: string | null;
+    }>;
+  }>;
+  aggregator_codes: Array<{
+    code_id: number;
+    code: string;
+    description: string | null;
+    rationale: string | null;
+    quotes: Array<{ quote_id: string; text: string }>;
+    review: null | {
+      new_code_id: number;
+      decision: string;
+      rationale: string | null;
+    };
+  }>;
+};
+
+export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
+  const segIdStr = String(p.segment_id);
+  const coder_runs: CoderRun[] = p.coder_codes.map((cc) => ({
+    id: Number(`${p.segment_id}${cc.coder_id}`),
+    segment_id: segIdStr,
+    coder_id: String(cc.coder_id),
+    codebook_version: 0,
+    status: cc.status,
+    claimed_at: null,
+    finished_at: null,
+    error: null,
+    codes: cc.codes.map((c, i) => ({
+      position: i,
+      code: c.code,
+      rationale: c.rationale,
+      is_new: null,
+    })),
+  }));
+  const aggregated_codes: AggregatedCode[] = p.aggregator_codes.map((ac) => ({
+    id: ac.code_id,
+    code: ac.code,
+    quotes: ac.quotes,
+    source_coders: [],
+    review: ac.review
+      ? {
+          id: ac.review.new_code_id,
+          decision: ac.review.decision,
+          target_code: null,
+          rationale: ac.review.rationale,
+          applied: 0,
+          resulting_version: null,
+          created_at: "",
+        }
+      : null,
+  }));
+  return {
+    segment_id: segIdStr,
+    text: p.content,
+    title: p.title,
+    document_id: p.document_id,
+    batch: null,
+    status: p.status,
+    coder_runs,
+    aggregation:
+      aggregated_codes.length > 0
+        ? {
+            id: p.segment_id,
+            status: "done",
+            created_at: "",
+            finished_at: null,
+            error: null,
+          }
+        : null,
+    aggregated_codes,
+  };
+}
+
 export type CodebookVersionMeta = {
   version: number;
   parent_version: number | null;
@@ -284,14 +378,32 @@ export const api = {
       status_counts: Record<string, number>;
     }>(`/api/segments?${qs.toString()}`);
   },
-  segment: (id: string) => jsonFetch<SegmentDetail>(`/api/segments/${id}`),
+  segment: (id: string) =>
+    jsonFetch<ApiSegmentPayload>(`/api/segments/${id}`).then(adaptSegmentPayload),
   deleteSegment: (id: string) =>
     jsonFetch(`/api/segments/${id}`, { method: "DELETE" }),
 
   documents: () =>
     jsonFetch<{ items: Document[]; coder_ids: string[] }>("/api/documents"),
   document: (id: number) =>
-    jsonFetch<DocumentDetail>(`/api/documents/${id}`),
+    jsonFetch<{
+      document_id: number;
+      filename: string;
+      created_at: string;
+      segments: ApiSegmentPayload[];
+    }>(`/api/documents/${id}`).then((d) => ({
+      document_id: d.document_id,
+      filename: d.filename,
+      created_at: d.created_at,
+      size_bytes: 0,
+      segments: d.segments.map((s) => {
+        const adapted = adaptSegmentPayload(s);
+        return {
+          ...adapted,
+          len: s.content.length,
+        };
+      }),
+    })),
   deleteDocument: (id: number) =>
     jsonFetch(`/api/documents/${id}`, { method: "DELETE" }),
   enqueueDocument: (id: number) =>

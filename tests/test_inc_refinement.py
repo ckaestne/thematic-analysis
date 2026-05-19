@@ -408,7 +408,7 @@ class TestWorkerEndToEnd:
         doc = store.add_document("d.md")
         # Use a segment whose substring "text 0" appears in any quote
         # we craft below.
-        store.enqueue_segments(doc, [("text 0", 0, 0, 0)])
+        store.enqueue_segments(doc, [(None, "text 0", 0, 0, 0)])
         store.coding.enqueue_document(doc.document_id)
 
         llm, _ = _fake_llm(

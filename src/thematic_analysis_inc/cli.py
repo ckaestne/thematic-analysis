@@ -91,6 +91,7 @@ _REQUIRES_EXISTING_DB = {
     "set-research-context",
     "show-research-context",
     "clear-research-context",
+    "test-code",
 }
 
 
@@ -246,7 +247,7 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 prog.advance(task)
                 continue
 
-            rows: list[tuple[str, str]]
+            rows: list[tuple[str | None, str]]
             try:
                 if args.segmentation == "llm":
                     from thematic_analysis_inc.segmenter_llm import segment_by_llm
@@ -257,14 +258,14 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                         model=args.model,
                         min_words=args.min_words,
                     )
-                    rows = [(s.text, "") for s in titled]
+                    rows = [(s.title, s.text) for s in titled]
                 else:
                     segments = doc.segment(
                         method=args.segmentation,
                         min_words=args.min_words,
                         max_words=args.max_words,
                     )
-                    rows = [(s.text, "") for s in segments]
+                    rows = [(None, s.text) for s in segments]
             except Exception as e:  # noqa: BLE001
                 log.error(
                     "[add-document] %s: segmentation failed (%s: %s)",
@@ -287,8 +288,8 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
             try:
                 new_doc = store.add_document(path.name)
                 enqueue_rows = [
-                    (txt, 0, 0, i)
-                    for i, (txt, _title) in enumerate(rows)
+                    (title, txt, 0, 0, i)
+                    for i, (title, txt) in enumerate(rows)
                 ]
                 inserted_segments = store.enqueue_segments(
                     new_doc, enqueue_rows
@@ -352,6 +353,14 @@ def _print_prompt(label: str, prompt: str) -> None:
         print(f"  {line}")
 
 
+def _redact_segment_in_prompt(prompt: str | None, segment_text: str) -> str:
+    if not prompt:
+        return ""
+    if not segment_text:
+        return prompt
+    return prompt.replace(segment_text, "[segment text omitted; see Segment above]")
+
+
 def _print_trace(segment_id: str, trace: dict) -> None:
     bar = "=" * 72
     sub = "-" * 72
@@ -365,8 +374,12 @@ def _print_trace(segment_id: str, trace: dict) -> None:
     print(bar)
     print("Segment:")
     print(f"  {snippet}")
-    coder_system_prompt = trace.get("coder_system_prompt")
-    coder_user_prompt = trace.get("coder_user_prompt")
+    coder_system_prompt = _redact_segment_in_prompt(
+        trace.get("coder_system_prompt"), text
+    )
+    coder_user_prompt = _redact_segment_in_prompt(
+        trace.get("coder_user_prompt"), text
+    )
     if coder_system_prompt is not None:
         print(sub)
         _print_prompt("Coder system prompt", coder_system_prompt)
@@ -381,8 +394,12 @@ def _print_trace(segment_id: str, trace: dict) -> None:
     if critique is None:
         print("Critique: (skipped — first pass produced no codes)")
     else:
-        critic_system_prompt = trace.get("critic_system_prompt")
-        critic_user_prompt = trace.get("critic_user_prompt")
+        critic_system_prompt = _redact_segment_in_prompt(
+            trace.get("critic_system_prompt"), text
+        )
+        critic_user_prompt = _redact_segment_in_prompt(
+            trace.get("critic_user_prompt"), text
+        )
         if critic_system_prompt is not None:
             _print_prompt("Critic system prompt", critic_system_prompt)
             print(sub)
@@ -392,7 +409,9 @@ def _print_trace(segment_id: str, trace: dict) -> None:
         print("Critique (challenger):")
         for line in critique.strip().splitlines() or [""]:
             print(f"  {line}")
-        refinement_user_prompt = trace.get("refinement_user_prompt")
+        refinement_user_prompt = _redact_segment_in_prompt(
+            trace.get("refinement_user_prompt"), text
+        )
         if refinement_user_prompt is not None:
             print(sub)
             _print_prompt("Refinement user prompt", refinement_user_prompt)
@@ -729,6 +748,38 @@ def _cmd_segment(args: SimpleNamespace) -> int:
         print()
 
     print(f"── {len(rows)} segment(s) from {path.name}", file=sys.stderr)
+    return 0
+
+
+def _cmd_test_code(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    cid = _parse_coder_id(args.coder_id)
+    if cid is None:
+        print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
+        return 1
+
+    try:
+        res = workers.test_code_segment(
+            args.segment_id,
+            cid,
+            use_mock_embeddings=args.mock_embeddings,
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    trace = res.get("trace")
+    if trace is not None:
+        _print_trace(str(res["segment_id"]), trace)
+    else:
+        print("Codes:")
+        print(_format_codes(res.get("codes")))
+        print()
+
+    print(
+        f"[test-code] segment={res['segment_id']} coder={res['coder_id']} "
+        f"codes={res['n_codes']} v={res['version']} ({res['elapsed']:.1f}s)"
+    )
     return 0
 
 
@@ -1564,6 +1615,32 @@ def _cli_segment(
         min_words=min_words,
         max_words=max_words,
         model=model,
+    )
+
+
+@app.command(
+    name="test-code",
+    rich_help_panel=PANEL_DEBUG,
+    help="run coding for one segment/coder, print prompts and results, no DB write",
+)
+def _cli_test_code(
+    ctx: typer.Context,
+    segment_id: Annotated[int, typer.Argument(help="segment_id to code")],
+    coder_id: Annotated[str, typer.Argument(help="coder_id to use")],
+    mock_embeddings: Annotated[
+        bool,
+        typer.Option(
+            "--mock-embeddings",
+            help="use deterministic mock embeddings (testing / no-network)",
+        ),
+    ] = False,
+) -> None:
+    _run(
+        ctx,
+        _cmd_test_code,
+        segment_id=segment_id,
+        coder_id=coder_id,
+        mock_embeddings=mock_embeddings,
     )
 
 

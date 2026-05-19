@@ -100,7 +100,7 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
 
     # Seed a segment and run the queue sync.
     doc = store.add_document("doc.md")
-    store.enqueue_segments(doc, [("seg one", 0, 0, 0)])
+    store.enqueue_segments(doc, [(None, "seg one", 0, 0, 0)])
     store.coding.enqueue_document(doc.document_id)
 
     rows = conn.execute(
@@ -116,7 +116,7 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
     rc_v2 = store.set_research_context(
         ResearchContext(description="second RC")
     ).research_context_version
-    store.enqueue_segments(doc, [("seg two", 0, 0, 1)])
+    store.enqueue_segments(doc, [(None, "seg two", 0, 0, 1)])
     store.coding.enqueue_document(doc.document_id)
     seg_rc_pairs = {
         (int(r["segment_id"]), int(r["research_context_used_id"]))
@@ -248,6 +248,9 @@ def test_theme_aggregator_agent_includes_context_in_prompt() -> None:
     prompt = agent.get_system_prompt()
     assert "Research Context" in prompt
     assert "rhetorical strategies" in prompt
+    assert prompt.index("You are an expert qualitative researcher") < prompt.index(
+        "Research Context"
+    )
 
 
 def test_theme_aggregator_agent_uses_tailored_prompt() -> None:

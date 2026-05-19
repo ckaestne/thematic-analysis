@@ -104,7 +104,7 @@ def _get_codebook_codes(version: int):
 
 def _seed_segment(conn, content: str = "seg content") -> int:
     doc = db.add_document("doc.md")
-    segs = db.enqueue_segments(doc, [(content, 1, 5, 0)])
+    segs = db.enqueue_segments(doc, [(None, content, 1, 5, 0)])
     return segs[-1].segment_id
 
 
@@ -487,7 +487,7 @@ def test_quotes_from_different_segments(tmp_path: Path) -> None:
     with session() as ss:
         doc = ss.get(Document, seg1.document_id)
         ss.expunge(doc)
-    new_segs = db.enqueue_segments(doc, [("seg two content", 6, 10, 1)])
+    new_segs = db.enqueue_segments(doc, [(None, "seg two content", 6, 10, 1)])
     s2 = new_segs[0].segment_id
 
     a1 = _add_agg_code(

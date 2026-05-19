@@ -31,7 +31,7 @@ def _add_segments(conn, doc, n: int) -> list[int]:
         with session() as s:
             doc = s.get(Document, doc)
             s.expunge(doc)
-    rows = [(f"text {i}", 0, 0, i) for i in range(n)]
+    rows = [(None, f"text {i}", 0, 0, i) for i in range(n)]
     segs = store.enqueue_segments(doc, rows)
     return [s.segment_id for s in segs]
 

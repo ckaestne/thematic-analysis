@@ -115,9 +115,16 @@ export function Segments() {
             {data?.items.map((s) => (
               <Table.Tr key={s.segment_id}>
                 <Table.Td>
-                  <Anchor component={Link} to={`/segments/${s.segment_id}`}>
-                    {s.segment_id}
-                  </Anchor>
+                  <Stack gap={2}>
+                    <Anchor component={Link} to={`/segments/${s.segment_id}`}>
+                      {s.segment_id}
+                    </Anchor>
+                    {s.title ? (
+                      <Text size="sm" fw={600} lineClamp={1}>
+                        {s.title}
+                      </Text>
+                    ) : null}
+                  </Stack>
                 </Table.Td>
                 <Table.Td>
                   <StatusBadge status={s.status} />

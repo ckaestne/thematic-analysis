@@ -83,6 +83,7 @@ def _segment_summary(seg) -> dict[str, Any]:
     return {
         "segment_id": seg.segment_id,
         "document_id": seg.document_id,
+        "title": seg.title,
         "line_from": seg.line_from,
         "line_to": seg.line_to,
         "position": seg.position,
@@ -196,6 +197,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     return {
         "segment_id": seg.segment_id,
         "document_id": seg.document_id,
+        "title": seg.title,
         "content": seg.content,
         "line_from": seg.line_from,
         "line_to": seg.line_to,

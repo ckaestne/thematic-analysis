@@ -106,6 +106,7 @@ class Segment(SQLModel, table=True):
     document_id: int = Field(
         foreign_key="document.document_id", index=True
     )
+    title: Optional[str] = None
     content: str
     line_from: int
     line_to: int
