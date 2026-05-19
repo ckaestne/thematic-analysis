@@ -38,9 +38,9 @@ from thematic_analysis.agents.base import (
 )
 from thematic_analysis.agents.coder import (
     CODER_RESPONSE_SCHEMA,
-    CodeAssignment,
     CoderAgent,
 )
+from thematic_analysis_inc.db.models import Code
 
 
 if TYPE_CHECKING:
@@ -78,21 +78,23 @@ soften the critique to be polite; if the codes are off-topic, say so.
 Output a short critique in plain prose. No JSON, no headers."""
 
 
-def _build_critic_user_prompt(
-    segment_text: str, codes: list[str], rationales: list[str]
-) -> str:
-    if rationales and len(rationales) == len(codes):
-        coded = "\n".join(
-            f"{i + 1}. {code}  —  {rationale}"
-            for i, (code, rationale) in enumerate(zip(codes, rationales))
-        )
-    else:
-        coded = "\n".join(f"{i + 1}. {code}" for i, code in enumerate(codes))
+def _format_codes_for_critic(codes: list[Code]) -> str:
+    blocks: list[str] = []
+    for i, c in enumerate(codes, 1):
+        header = f"{i}. {c.code} — {c.description}" if c.description else f"{i}. {c.code}"
+        quote_lines = [
+            f'   - "{q.text}"' for q in (c.supporting_quotes or [])
+        ]
+        blocks.append("\n".join([header, *quote_lines]) if quote_lines else header)
+    return "\n".join(blocks)
+
+
+def _build_critic_user_prompt(segment_text: str, codes: list[Code]) -> str:
     return (
         "## Text Segment\n"
         f'"""\n{segment_text}\n"""\n\n'
         "## Codes the researcher produced\n"
-        f"{coded}\n\n"
+        f"{_format_codes_for_critic(codes)}\n\n"
         "Now critique these codes."
     )
 
@@ -113,8 +115,7 @@ def _build_refinement_user_prompt(critique: str) -> str:
         "research focus, drop those codes — an empty `codes` list is a "
         "valid answer when nothing in the segment speaks to the research "
         "question. Return the final code set as JSON using the same "
-        "schema (`codes`, `rationales`, `is_new`). No commentary outside "
-        "the JSON object."
+        "schema. No commentary outside the JSON object."
     )
 
 
@@ -147,7 +148,7 @@ class Critic:
         )
 
     def _messages(
-        self, segment_text: str, codes: list[str], rationales: list[str]
+        self, segment_text: str, codes: list[Code]
     ) -> list[Message]:
         return [
             Message(
@@ -158,9 +159,7 @@ class Critic:
                 role="user",
                 content=[
                     TextContent(
-                        text=_build_critic_user_prompt(
-                            segment_text, codes, rationales
-                        )
+                        text=_build_critic_user_prompt(segment_text, codes)
                     )
                 ],
             ),
@@ -174,10 +173,8 @@ class Critic:
                 parts.append(part.text)
         return "".join(parts)
 
-    def critique(
-        self, segment_text: str, codes: list[str], rationales: list[str]
-    ) -> str:
-        msgs = self._messages(segment_text, codes, rationales)
+    def critique(self, segment_text: str, codes: list[Code]) -> str:
+        msgs = self._messages(segment_text, codes)
         last: BaseException | None = None
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             try:
@@ -192,9 +189,9 @@ class Critic:
         raise last
 
     async def critique_async(
-        self, segment_text: str, codes: list[str], rationales: list[str]
+        self, segment_text: str, codes: list[Code]
     ) -> str:
-        msgs = self._messages(segment_text, codes, rationales)
+        msgs = self._messages(segment_text, codes)
         loop = asyncio.get_event_loop()
         last: BaseException | None = None
         for attempt in range(_RETRY_MAX_ATTEMPTS):
@@ -297,19 +294,17 @@ class RefiningCoderAgent:
 
     # ── public API matching CoderAgent ───────────────────────────────────
 
-    def code_segment(self, segment_id: str, text: str) -> CodeAssignment:
+    def code_segment(self, segment_id: str, text: str) -> list[Code]:
         self.last_trace = None
         coder_system_prompt, coder_user_prompt, initial_msgs = (
             self._initial_messages(segment_id, text)
         )
         first_response = self._coder_completion(initial_msgs)
-        first_assignment = self.coder._process_response(
-            first_response, segment_id, text
-        )
-        if not first_assignment.codes:
+        first_codes = self.coder._process_response(first_response, text)
+        if not first_codes:
             self.last_trace = {
                 "segment_text": text,
-                "first": first_assignment,
+                "first": first_codes,
                 "critique": None,
                 "refined": None,
                 "coder_system_prompt": coder_system_prompt,
@@ -318,15 +313,11 @@ class RefiningCoderAgent:
                 "critic_user_prompt": None,
                 "refinement_user_prompt": None,
             }
-            return first_assignment
+            return first_codes
 
         critic_system_prompt = self.critic._system_prompt()
-        critic_user_prompt = _build_critic_user_prompt(
-            text, first_assignment.codes, first_assignment.rationales
-        )
-        critique = self.critic.critique(
-            text, first_assignment.codes, first_assignment.rationales
-        )
+        critic_user_prompt = _build_critic_user_prompt(text, first_codes)
+        critique = self.critic.critique(text, first_codes)
 
         refinement_user_prompt = _build_refinement_user_prompt(critique)
         refined_msgs = self._append_turn(
@@ -336,37 +327,33 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = self._coder_completion(refined_msgs)
-        refined_assignment = self.coder._process_response(
-            refined_response, segment_id, text
-        )
+        refined_codes = self.coder._process_response(refined_response, text)
         self.last_trace = {
             "segment_text": text,
-            "first": first_assignment,
+            "first": first_codes,
             "critique": critique,
-            "refined": refined_assignment,
+            "refined": refined_codes,
             "coder_system_prompt": coder_system_prompt,
             "coder_user_prompt": coder_user_prompt,
             "critic_system_prompt": critic_system_prompt,
             "critic_user_prompt": critic_user_prompt,
             "refinement_user_prompt": refinement_user_prompt,
         }
-        return refined_assignment
+        return refined_codes
 
     async def code_segment_async(
         self, segment_id: str, text: str
-    ) -> CodeAssignment:
+    ) -> list[Code]:
         self.last_trace = None
         coder_system_prompt, coder_user_prompt, initial_msgs = (
             self._initial_messages(segment_id, text)
         )
         first_response = await self._coder_completion_async(initial_msgs)
-        first_assignment = self.coder._process_response(
-            first_response, segment_id, text
-        )
-        if not first_assignment.codes:
+        first_codes = self.coder._process_response(first_response, text)
+        if not first_codes:
             self.last_trace = {
                 "segment_text": text,
-                "first": first_assignment,
+                "first": first_codes,
                 "critique": None,
                 "refined": None,
                 "coder_system_prompt": coder_system_prompt,
@@ -375,15 +362,11 @@ class RefiningCoderAgent:
                 "critic_user_prompt": None,
                 "refinement_user_prompt": None,
             }
-            return first_assignment
+            return first_codes
 
         critic_system_prompt = self.critic._system_prompt()
-        critic_user_prompt = _build_critic_user_prompt(
-            text, first_assignment.codes, first_assignment.rationales
-        )
-        critique = await self.critic.critique_async(
-            text, first_assignment.codes, first_assignment.rationales
-        )
+        critic_user_prompt = _build_critic_user_prompt(text, first_codes)
+        critique = await self.critic.critique_async(text, first_codes)
 
         refinement_user_prompt = _build_refinement_user_prompt(critique)
         refined_msgs = self._append_turn(
@@ -393,21 +376,19 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = await self._coder_completion_async(refined_msgs)
-        refined_assignment = self.coder._process_response(
-            refined_response, segment_id, text
-        )
+        refined_codes = self.coder._process_response(refined_response, text)
         self.last_trace = {
             "segment_text": text,
-            "first": first_assignment,
+            "first": first_codes,
             "critique": critique,
-            "refined": refined_assignment,
+            "refined": refined_codes,
             "coder_system_prompt": coder_system_prompt,
             "coder_user_prompt": coder_user_prompt,
             "critic_system_prompt": critic_system_prompt,
             "critic_user_prompt": critic_user_prompt,
             "refinement_user_prompt": refinement_user_prompt,
         }
-        return refined_assignment
+        return refined_codes
 
 
 def wrap_with_refinement(agent: Any) -> Any:

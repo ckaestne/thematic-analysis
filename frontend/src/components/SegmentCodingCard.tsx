@@ -21,6 +21,7 @@ import {
   IconAlertTriangle,
   IconEdit,
   IconExternalLink,
+  IconPlayerPlay,
   IconTrash,
 } from "@tabler/icons-react";
 import { useState } from "react";
@@ -70,6 +71,26 @@ export function SegmentCodingCard({
       qc.invalidateQueries({ queryKey: [...key] });
     }
   };
+
+  const enqueue = useMutation({
+    mutationFn: () => api.enqueueSegment(segment.segment_id),
+    onSuccess: (res) => {
+      notifications.show({
+        message:
+          res.enqueued > 0
+            ? `Enqueued ${res.enqueued} (segment, coder) pair${res.enqueued === 1 ? "" : "s"} for coding`
+            : "Already enqueued at the current codebook + research-context revisions",
+        color: "teal",
+      });
+      invalidate();
+      qc.invalidateQueries({ queryKey: ["coding-queue"] });
+    },
+    onError: (e) =>
+      notifications.show({
+        message: e instanceof Error ? e.message : String(e),
+        color: "red",
+      }),
+  });
 
   const saveCoderCode = useMutation({
     mutationFn: (v: { run_id: number; position: number; code: string }) =>
@@ -220,7 +241,19 @@ export function SegmentCodingCard({
             </Text>
           )}
         </Stack>
-        <StatusBadge status={segment.status} />
+        <Group gap="xs" wrap="nowrap">
+          <Tooltip label="Enqueue this segment for coding by all registered coders (at the latest codebook + research-context revisions)">
+            <ActionIcon
+              variant="subtle"
+              color="blue"
+              loading={enqueue.isPending}
+              onClick={() => enqueue.mutate()}
+            >
+              <IconPlayerPlay size={16} />
+            </ActionIcon>
+          </Tooltip>
+          <StatusBadge status={segment.status} />
+        </Group>
       </Group>
 
       {showText && (

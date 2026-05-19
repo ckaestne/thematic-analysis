@@ -294,6 +294,16 @@ export const api = {
     jsonFetch<DocumentDetail>(`/api/documents/${id}`),
   deleteDocument: (id: number) =>
     jsonFetch(`/api/documents/${id}`, { method: "DELETE" }),
+  enqueueDocument: (id: number) =>
+    jsonFetch<{ enqueued: number }>(
+      `/api/documents/${id}/enqueue`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  enqueueSegment: (id: number | string) =>
+    jsonFetch<{ enqueued: number }>(
+      `/api/segments/${id}/enqueue`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
 
   coders: () => jsonFetch<Coder[]>("/api/coders"),
   addCoder: (coder_id: string, identity: string) =>

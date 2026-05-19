@@ -43,9 +43,9 @@ import typer  # noqa: E402
 from thematic_analysis_inc import (  # noqa: E402
     cli_utils,
     research_context_cli,
-    store,
     workers,
 )
+from thematic_analysis_inc import db as store  # noqa: E402, N812
 from thematic_analysis_inc.html_report import (  # noqa: E402
     render_themes_html_from_json,
 )
@@ -128,44 +128,64 @@ def _make_progress(label: str):
 
 
 def _cmd_init(args: SimpleNamespace) -> int:
-    conn = store.init_db(args.db)
-    latest = store.latest_codebook_version(conn)
+    store.init_db(args.db)
+    latest = store.latest_codebook()
     assert latest is not None
     print(f"initialized {args.db} (codebook v{latest.version}, 0 codes)")
     return 0
 
 
+def _parse_coder_id(ref: str) -> int | None:
+    """Parse an integer coder_id from a CLI argument."""
+    try:
+        cid = int(ref)
+    except (TypeError, ValueError):
+        return None
+    coder = store.get_coder(cid)
+    return coder.coder_id if coder else None
+
+
 def _cmd_add_coder(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    inserted = store.add_coder(conn, args.coder_id, args.identity)
-    if inserted:
-        print(f"added coder '{args.coder_id}' (identity: {args.identity!r})")
-    else:
-        print(f"coder '{args.coder_id}' already exists; not modified")
+    store.connect(args.db)
+    coder = store.add_coder(args.identity)
+    print(
+        f"added coder id={coder.coder_id} (identity: {args.identity!r})"
+    )
     return 0
 
 
 def _cmd_rm_coder(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
+    cid = _parse_coder_id(args.coder_id)
+    if cid is None:
+        print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
+        return 1
+    coder = store.get_coder(cid)
+    if coder is None:
+        print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
+        return 1
     try:
-        removed, runs_deleted = store.remove_coder(
-            conn, args.coder_id, force=args.force
+        removed, runs_deleted = store.cascades.delete_coder_cascade(
+            coder, force=args.force
         )
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
-        print("hint: pass --force to also drop their coder_runs", file=sys.stderr)
+        print("hint: pass --force to also drop their coding queue rows", file=sys.stderr)
         return 1
     if removed:
-        suffix = f" (also dropped {runs_deleted} run(s))" if runs_deleted else ""
-        print(f"removed coder '{args.coder_id}'{suffix}")
+        suffix = (
+            f" (also dropped {runs_deleted} queue row(s))"
+            if runs_deleted else ""
+        )
+        print(f"removed coder id={cid}{suffix}")
         return 0
     print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
     return 1
 
 
 def _cmd_list_coders(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    coders = store.list_coders(conn)
+    store.connect(args.db)
+    coders = store.list_coders()
     if not coders:
         print("(no coders)")
         return 0
@@ -189,17 +209,17 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
             print(f"expected a file, got a directory: {p}", file=sys.stderr)
         return 1
 
-    conn = store.connect(args.db)
+    store.connect(args.db)
     total_files = total_inserted = total_skipped = total_errors = 0
     with _make_progress("[add-document]") as prog:
         task = prog.add_task("", total=len(paths))
         for path in paths:
-            existing_document_id = store.find_document_id_by_filename(conn, path.name)
-            if existing_document_id is not None:
+            existing_doc = store.find_document_by_filename(path.name)
+            if existing_doc is not None:
                 total_skipped += 1
                 print(
                     f"[add-document] {path.name}: already exists "
-                    f"(doc_id={existing_document_id}, skipped)"
+                    f"(doc_id={existing_doc.document_id}, skipped)"
                 )
                 prog.advance(task)
                 continue
@@ -212,7 +232,7 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 prog.advance(task)
                 continue
 
-            rows: list[tuple[str, str, str | None]]
+            rows: list[tuple[str, str]]
             try:
                 if args.segmentation == "llm":
                     from thematic_analysis_inc.segmenter_llm import segment_by_llm
@@ -223,14 +243,14 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                         model=args.model,
                         min_words=args.min_words,
                     )
-                    rows = [(s.segment_id, s.text, s.title) for s in titled]
+                    rows = [(s.text, "") for s in titled]
                 else:
                     segments = doc.segment(
                         method=args.segmentation,
                         min_words=args.min_words,
                         max_words=args.max_words,
                     )
-                    rows = [(s.segment_id, s.text, None) for s in segments]
+                    rows = [(s.text, "") for s in segments]
             except Exception as e:  # noqa: BLE001
                 log.error(
                     "[add-document] %s: segmentation failed (%s: %s)",
@@ -251,15 +271,13 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 continue
 
             try:
-                document_id = store.add_document(
-                    conn, filename=path.name, content=path.read_bytes()
-                )
+                new_doc = store.add_document(path.name)
                 enqueue_rows = [
-                    (sid, txt, title, document_id, i)
-                    for i, (sid, txt, title) in enumerate(rows)
+                    (txt, 0, 0, i)
+                    for i, (txt, _title) in enumerate(rows)
                 ]
-                result = store.enqueue_segments(
-                    conn, enqueue_rows, batch=args.batch
+                inserted_segments = store.enqueue_segments(
+                    new_doc, enqueue_rows
                 )
             except Exception as e:  # noqa: BLE001
                 log.error(
@@ -273,13 +291,11 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 continue
 
             total_files += 1
-            total_inserted += result.inserted_segments
-            total_skipped += result.skipped_segments
+            total_inserted += len(inserted_segments)
             print(
-                f"[add-document] {path.name}: doc_id={document_id} "
+                f"[add-document] {path.name}: doc_id={new_doc.document_id} "
                 f"segments={len(rows)} "
-                f"inserted={result.inserted_segments} "
-                f"skipped={result.skipped_segments}"
+                f"inserted={len(inserted_segments)}"
             )
             prog.advance(task)
     summary = (
@@ -292,21 +308,26 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
     return 1 if total_errors and total_files == 0 else 0
 
 
-def _format_codes(assignment) -> str:
-    if assignment is None:
+def _format_codes(codes) -> str:
+    """Format a ``list[Code]`` (each with attached supporting_quotes) for
+    the verbose trace."""
+    if codes is None:
         return "  (none)"
-    codes = list(getattr(assignment, "codes", []) or [])
-    rationales = list(getattr(assignment, "rationales", []) or [])
-    is_new = list(getattr(assignment, "is_new_code", []) or [])
-    if not codes:
+    items = list(codes)
+    if not items:
         return "  (no codes — out of scope / nothing to code)"
     lines: list[str] = []
-    for i, code in enumerate(codes):
-        rat = rationales[i] if i < len(rationales) else ""
-        new = " [NEW]" if i < len(is_new) and is_new[i] else ""
-        lines.append(f"  {i + 1}. {code}{new}")
-        if rat:
-            lines.append(f"     → {rat}")
+    for i, c in enumerate(items, 1):
+        code_label = getattr(c, "code", str(c))
+        description = getattr(c, "description", "") or ""
+        header = f"  {i}. {code_label}"
+        if description:
+            header += f" — {description}"
+        lines.append(header)
+        quotes = getattr(c, "supporting_quotes", None) or []
+        for q in quotes:
+            qtext = getattr(q, "text", str(q))
+            lines.append(f'     - "{qtext}"')
     return "\n".join(lines)
 
 
@@ -381,25 +402,58 @@ def _resolve_workers(value: str | int) -> int:
     return 4
 
 
-def _cmd_code(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    coder = store.get_coder(conn, args.coder_id)
-    if coder is None:
-        print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
+def _cmd_enqueue(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    coder_ids: list[int] | None = None
+    if args.coders:
+        resolved: list[int] = []
+        for raw in args.coders:
+            cid = _parse_coder_id(raw)
+            if cid is None:
+                print(f"unknown coder_id: {raw}", file=sys.stderr)
+                return 1
+            resolved.append(cid)
+        coder_ids = resolved
+
+    if args.document is not None and args.segment is not None:
+        print(
+            "specify either --document or --segment, not both",
+            file=sys.stderr,
+        )
+        return 1
+    if args.document is None and args.segment is None:
+        print("specify --document or --segment", file=sys.stderr)
         return 1
 
+    if args.document is not None:
+        n = store.coding.enqueue_document(args.document, coder_ids=coder_ids)
+        print(f"[enqueue] document={args.document} enqueued={n}")
+    else:
+        n = store.coding.enqueue_segment(args.segment, coder_ids=coder_ids)
+        print(f"[enqueue] segment={args.segment} enqueued={n}")
+    return 0
+
+
+def _cmd_code(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    cid = _parse_coder_id(args.coder_id)
+    if cid is None:
+        print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
+        return 1
+    coder = store.get_coder(cid)
+
     if args.recode:
-        n = store.reset_all_coder_runs(conn, args.coder_id)
+        n = store.coding.reset_all_assignments(coder)
         if n:
-            print(f"[code] cleared {n} existing run(s) for recoding")
+            print(f"[code] cleared {n} existing queue row(s) for recoding")
     elif args.retry_failed:
-        n = store.reset_unfinished_coder_runs(conn, args.coder_id)
+        n = store.coding.reset_failed_assignments(coder)
         if n:
-            print(f"[code] cleared {n} failed/running run(s) for retry")
+            print(f"[code] cleared {n} failed queue row(s) for retry")
 
     n_workers = _resolve_workers(args.workers)
 
-    todo = len(store.segments_to_code(conn, args.coder_id))
+    todo = store.coding.pending_count(coder)
     print(
         f"[code] coder={args.coder_id} todo={todo} workers={n_workers}"
         + (f" limit={args.limit}" if args.limit else "")
@@ -439,8 +493,8 @@ def _cmd_code(args: SimpleNamespace) -> int:
                 ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
             )
             return await workers.drain_code_async(
-                conn,
-                args.coder_id,
+                None,
+                cid,
                 workers=n_workers,
                 limit=args.limit,
                 use_mock_embeddings=args.mock_embeddings,
@@ -453,12 +507,12 @@ def _cmd_code(args: SimpleNamespace) -> int:
 
 
 def _cmd_aggregate(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
 
     if args.retry_failed:
-        n = store.reset_unfinished_aggregations(conn)
-        if n:
-            print(f"[aggregate] cleared {n} failed/pending aggregation(s)")
+        # In the new schema, failed aggregations don't leave persistent rows;
+        # a re-run simply re-attempts any segment that has no aggregator code.
+        pass
 
     print(
         "[aggregate] starting"
@@ -481,7 +535,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
             )
 
     counters = workers.drain_aggregate(
-        conn,
+        None,
         limit=args.limit,
         use_mock_embeddings=args.mock_embeddings,
         on_event=on_event,
@@ -494,7 +548,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
 
 
 def _cmd_review(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
 
     print(
         "[review] starting"
@@ -512,7 +566,7 @@ def _cmd_review(args: SimpleNamespace) -> int:
         )
 
     counters = workers.drain_review(
-        conn,
+        None,
         limit=args.limit,
         use_mock_embeddings=args.mock_embeddings,
         on_event=on_event,
@@ -532,54 +586,55 @@ def _cmd_update_codebook(args: SimpleNamespace) -> int:
 
 
 def _cmd_status(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    print(store.status_counts(conn).format())
+    store.connect(args.db)
+    print(store.status_counts().format())
     return 0
 
 
 def _cmd_export_codebook(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
     if args.version is None:
-        cv = store.latest_codebook_version(conn)
+        cv = store.latest_codebook()
     else:
-        cv = store.get_codebook_version(conn, args.version)
+        cv = store.get_codebook(args.version)
     if cv is None:
         print("no codebook version found", file=sys.stderr)
         return 1
+    snapshot_json = store.codebook_to_json_for_version(cv.version)
     if args.output == "-" or args.output is None:
-        sys.stdout.write(cv.snapshot_json)
-        if not cv.snapshot_json.endswith("\n"):
+        sys.stdout.write(snapshot_json)
+        if not snapshot_json.endswith("\n"):
             sys.stdout.write("\n")
     else:
-        Path(args.output).write_text(cv.snapshot_json, encoding="utf-8")
-        codes = len(json.loads(cv.snapshot_json).get("codes", []))
+        Path(args.output).write_text(snapshot_json, encoding="utf-8")
+        codes = len(json.loads(snapshot_json).get("codes", []))
         print(f"wrote codebook v{cv.version} ({codes} codes) to {args.output}")
     return 0
 
 
 def _cmd_list_codebooks(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    versions = store.list_codebook_versions(conn)
+    store.connect(args.db)
+    versions = store.list_codebooks()
     if not versions:
         print("(no codebook versions)")
         return 0
-    print(f"{'version':>7}  {'parent':>6}  {'codes':>5}  {'created_by':<20}  created_at")
+    print(f"{'version':>7}  {'parent':>6}  {'codes':>5}  created_at")
     for cv in versions:
-        n_codes = len(json.loads(cv.snapshot_json).get("codes", []))
+        snap = json.loads(store.codebook_to_json_for_version(cv.version))
+        n_codes = len(snap.get("codes", []))
         parent = "-" if cv.parent_version is None else str(cv.parent_version)
         print(
-            f"{cv.version:>7}  {parent:>6}  {n_codes:>5}  "
-            f"{cv.created_by:<20}  {cv.created_at}"
+            f"{cv.version:>7}  {parent:>6}  {n_codes:>5}  {cv.created_at}"
         )
     return 0
 
 
 def _cmd_show_codebook(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
     if args.version is None:
-        cv = store.latest_codebook_version(conn)
+        cv = store.latest_codebook()
     else:
-        cv = store.get_codebook_version(conn, args.version)
+        cv = store.get_codebook(args.version)
     if cv is None:
         msg = (
             f"no codebook version {args.version}"
@@ -588,12 +643,13 @@ def _cmd_show_codebook(args: SimpleNamespace) -> int:
         )
         print(msg, file=sys.stderr)
         return 1
-    data = json.loads(cv.snapshot_json)
+    snapshot_json = store.codebook_to_json_for_version(cv.version)
+    data = json.loads(snapshot_json)
     codes = data.get("codes", [])
     parent = "-" if cv.parent_version is None else str(cv.parent_version)
     print(
         f"Codebook v{cv.version} (parent={parent}, "
-        f"created_by={cv.created_by}, created_at={cv.created_at})"
+        f"created_at={cv.created_at})"
     )
     print(f"{len(codes)} code(s)")
     print()
@@ -711,7 +767,7 @@ def _cmd_list_theme_coders(args: SimpleNamespace) -> int:
 def _resolve_codebook_version(conn, version_arg: int | None) -> int | None:
     if version_arg is not None:
         return version_arg
-    cv = store.latest_codebook_version(conn)
+    cv = store.latest_codebook()
     if cv is None:
         print(
             "no codebook version found; run 'ta --db ... init' first",
@@ -1046,13 +1102,12 @@ def _cli_add_document(
 )
 def _cli_add_coder(
     ctx: typer.Context,
-    coder_id: str,
     identity: Annotated[
         str,
         typer.Argument(help="free-text identity/persona shown to the coder agent"),
     ],
 ) -> None:
-    _run(ctx, _cmd_add_coder, coder_id=coder_id, identity=identity)
+    _run(ctx, _cmd_add_coder, identity=identity)
 
 
 @app.command(
@@ -1084,6 +1139,50 @@ def _cli_list_coders(ctx: typer.Context) -> None:
 
 
 # Stage 1 codebook pipeline --------------------------------------------------
+
+
+@app.command(
+    name="enqueue",
+    rich_help_panel=PANEL_S1_PIPELINE,
+    help="enqueue a document or segment for coding (defaults to all coders)",
+)
+def _cli_enqueue(
+    ctx: typer.Context,
+    document: Annotated[
+        int | None,
+        typer.Option(
+            "--document",
+            "-d",
+            help="document_id whose segments should be enqueued",
+        ),
+    ] = None,
+    segment: Annotated[
+        int | None,
+        typer.Option(
+            "--segment",
+            "-s",
+            help="segment_id to enqueue (single segment form)",
+        ),
+    ] = None,
+    coder: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--coder",
+            "-c",
+            help=(
+                "coder_id(s) to enqueue for; pass multiple times. "
+                "Defaults to every registered coder."
+            ),
+        ),
+    ] = None,
+) -> None:
+    _run(
+        ctx,
+        _cmd_enqueue,
+        document=document,
+        segment=segment,
+        coders=coder or [],
+    )
 
 
 @app.command(
