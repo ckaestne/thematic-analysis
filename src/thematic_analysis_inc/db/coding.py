@@ -12,7 +12,9 @@ from thematic_analysis_inc.db.models import (
     Code,
     Codebook,
     Coder,
+    CodesSupportingQuotes,
     CodingQueueEntry,
+    Quote,
     Segment,
 )
 from thematic_analysis_inc.db.research_context import (
@@ -116,11 +118,16 @@ def claim_next_assignment(coder: Coder) -> CodingQueueEntry | None:
 
 
 def record_coding_result(
-    assignment: CodingQueueEntry, codes: list[tuple[str, str]]
+    assignment: CodingQueueEntry, codes: list[Code]
 ) -> list[Code]:
-    """For each ``(code_text, rationale)`` insert a Code row attributed to
-    ``assignment.coder_id``. Marks the queue entry done. Returns the
-    persisted Codes."""
+    """Persist the coder's transient ``Code`` rows for this assignment.
+
+    Each input ``Code`` should carry ``code`` and ``description``, plus
+    any number of transient ``Quote`` instances on
+    ``code.supporting_quotes`` (their ``text`` is read; ``segment_id``
+    is set here). Inserts ``Quote`` rows and ``codes_supporting_quotes``
+    link rows alongside each Code. Marks the queue entry done.
+    """
     with session() as s:
         a = s.get(
             CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
@@ -131,17 +138,28 @@ def record_coding_result(
                 f"{assignment.coder_id}) not found"
             )
         out: list[Code] = []
-        for code_text, rationale in codes:
+        for src in codes:
+            quote_texts = [
+                q.text for q in (src.supporting_quotes or []) if q.text
+            ]
             c = Code(
                 segment_id=a.segment_id,
                 coder_id=a.coder_id,
                 codebook_used_id=a.codebook_used_id,
                 research_context_used_id=a.research_context_used_id,
-                code=code_text,
-                description="",
-                rationale=rationale,
+                code=src.code,
+                description=src.description or "",
+                rationale="",
             )
             s.add(c)
+            s.flush()  # assign code_id
+            for qt in quote_texts:
+                q = Quote(segment_id=a.segment_id, text=qt)
+                s.add(q)
+                s.flush()  # assign quote_id
+                s.add(
+                    CodesSupportingQuotes(code_id=c.code_id, quote_id=q.quote_id)
+                )
             out.append(c)
         a.finished_at = _utcnow()
         s.add(a)

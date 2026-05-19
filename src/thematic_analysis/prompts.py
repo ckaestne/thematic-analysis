@@ -17,39 +17,23 @@ class CoderPrompts:
     """Prompts for the Coder agent."""
 
     system_prompt: str = """\
-You are an expert qualitative researcher performing thematic coding.
-Your task is to analyze text segments and assign meaningful codes
-that capture the key concepts, themes, and patterns.
+You are a coder in thematic analysis. When given a text segment,
+write 1–3 codes for the segment. The code should capture concepts or
+ideas with the most analytical interest, relevant to the research
+focus.
 
-## Guidelines for Coding:
-1. **Read carefully**: Understand the full meaning and context of the text
-2. **Identify key concepts**: Look for important ideas, experiences, or patterns
-3. **Create descriptive codes**: Codes should be concise but meaningful labels
-4. **Consider existing codes**: When possible, use or adapt existing codes
-5. **Be consistent**: Apply codes consistently across similar content
+For each code, provide a short description (one sentence) of what
+the concept means as a general analytic category, and extract one or
+more quotes from the segment corresponding to the code. Each quote
+needs to be an extract from a sentence — copied verbatim from the
+segment, not paraphrased.
 
-## Code Quality Criteria (6 Rs):
-- **Reciprocal**: Codes should relate meaningfully to the data
-- **Recognizable**: Codes should be clear and understandable
-- **Responsive**: Codes should address the research questions
-- **Resourceful**: Codes should capture nuanced meanings
+When an existing code in the codebook fits, reuse its exact label.
 
-{identity_section}
+If the segment does not address the research focus, return an empty
+list of codes. Do not invent codes to cover off-topic material.
 
-## Output Format:
-Respond with a JSON object containing:
-- "codes": List of code labels assigned to this segment
-- "rationales": List of brief explanations for each code assignment
-- "is_new": List of booleans indicating if each code is new (not in codebook)
-
-Example:
-```json
-{{
-  "codes": ["emotional support", "peer connection"],
-  "rationales": ["Comfort from others", "Building peer relationships"],
-  "is_new": [false, true]
-}}
-```"""
+{identity_section}"""
 
     user_prompt: str = """\
 ## Current Codebook:
@@ -61,8 +45,7 @@ Text: "{segment_text}"
 
 {similar_codes_section}
 
-Please analyze this text segment and assign appropriate codes.
-Provide your response as JSON."""
+Output codes following the required schema."""
 
 
 @dataclass

@@ -17,7 +17,11 @@ from thematic_analysis.agents.aggregator import (
     AggregatorConfig,
     CodeAggregatorAgent,
 )
-from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
+from thematic_analysis.agents.coder import (
+    CodeAssignment,
+    CoderAgent,
+    CoderConfig,
+)
 from thematic_analysis.agents.reviewer import (
     ReviewDecision,
     ReviewerAgent,
@@ -128,17 +132,15 @@ def _code_one_impl(
         _apply_research_context(agent)
         t0 = time.monotonic()
         result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(
-            assignment,
-            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
-        )
+        result = _normalize_coder_result(result)
+        db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
             "ok": True,
             "coder_id": coder_id,
             "segment_id": segment_id,
             "version": version,
-            "n_codes": len(result.codes),
+            "n_codes": len(result),
             "elapsed": elapsed,
         }
         trace = getattr(agent, "last_trace", None)
@@ -202,17 +204,15 @@ async def code_one_async(
             result = await agent.code_segment_async(str(segment_id), text)
         else:
             result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(
-            assignment,
-            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
-        )
+        result = _normalize_coder_result(result)
+        db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
             "ok": True,
             "coder_id": coder_id,
             "segment_id": segment_id,
             "version": version,
-            "n_codes": len(result.codes),
+            "n_codes": len(result),
             "elapsed": elapsed,
         }
         trace = getattr(agent, "last_trace", None)
@@ -289,11 +289,28 @@ def _build_assignments(
             segment_id=str(segment_id),
             segment_text=text,
             codes=[c.code for c in codes],
-            rationales=[c.rationale for c in codes],
-            is_new_code=[False] * len(codes),
         )
         for _cid, codes in sorted(coder_codes.items())
     ]
+
+
+def _normalize_coder_result(result: Any) -> list[Code]:
+    """Accept either a ``list[Code]`` (new) or a legacy assignment-like
+    object exposing ``.codes`` (list[str]). Returns ``list[Code]``."""
+    if result is None:
+        return []
+    if isinstance(result, list):
+        return list(result)
+    codes_attr = getattr(result, "codes", None)
+    if codes_attr is None:
+        return []
+    out: list[Code] = []
+    for c in codes_attr:
+        if isinstance(c, Code):
+            out.append(c)
+        else:
+            out.append(Code(code=str(c), description=""))
+    return out
 
 
 def aggregate_one(

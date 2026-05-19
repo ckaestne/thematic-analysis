@@ -308,21 +308,26 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
     return 1 if total_errors and total_files == 0 else 0
 
 
-def _format_codes(assignment) -> str:
-    if assignment is None:
+def _format_codes(codes) -> str:
+    """Format a ``list[Code]`` (each with attached supporting_quotes) for
+    the verbose trace."""
+    if codes is None:
         return "  (none)"
-    codes = list(getattr(assignment, "codes", []) or [])
-    rationales = list(getattr(assignment, "rationales", []) or [])
-    is_new = list(getattr(assignment, "is_new_code", []) or [])
-    if not codes:
+    items = list(codes)
+    if not items:
         return "  (no codes — out of scope / nothing to code)"
     lines: list[str] = []
-    for i, code in enumerate(codes):
-        rat = rationales[i] if i < len(rationales) else ""
-        new = " [NEW]" if i < len(is_new) and is_new[i] else ""
-        lines.append(f"  {i + 1}. {code}{new}")
-        if rat:
-            lines.append(f"     → {rat}")
+    for i, c in enumerate(items, 1):
+        code_label = getattr(c, "code", str(c))
+        description = getattr(c, "description", "") or ""
+        header = f"  {i}. {code_label}"
+        if description:
+            header += f" — {description}"
+        lines.append(header)
+        quotes = getattr(c, "supporting_quotes", None) or []
+        for q in quotes:
+            qtext = getattr(q, "text", str(q))
+            lines.append(f'     - "{qtext}"')
     return "\n".join(lines)
 
 

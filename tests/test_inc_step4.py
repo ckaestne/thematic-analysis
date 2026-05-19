@@ -37,13 +37,12 @@ def _add_segments(conn, doc, n: int) -> list[int]:
     return [s.segment_id for s in segs]
 
 
-@dataclass
-class _StubAssignment:
-    segment_id: str
-    segment_text: str
-    codes: list[str] = field(default_factory=list)
-    rationales: list[str] = field(default_factory=list)
-    is_new_code: list[bool] = field(default_factory=list)
+def _stub_code(label: str, quote_text: str):
+    from thematic_analysis_inc.db.models import Code, Quote as DBQuote
+
+    c = Code(code=label, description=f"desc: {label}")
+    c.supporting_quotes = [DBQuote(text=quote_text or "q")]
+    return c
 
 
 class _StubCoder:
@@ -51,12 +50,10 @@ class _StubCoder:
         pass
 
     def code_segment(self, segment_id, text):
-        return _StubAssignment(
-            segment_id=segment_id, segment_text=text,
-            codes=["alpha", "beta"],
-            rationales=["r1", "r2"],
-            is_new_code=[True, True],
-        )
+        return [
+            _stub_code("alpha", text[:10] or "q"),
+            _stub_code("beta", text[:10] or "q"),
+        ]
 
 
 class _StubAggregator:
