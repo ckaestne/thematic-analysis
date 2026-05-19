@@ -76,9 +76,17 @@ def next_segment_to_aggregate() -> Segment | None:
             )
             .exists()
         )
+        has_coder_code = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == Segment.segment_id,
+                Code.coder_id >= 1,
+            )
+            .exists()
+        )
         seg = s.exec(
             select(Segment)
-            .where(has_any_queue, ~has_unfinished, ~has_agg)
+            .where(has_any_queue, ~has_unfinished, ~has_agg, has_coder_code)
             .order_by(Segment.segment_id)
             .limit(1)
         ).first()

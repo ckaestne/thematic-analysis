@@ -372,6 +372,98 @@ def aggregate_one(
         return {"ok": False, "segment_id": segment_id, "error": msg}
 
 
+def test_aggregate_segment(
+    segment_id: int,
+    *,
+    use_mock_embeddings: bool = False,
+) -> dict[str, Any]:
+    """Run the aggregator on one segment with full instrumentation, but do
+    not write any results. Returns a dict with the segment, per-coder input
+    codes, negotiation result, similarity groups, prompts, raw LLM response,
+    and parsed AggregationResult."""
+    seg = db.get_segment(segment_id)
+    if seg is None:
+        raise ValueError(f"unknown segment_id: {segment_id}")
+
+    latest = db_codebook.latest_codebook()
+    if latest is None:
+        raise RuntimeError("no codebook revision exists; run init first")
+
+    coder_codes = db_coding.load_segment_coder_codes(seg)
+    grouped = _grouped_coder_codes(coder_codes)
+
+    domain_cb = DomainCodebook(use_mock_embeddings=use_mock_embeddings)
+    agent = CodeAggregatorAgent(config=AggregatorConfig(), codebook=domain_cb)
+    _apply_research_context(agent)
+
+    # Replicate `agent.aggregate(...)` step by step so we can surface every
+    # intermediate value.
+    agreed_codes: set[str] | None = None
+    if len(grouped) > 1:
+        agreed_codes = agent._apply_negotiation_strategy(grouped)
+        if not agreed_codes:
+            agreed_codes = None
+
+    code_quotes = agent._collect_codes_with_quotes(grouped, agreed_codes)
+    code_labels = list(code_quotes.keys())
+
+    # Per-pair similarity scores for transparency.
+    similarities: list[tuple[str, str, float]] = []
+    for i, a in enumerate(code_labels):
+        for b in code_labels[i + 1 :]:
+            sim = domain_cb.embedding_service.compute_similarity(a, b)
+            similarities.append((a, b, float(sim)))
+
+    similar_groups = agent._find_similar_groups(code_labels)
+
+    system_prompt = agent.get_system_prompt()
+    user_prompt = ""
+    raw_response = ""
+    result = None
+    llm_error: str | None = None
+    elapsed = 0.0
+    if code_quotes:
+        from thematic_analysis.agents.aggregator import (
+            AGGREGATOR_RESPONSE_SCHEMA,
+            AGGREGATOR_USER_PROMPT,
+        )
+
+        user_prompt = AGGREGATOR_USER_PROMPT.format(
+            codes_section=agent._format_codes_section(code_quotes),
+            similar_groups_section=agent._format_similar_groups_section(
+                similar_groups
+            ),
+        )
+        t0 = time.monotonic()
+        try:
+            raw_response = agent._call_llm(
+                system_prompt,
+                user_prompt,
+                response_format=AGGREGATOR_RESPONSE_SCHEMA,
+            )
+            result = agent._parse_response(raw_response, code_quotes)
+        except Exception as exc:
+            llm_error = f"{type(exc).__name__}: {exc}"
+        elapsed = time.monotonic() - t0
+
+    return {
+        "segment_id": segment_id,
+        "segment_text": seg.content,
+        "codebook_version": latest.version,
+        "coder_codes": coder_codes,
+        "agreed_codes": agreed_codes,
+        "code_quotes": code_quotes,
+        "similarities": similarities,
+        "similar_groups": similar_groups,
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "raw_response": raw_response,
+        "llm_error": llm_error,
+        "result": result,
+        "elapsed": elapsed,
+    }
+
+
 def drain_aggregate(
     conn: sqlite3.Connection | None = None,
     *,

@@ -92,6 +92,7 @@ _REQUIRES_EXISTING_DB = {
     "show-research-context",
     "clear-research-context",
     "test-code",
+    "test-aggregate",
 }
 
 
@@ -780,6 +781,134 @@ def _cmd_test_code(args: SimpleNamespace) -> int:
         f"[test-code] segment={res['segment_id']} coder={res['coder_id']} "
         f"codes={res['n_codes']} v={res['version']} ({res['elapsed']:.1f}s)"
     )
+    return 0
+
+
+def _cmd_test_aggregate(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    try:
+        res = workers.test_aggregate_segment(
+            args.segment_id,
+            use_mock_embeddings=args.mock_embeddings,
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    sep = "─" * 72
+    print(sep)
+    print(f"Segment {res['segment_id']}  (codebook v{res['codebook_version']})")
+    print(sep)
+    text = res["segment_text"]
+    print(text if len(text) <= 2000 else text[:2000] + "\n...[truncated]")
+    print()
+
+    print(sep)
+    print("Per-coder input codes")
+    print(sep)
+    coder_codes = res["coder_codes"]
+    if not coder_codes:
+        print("(no coder codes yet for this segment)")
+    for cid in sorted(coder_codes):
+        codes = coder_codes[cid]
+        print(f"coder {cid}: {len(codes)} code(s)")
+        for c in codes:
+            quotes = c.supporting_quotes or []
+            print(f"  - {c.code}  ({len(quotes)} quote(s))")
+            for q in quotes[:3]:
+                qt = q.text.replace("\n", " ").strip()
+                if len(qt) > 160:
+                    qt = qt[:157] + "..."
+                print(f"      \"{qt}\"")
+    print()
+
+    print(sep)
+    print("Negotiation (consensus)")
+    print(sep)
+    agreed = res["agreed_codes"]
+    if agreed is None:
+        print("(no negotiation applied — single coder, or no consensus)")
+    else:
+        print(f"agreed codes ({len(agreed)}):")
+        for c in sorted(agreed):
+            print(f"  - {c}")
+    print()
+
+    print(sep)
+    print("Codes after negotiation, with quotes")
+    print(sep)
+    code_quotes = res["code_quotes"]
+    if not code_quotes:
+        print("(no codes — aggregator would return empty result)")
+    for code, quotes in code_quotes.items():
+        print(f"- {code}  ({len(quotes)} quote(s))")
+    print()
+
+    print(sep)
+    print("Pairwise similarity scores")
+    print(sep)
+    sims = sorted(res["similarities"], key=lambda x: -x[2])
+    if not sims:
+        print("(no pairs)")
+    for a, b, s in sims:
+        marker = "  <-- merge candidate" if s >= 0.8 else ""
+        print(f"  {s:.3f}  {a!r}  ~  {b!r}{marker}")
+    print()
+
+    print(sep)
+    print("Similar groups (threshold 0.8)")
+    print(sep)
+    for i, group in enumerate(res["similar_groups"], 1):
+        if len(group) > 1:
+            print(f"  Group {i}: {', '.join(group)}")
+        else:
+            print(f"  Standalone: {group[0]}")
+    print()
+
+    print(sep)
+    print("System prompt")
+    print(sep)
+    print(res["system_prompt"])
+    print()
+
+    print(sep)
+    print("User prompt")
+    print(sep)
+    print(res["user_prompt"] or "(no LLM call — empty input)")
+    print()
+
+    if res["llm_error"]:
+        print(sep)
+        print(f"LLM error: {res['llm_error']}", file=sys.stderr)
+        print(sep)
+        return 1
+
+    print(sep)
+    print(f"Raw LLM response  ({res['elapsed']:.1f}s)")
+    print(sep)
+    print(res["raw_response"] or "(empty)")
+    print()
+
+    print(sep)
+    print("Parsed AggregationResult")
+    print(sep)
+    result = res["result"]
+    if result is None:
+        print("(parse failed — aggregator would fall back to retaining all codes)")
+    else:
+        print(f"merged_codes: {len(result.merged_codes)}")
+        for mc in result.merged_codes:
+            print(f"  - {mc.code}")
+            print(f"      from: {mc.original_codes}")
+            if mc.merge_rationale:
+                print(f"      why:  {mc.merge_rationale}")
+            print(f"      quotes: {len(mc.quotes)}")
+        print(f"retained_codes: {len(result.retained_codes)}")
+        for rc in result.retained_codes:
+            print(f"  - {rc.code}  ({len(rc.quotes)} quote(s))")
+
+    print()
+    print(f"[test-aggregate] segment={res['segment_id']} no DB writes")
     return 0
 
 
@@ -1640,6 +1769,30 @@ def _cli_test_code(
         _cmd_test_code,
         segment_id=segment_id,
         coder_id=coder_id,
+        mock_embeddings=mock_embeddings,
+    )
+
+
+@app.command(
+    name="test-aggregate",
+    rich_help_panel=PANEL_DEBUG,
+    help="run aggregator for one segment, print all steps, no DB write",
+)
+def _cli_test_aggregate(
+    ctx: typer.Context,
+    segment_id: Annotated[int, typer.Argument(help="segment_id to aggregate")],
+    mock_embeddings: Annotated[
+        bool,
+        typer.Option(
+            "--mock-embeddings",
+            help="use deterministic mock embeddings (testing / no-network)",
+        ),
+    ] = False,
+) -> None:
+    _run(
+        ctx,
+        _cmd_test_aggregate,
+        segment_id=segment_id,
         mock_embeddings=mock_embeddings,
     )
 
