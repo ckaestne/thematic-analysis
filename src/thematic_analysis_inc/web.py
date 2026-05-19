@@ -141,14 +141,20 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     if seg is None:
         raise HTTPException(status_code=404, detail="segment not found")
     coder_codes = db_coding.load_segment_coder_codes(seg)
+    queue_entries = db_coding.list_queue_entries_for_segment(segment_id)
+    queue_entries.sort(key=lambda q: q.coder_id)
     coder_blocks: list[dict[str, Any]] = []
-    for cid in sorted(coder_codes):
-        q = db_coding.get_queue_entry(segment_id, cid)
-        status = q.status if q is not None else "pending"
+    for q in queue_entries:
+        codes_for_coder = coder_codes.get(q.coder_id, [])
         coder_blocks.append(
             {
-                "coder_id": cid,
-                "status": status,
+                "coder_id": q.coder_id,
+                "status": q.status,
+                "codebook_version": q.codebook_used_id,
+                "research_context_version": q.research_context_used_id,
+                "finished_at": (
+                    q.finished_at.isoformat() if q.finished_at else None
+                ),
                 "codes": [
                     {
                         "code_id": c.code_id,
@@ -156,7 +162,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                         "rationale": c.rationale,
                         "description": c.description,
                     }
-                    for c in coder_codes[cid]
+                    for c in codes_for_coder
                 ],
             }
         )

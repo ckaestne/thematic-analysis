@@ -376,6 +376,36 @@ def get_queue_entry(
         return q
 
 
+def list_queue_entries_for_segment(
+    segment_id: int,
+) -> list[CodingQueueEntry]:
+    """Return the latest queue entry per coder for ``segment_id``.
+
+    Used by the web UI so it can distinguish "no coder has run yet" from
+    "coder finished with zero codes": the latter has a queue row but no
+    ``Code`` rows.
+    """
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(CodingQueueEntry)
+                .where(CodingQueueEntry.segment_id == segment_id)
+                .order_by(
+                    CodingQueueEntry.coder_id,
+                    CodingQueueEntry.enqueued_at.desc(),  # type: ignore[union-attr]
+                )
+            ).all()
+        )
+        latest: dict[int, CodingQueueEntry] = {}
+        for r in rows:
+            if r.coder_id not in latest:
+                latest[r.coder_id] = r
+        out = list(latest.values())
+        for r in out:
+            s.expunge(r)
+        return out
+
+
 def list_queue_entries_for_pair(
     segment_id: int, coder_id: int
 ) -> list[CodingQueueEntry]:
