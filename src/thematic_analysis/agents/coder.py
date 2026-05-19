@@ -34,6 +34,7 @@ class CodeAssignment:
     segment_id: str
     segment_text: str
     codes: list[str]
+    quotes: list[str] = field(default_factory=list)
     rationales: list[str] = field(default_factory=list)
     is_new_code: list[bool] = field(default_factory=list)
 
@@ -54,6 +55,9 @@ research focus**.
 4. **Create descriptive codes**: Codes should be concise but meaningful labels
 5. **Consider existing codes**: When possible, use or adapt existing codes
 6. **Be consistent**: Apply codes consistently across similar content
+7. **Extract representative quotes**: For each code, copy a short, verbatim
+   excerpt from the text that best illustrates why the code applies. The quote
+   must appear word-for-word in the text.
 
 ## Code Quality Criteria (6 Rs):
 - **Reciprocal**: Codes should relate meaningfully to the data
@@ -63,17 +67,18 @@ research focus**.
 
 ## Off-topic Segments:
 If a segment is wholly unrelated to the research focus, return an empty
-"codes" list and a single rationale starting with "OUT_OF_SCOPE:" briefly
-explaining why. Do NOT invent codes to cover off-topic material.
-If only part of the segment is relevant, code only that part and ignore the
-rest. Codes must be grounded in content that addresses the research focus —
-not in tangential or background material.
+"codes" list, an empty "quotes" list, and a single rationale starting with
+"OUT_OF_SCOPE:" briefly explaining why. Do NOT invent codes to cover
+off-topic material. If only part of the segment is relevant, code only that
+part and ignore the rest. Codes must be grounded in content that addresses
+the research focus — not in tangential or background material.
 
 {identity_section}
 
 ## Output Format:
 Respond with a JSON object containing:
 - "codes": List of code labels assigned to this segment
+- "quotes": List of short verbatim excerpts from the text, one per code
 - "rationales": List of brief explanations for each code assignment
 - "is_new": List of booleans indicating if each code is new (not in codebook)
 
@@ -81,6 +86,7 @@ Example:
 ```json
 {{
   "codes": ["emotional support", "peer connection"],
+  "quotes": ["felt comforted by my friends", "built strong bonds with peers"],
   "rationales": ["Comfort from others", "Building peer relationships"],
   "is_new": [false, true]
 }}
@@ -96,10 +102,11 @@ CODER_RESPONSE_SCHEMA = {
             "additionalProperties": False,
             "properties": {
                 "codes": {"type": "array", "items": {"type": "string"}},
+                "quotes": {"type": "array", "items": {"type": "string"}},
                 "rationales": {"type": "array", "items": {"type": "string"}},
                 "is_new": {"type": "array", "items": {"type": "boolean"}},
             },
-            "required": ["codes", "rationales", "is_new"],
+            "required": ["codes", "quotes", "rationales", "is_new"],
         },
     },
 }
@@ -255,21 +262,26 @@ analytical rigor and staying grounded in the text."""
         try:
             data = json.loads(json_str)
             codes = data.get("codes", [])
+            quotes = data.get("quotes", [])
             rationales = data.get("rationales", [])
             is_new = data.get("is_new", [True] * len(codes))
 
-            # Ensure lists are the same length
+            # Ensure lists are the same length as codes
+            while len(quotes) < len(codes):
+                quotes.append("")
             while len(rationales) < len(codes):
                 rationales.append("")
             while len(is_new) < len(codes):
                 is_new.append(True)
 
+            max_n = self.coder_config.max_codes_per_segment
             return CodeAssignment(
                 segment_id=segment_id,
                 segment_text="",  # Will be filled by caller
-                codes=codes[: self.coder_config.max_codes_per_segment],
-                rationales=rationales[: self.coder_config.max_codes_per_segment],
-                is_new_code=is_new[: self.coder_config.max_codes_per_segment],
+                codes=codes[:max_n],
+                quotes=quotes[:max_n],
+                rationales=rationales[:max_n],
+                is_new_code=is_new[:max_n],
             )
         except json.JSONDecodeError:
             return None
@@ -313,11 +325,18 @@ analytical rigor and staying grounded in the text."""
                 segment_id=segment_id,
                 segment_text=text,
                 codes=[],
+                quotes=[],
                 rationales=[],
                 is_new_code=[],
             )
         else:
             assignment.segment_text = text
+            # Replace empty/missing quotes with the full segment text as fallback
+            assignment.quotes = [
+                q if q else text for q in assignment.quotes
+            ]
+            while len(assignment.quotes) < len(assignment.codes):
+                assignment.quotes.append(text)
 
         return assignment
 

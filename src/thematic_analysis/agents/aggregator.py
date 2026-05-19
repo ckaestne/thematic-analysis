@@ -229,18 +229,25 @@ class CodeAggregatorAgent(BaseAgent):
         code_quotes: dict[str, list[Quote]] = {}
 
         for assignment in assignments:
-            for code in assignment.codes:
+            for i, code in enumerate(assignment.codes):
                 # Filter by agreed codes if negotiation was applied
                 if agreed_codes is not None and code not in agreed_codes:
                     continue
 
                 if code not in code_quotes:
                     code_quotes[code] = []
+
+                # Use coder-extracted quote when available, fall back to segment text
+                if i < len(assignment.quotes) and assignment.quotes[i]:
+                    quote_text = assignment.quotes[i]
+                else:
+                    quote_text = assignment.segment_text
+
                 quote = Quote(
                     quote_id=assignment.segment_id,
-                    text=assignment.segment_text,
+                    text=quote_text,
                 )
-                # Avoid duplicate quotes
+                # Avoid duplicate quotes (same source segment for the same code)
                 if not any(q.quote_id == quote.quote_id for q in code_quotes[code]):
                     code_quotes[code].append(quote)
 

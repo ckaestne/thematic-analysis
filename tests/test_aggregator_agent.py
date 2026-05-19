@@ -165,6 +165,37 @@ class TestCodeAggregatorAgent:
         assert "emotional comfort" in code_quotes
         assert "time pressure" in code_quotes
 
+    def test_collect_codes_uses_coder_extracted_quotes(self, agent: CodeAggregatorAgent):
+        """Test that aggregator uses coder-extracted quotes when present."""
+        assignments = [
+            CodeAssignment(
+                segment_id="seg1",
+                segment_text="Full segment text that is long",
+                codes=["peer support", "resilience"],
+                quotes=["friends helped me", "bounced back quickly"],
+            ),
+        ]
+
+        code_quotes = agent._collect_codes_with_quotes(assignments)
+
+        assert code_quotes["peer support"][0].text == "friends helped me"
+        assert code_quotes["resilience"][0].text == "bounced back quickly"
+
+    def test_collect_codes_falls_back_to_segment_text(self, agent: CodeAggregatorAgent):
+        """Test that aggregator falls back to segment text when no quotes extracted."""
+        assignments = [
+            CodeAssignment(
+                segment_id="seg1",
+                segment_text="Full segment text",
+                codes=["peer support"],
+                quotes=[],  # No quotes extracted
+            ),
+        ]
+
+        code_quotes = agent._collect_codes_with_quotes(assignments)
+
+        assert code_quotes["peer support"][0].text == "Full segment text"
+
     def test_collect_codes_avoids_duplicates(self, agent: CodeAggregatorAgent):
         """Test that duplicate quotes are avoided."""
         assignments = [

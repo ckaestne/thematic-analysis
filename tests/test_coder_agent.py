@@ -54,12 +54,15 @@ class TestCodeAssignment:
             segment_id="seg1",
             segment_text="sample text",
             codes=["code1", "code2"],
+            quotes=["excerpt one", "excerpt two"],
             rationales=["reason1", "reason2"],
             is_new_code=[True, False],
         )
 
         assert assignment.segment_id == "seg1"
         assert len(assignment.codes) == 2
+        assert len(assignment.quotes) == 2
+        assert assignment.quotes == ["excerpt one", "excerpt two"]
         assert len(assignment.rationales) == 2
 
     def test_code_assignment_defaults(self):
@@ -68,6 +71,7 @@ class TestCodeAssignment:
             segment_id="seg1", segment_text="text", codes=["code1"]
         )
 
+        assert assignment.quotes == []
         assert assignment.rationales == []
         assert assignment.is_new_code == []
 
@@ -140,6 +144,7 @@ class TestCoderAgent:
         response = """```json
 {
   "codes": ["code1", "code2"],
+  "quotes": ["excerpt one", "excerpt two"],
   "rationales": ["reason1", "reason2"],
   "is_new": [true, false]
 }
@@ -148,16 +153,18 @@ class TestCoderAgent:
 
         assert result is not None
         assert result.codes == ["code1", "code2"]
+        assert result.quotes == ["excerpt one", "excerpt two"]
         assert result.rationales == ["reason1", "reason2"]
         assert result.is_new_code == [True, False]
 
     def test_parse_response_raw_json(self, agent: CoderAgent):
         """Test parsing raw JSON without code blocks."""
-        response = '{"codes": ["code1"], "rationales": ["reason1"], "is_new": [true]}'
+        response = '{"codes": ["code1"], "quotes": ["excerpt"], "rationales": ["reason1"], "is_new": [true]}'
         result = agent._parse_response(response, "seg1")
 
         assert result is not None
         assert result.codes == ["code1"]
+        assert result.quotes == ["excerpt"]
 
     def test_parse_response_invalid_json(self, agent: CoderAgent):
         """Test parsing invalid JSON returns None."""
@@ -173,6 +180,7 @@ class TestCoderAgent:
 
         assert result is not None
         assert result.codes == ["code1"]
+        assert len(result.quotes) >= len(result.codes)
         assert len(result.rationales) >= len(result.codes)
         assert len(result.is_new_code) >= len(result.codes)
 
@@ -181,17 +189,23 @@ class TestCoderAgent:
         config = CoderConfig(max_codes_per_segment=2)
         agent = CoderAgent(config=config)
 
-        response = '{"codes": ["c1", "c2", "c3", "c4"], "rationales": [], "is_new": []}'
+        response = '{"codes": ["c1", "c2", "c3", "c4"], "quotes": ["q1", "q2", "q3", "q4"], "rationales": [], "is_new": []}'
         result = agent._parse_response(response, "seg1")
 
         assert result is not None
         assert len(result.codes) == 2
+        assert len(result.quotes) == 2
 
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segment(self, mock_llm, agent: CoderAgent):
         """Test coding a single segment."""
         mock_llm.return_value = json.dumps(
-            {"codes": ["test code"], "rationales": ["test reason"], "is_new": [True]}
+            {
+                "codes": ["test code"],
+                "quotes": ["this is test"],
+                "rationales": ["test reason"],
+                "is_new": [True],
+            }
         )
 
         result = agent.code_segment("seg1", "This is test text")
@@ -199,6 +213,7 @@ class TestCoderAgent:
         assert result.segment_id == "seg1"
         assert result.segment_text == "This is test text"
         assert result.codes == ["test code"]
+        assert result.quotes == ["this is test"]
         mock_llm.assert_called_once()
 
     @patch.object(CoderAgent, "_call_llm")
@@ -210,12 +225,52 @@ class TestCoderAgent:
 
         assert result.segment_id == "seg1"
         assert result.codes == []
+        assert result.quotes == []
+
+    @patch.object(CoderAgent, "_call_llm")
+    def test_code_segment_fallback_quote_when_missing(self, mock_llm, agent: CoderAgent):
+        """Test that missing quotes are filled with segment text as fallback."""
+        mock_llm.return_value = json.dumps(
+            {
+                "codes": ["code1", "code2"],
+                "quotes": [],
+                "rationales": ["r1", "r2"],
+                "is_new": [True, True],
+            }
+        )
+
+        result = agent.code_segment("seg1", "The full segment text here")
+
+        assert len(result.quotes) == 2
+        assert result.quotes[0] == "The full segment text here"
+        assert result.quotes[1] == "The full segment text here"
+
+    @patch.object(CoderAgent, "_call_llm")
+    def test_code_segment_quotes_present_in_response(self, mock_llm, agent: CoderAgent):
+        """Test that extracted quotes are preserved when present."""
+        mock_llm.return_value = json.dumps(
+            {
+                "codes": ["peer support", "resilience"],
+                "quotes": ["friends helped me through it", "I bounced back quickly"],
+                "rationales": ["Social support", "Coping ability"],
+                "is_new": [False, True],
+            }
+        )
+
+        result = agent.code_segment("seg1", "My friends helped me through it and I bounced back quickly.")
+
+        assert result.quotes == ["friends helped me through it", "I bounced back quickly"]
 
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segments_updates_codebook(self, mock_llm, agent: CoderAgent):
         """Test that coding multiple segments updates the codebook."""
         mock_llm.return_value = json.dumps(
-            {"codes": ["new code"], "rationales": ["reason"], "is_new": [True]}
+            {
+                "codes": ["new code"],
+                "quotes": ["some excerpt"],
+                "rationales": ["reason"],
+                "is_new": [True],
+            }
         )
 
         segments = [("seg1", "text1"), ("seg2", "text2")]
@@ -234,7 +289,12 @@ class TestCoderAgent:
         to the Aggregator, then the Reviewer maintains the codebook.
         """
         mock_llm.return_value = json.dumps(
-            {"codes": ["code"], "rationales": ["reason"], "is_new": [True]}
+            {
+                "codes": ["code"],
+                "quotes": ["an excerpt"],
+                "rationales": ["reason"],
+                "is_new": [True],
+            }
         )
 
         segments = [("seg1", "text1")]
@@ -340,6 +400,7 @@ class TestCoderAgentResearchContext:
         mock_llm.return_value = json.dumps(
             {
                 "codes": ["climate anxiety", "environmental concern"],
+                "quotes": ["worry about the future", "future of our planet"],
                 "rationales": ["Expresses worry about climate", "Shows concern"],
                 "is_new": [True, True],
             }
@@ -351,6 +412,7 @@ class TestCoderAgentResearchContext:
 
         assert result.segment_id == "seg1"
         assert len(result.codes) == 2
+        assert len(result.quotes) == 2
         mock_llm.assert_called_once()
         # Verify research context was included in the call
         call_args = mock_llm.call_args
