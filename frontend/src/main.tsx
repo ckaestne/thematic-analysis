@@ -10,6 +10,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import App from "./App";
 import { theme } from "./theme";
+import { DevErrorBoundary } from "./components/DevErrorBoundary";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,7 +29,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <Notifications position="top-right" />
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
-          <App />
+          <DevErrorBoundary>
+            <App />
+          </DevErrorBoundary>
         </BrowserRouter>
       </QueryClientProvider>
     </MantineProvider>
