@@ -112,6 +112,7 @@ export type CoderRun = {
   segment_id: string;
   coder_id: string;
   codebook_version: number;
+  research_context_version: number;
   status: string;
   claimed_at: string | null;
   finished_at: string | null;
@@ -170,6 +171,9 @@ export type ApiSegmentPayload = {
   coder_codes: Array<{
     coder_id: number;
     status: string;
+    codebook_version: number;
+    research_context_version: number;
+    finished_at: string | null;
     codes: Array<{
       code_id: number;
       code: string;
@@ -197,10 +201,11 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
     id: Number(`${p.segment_id}${cc.coder_id}`),
     segment_id: segIdStr,
     coder_id: String(cc.coder_id),
-    codebook_version: 0,
+    codebook_version: cc.codebook_version,
+    research_context_version: cc.research_context_version,
     status: cc.status,
     claimed_at: null,
-    finished_at: null,
+    finished_at: cc.finished_at,
     error: null,
     codes: cc.codes.map((c, i) => ({
       position: i,
@@ -444,6 +449,7 @@ export const api = {
         segment_id: string;
         coder_id: string;
         codebook_version: number;
+        research_context_version: number;
         status: string;
         claimed_at: string | null;
         finished_at: string | null;

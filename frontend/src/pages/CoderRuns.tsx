@@ -112,6 +112,7 @@ export function CoderRuns() {
               <Table.Th>Coder</Table.Th>
               <Table.Th>Status</Table.Th>
               <Table.Th>Codebook</Table.Th>
+              <Table.Th>Research context</Table.Th>
               <Table.Th ta="right"># codes</Table.Th>
               <Table.Th>Finished</Table.Th>
               <Table.Th></Table.Th>
@@ -136,6 +137,9 @@ export function CoderRuns() {
                 </Table.Td>
                 <Table.Td>
                   <Text size="xs">v{r.codebook_version}</Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text size="xs">v{r.research_context_version}</Text>
                 </Table.Td>
                 <Table.Td ta="right">{r.n_codes}</Table.Td>
                 <Table.Td>
@@ -164,7 +168,7 @@ export function CoderRuns() {
             ))}
             {runs.data && runs.data.items.length === 0 && (
               <Table.Tr>
-                <Table.Td colSpan={8}>
+                <Table.Td colSpan={9}>
                   <Text c="dimmed" ta="center" py="md">
                     No runs match.
                   </Text>
