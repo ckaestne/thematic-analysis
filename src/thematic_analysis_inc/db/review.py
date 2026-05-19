@@ -1,210 +1,212 @@
-"""Reviewer (reserved coder_id = -1) helpers."""
+"""Reviewer (system coder -1) helpers."""
 
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
+from sqlalchemy import func
+from sqlmodel import select
 
 from thematic_analysis_inc.db.codebook import (
     copy_codebook_membership,
     insert_codebook_version,
 )
 from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    Code,
+    Codebook,
+    CodebookCode,
+    CodesDerived,
+    DECISION_ADD,
+    DECISION_MERGE,
+    DECISION_UPDATE,
+    DERIVATION_REVIEW,
+)
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
 )
 
 
-# Single-char decisions stored in codes_derived.decision when
-# derivation_type='R'. SKIP is never persisted.
-DECISION_ADD = "A"
-DECISION_MERGE = "M"
-DECISION_UPDATE = "U"
+def next_aggregated_code_to_review() -> Code | None:
+    """An aggregator Code (coder_id=0) with no outgoing 'R' edge."""
+    with session() as s:
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        row = s.exec(
+            select(Code)
+            .where(Code.coder_id == 0, ~outgoing_r)
+            .order_by(Code.code_id)
+            .limit(1)
+        ).first()
+        if row is not None:
+            s.expunge(row)
+        return row
 
 
-@dataclass
-class ReviewableAggregatorCode:
-    code_id: int
-    segment_id: int
-    code: str
-
-
-def next_aggregated_code_to_review(
-    conn: sqlite3.Connection,
-) -> ReviewableAggregatorCode | None:
-    row = conn.execute(
-        "SELECT c.code_id, c.segment_id, c.code "
-        "FROM codes c "
-        "WHERE c.coder_id = 0 "
-        "  AND NOT EXISTS ("
-        "    SELECT 1 FROM codes_derived d "
-        "    WHERE d.source_code_id = c.code_id AND d.derivation_type = 'R'"
-        "  ) "
-        "ORDER BY c.code_id LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return None
-    return ReviewableAggregatorCode(
-        code_id=int(row["code_id"]),
-        segment_id=int(row["segment_id"]),
-        code=row["code"],
-    )
-
-
-def resolve_target_code_id(
-    conn: sqlite3.Connection, *, version: int, code_text: str
-) -> int | None:
-    """Find the reviewer code_id with given text that belongs to codebook
-    `version`. Returns None if no match exists."""
-    row = conn.execute(
-        "SELECT c.code_id FROM codes c "
-        "JOIN codebook cb ON cb.code_id = c.code_id AND cb.version = ? "
-        "WHERE c.code = ? "
-        "ORDER BY c.code_id DESC LIMIT 1",
-        (version, code_text),
-    ).fetchone()
-    return None if row is None else int(row["code_id"])
+def resolve_target_code(codebook: Codebook, code_text: str) -> Code | None:
+    """Reviewer Code with given text that belongs to ``codebook``."""
+    with session() as s:
+        c = s.exec(
+            select(Code)
+            .join(CodebookCode, CodebookCode.code_id == Code.code_id)
+            .where(
+                CodebookCode.codebook_version == codebook.version,
+                Code.code == code_text,
+            )
+            .order_by(Code.code_id.desc())  # type: ignore[union-attr]
+            .limit(1)
+        ).first()
+        if c is not None:
+            s.expunge(c)
+        return c
 
 
 def record_review(
-    conn: sqlite3.Connection,
     *,
-    source_agg_code_id: int,
+    source_agg_code: Code,
     decision: str,
     new_code_text: str,
     new_description: str,
     rationale: str,
-    parent_version: int,
-    target_code_id: int | None = None,
-) -> int:
-    """Persist a non-SKIP review decision.
-
-    For ADD: inserts a new reviewer code and adds it to a new codebook
-    version copied from `parent_version`.
-    For MERGE: inserts a new reviewer code (same text as target), adds
-    a `codes_derived('R','M')` edge, and copies the codebook unchanged.
-    For UPDATE: inserts a new reviewer code, copies codebook with the
-    target replaced by the new code.
-
-    Returns the new codebook version.
-    """
+    parent_codebook: Codebook,
+    target_code: Code | None = None,
+) -> Codebook:
+    """Persist a non-SKIP review decision; returns the new Codebook."""
     if decision not in {DECISION_ADD, DECISION_MERGE, DECISION_UPDATE}:
         raise ValueError(f"invalid decision: {decision!r}")
-    if decision in (DECISION_MERGE, DECISION_UPDATE) and target_code_id is None:
-        raise ValueError(
-            f"decision {decision!r} requires target_code_id"
-        )
+    if decision in (DECISION_MERGE, DECISION_UPDATE) and target_code is None:
+        raise ValueError(f"decision {decision!r} requires target_code")
 
     rc_version = latest_research_context_version()
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO codes "
-            "(segment_id, coder_id, codebook_version, "
-            " research_context_version, code, description, rationale) "
-            "VALUES (NULL, ?, ?, ?, ?, ?, ?)",
-            (
-                SYSTEM_REVIEWER_ID,
-                parent_version,
-                rc_version,
-                new_code_text,
-                new_description or "",
-                rationale or "",
-            ),
+    with session() as s:
+        new_code = Code(
+            segment_id=source_agg_code.segment_id,
+            coder_id=SYSTEM_REVIEWER_ID,
+            codebook_used_id=parent_codebook.version,
+            research_context_used_id=rc_version,
+            code=new_code_text,
+            description=new_description or "",
+            rationale=rationale or "",
         )
-        new_code_id = int(cur.lastrowid)
+        s.add(new_code)
+        s.commit()
+        s.refresh(new_code)
+        new_code_id = new_code.code_id
 
-        conn.execute(
-            "INSERT INTO codes_derived "
-            "(new_code_id, source_code_id, derivation_type, decision, rationale) "
-            "VALUES (?, ?, 'R', ?, ?)",
-            (new_code_id, source_agg_code_id, decision, rationale),
+        s.add(
+            CodesDerived(
+                new_code_id=new_code_id,
+                source_code_id=source_agg_code.code_id,
+                derivation_type=DERIVATION_REVIEW,
+                decision=decision,
+                rationale=rationale,
+            )
+        )
+        s.commit()
+        s.expunge_all()
+        # Re-read new_code as a fresh detached instance for the caller.
+        new_code = Code(
+            code_id=new_code_id,
+            segment_id=source_agg_code.segment_id,
+            coder_id=SYSTEM_REVIEWER_ID,
+            codebook_used_id=parent_codebook.version,
+            research_context_used_id=rc_version,
+            code=new_code_text,
+            description=new_description or "",
+            rationale=rationale or "",
         )
 
-        new_version = insert_codebook_version(
-            conn, parent=parent_version, created_by="reviewer"
+    # New codebook revision (in a fresh session via the helper).
+    new_cb = insert_codebook_version(parent=parent_codebook)
+
+    if decision == DECISION_ADD:
+        copy_codebook_membership(
+            from_codebook=parent_codebook,
+            to_codebook=new_cb,
+            add_code=new_code,
         )
+    elif decision == DECISION_MERGE:
+        copy_codebook_membership(
+            from_codebook=parent_codebook, to_codebook=new_cb
+        )
+    else:  # UPDATE
+        copy_codebook_membership(
+            from_codebook=parent_codebook,
+            to_codebook=new_cb,
+            drop_code=target_code,
+            add_code=new_code,
+        )
+    return new_cb
 
-        if decision == DECISION_ADD:
-            copy_codebook_membership(
-                conn,
-                from_version=parent_version,
-                to_version=new_version,
-                add_code_id=new_code_id,
-            )
-        elif decision == DECISION_MERGE:
-            # Keep the target code; the new reviewer code represents the
-            # merge event but isn't added to the codebook.
-            copy_codebook_membership(
-                conn,
-                from_version=parent_version,
-                to_version=new_version,
-            )
-        else:  # UPDATE
-            copy_codebook_membership(
-                conn,
-                from_version=parent_version,
-                to_version=new_version,
-                drop_code_id=target_code_id,
-                add_code_id=new_code_id,
-            )
 
-    return new_version
+def find_reviewer_code_by_text(code_text: str) -> Code | None:
+    with session() as s:
+        c = s.exec(
+            select(Code)
+            .where(Code.code == code_text, Code.coder_id == SYSTEM_REVIEWER_ID)
+            .order_by(Code.code_id.desc())  # type: ignore[union-attr]
+            .limit(1)
+        ).first()
+        if c is not None:
+            s.expunge(c)
+        return c
 
 
 def list_review_decisions(
-    conn: sqlite3.Connection,
-    *,
     decision: str | None = None,
+    *,
     limit: int = 100,
     offset: int = 0,
-) -> tuple[int, list[dict]]:
-    where: list[str] = ["d.derivation_type = 'R'"]
-    params: list = []
-    if decision is not None:
-        where.append("d.decision = ?")
-        params.append(decision)
-    clause = "WHERE " + " AND ".join(where)
-    total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM codes_derived d {clause}", params
-    ).fetchone()["n"]
-    rows = conn.execute(
-        f"SELECT d.new_code_id, d.source_code_id, d.decision, d.rationale, "
-        f"  src.code AS source_code, src.segment_id, "
-        f"  new_c.code AS new_code "
-        f"FROM codes_derived d "
-        f"JOIN codes src ON src.code_id = d.source_code_id "
-        f"JOIN codes new_c ON new_c.code_id = d.new_code_id "
-        f"{clause} "
-        f"ORDER BY d.new_code_id DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
-    return int(total), [dict(r) for r in rows]
+) -> tuple[int, list[CodesDerived]]:
+    with session() as s:
+        stmt = select(CodesDerived).where(
+            CodesDerived.derivation_type == DERIVATION_REVIEW
+        )
+        count_stmt = (
+            select(func.count())
+            .select_from(CodesDerived)
+            .where(CodesDerived.derivation_type == DERIVATION_REVIEW)
+        )
+        if decision is not None:
+            stmt = stmt.where(CodesDerived.decision == decision)
+            count_stmt = count_stmt.where(CodesDerived.decision == decision)
+        total = int(s.exec(count_stmt).one())
+        rows = list(
+            s.exec(
+                stmt.order_by(CodesDerived.new_code_id.desc())  # type: ignore[union-attr]
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return total, rows
 
 
-def find_reviewer_code_by_text(
-    conn: sqlite3.Connection, code_text: str
-) -> int | None:
-    """Latest reviewer code with the given text (used to link quotes to a
-    newly-inserted reviewer code)."""
-    row = conn.execute(
-        "SELECT code_id FROM codes WHERE code = ? AND coder_id = -1 "
-        "ORDER BY code_id DESC LIMIT 1",
-        (code_text,),
-    ).fetchone()
-    return None if row is None else int(row["code_id"])
-
-
-def segment_review_remaining(
-    conn: sqlite3.Connection, segment_id: int
-) -> int:
-    """Count aggregator codes on this segment without a review edge."""
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes c "
-        "WHERE c.segment_id = ? AND c.coder_id = 0 "
-        "  AND NOT EXISTS ("
-        "    SELECT 1 FROM codes_derived d "
-        "    WHERE d.source_code_id = c.code_id AND d.derivation_type = 'R'"
-        "  )",
-        (segment_id,),
-    ).fetchone()
-    return int(row["n"])
+def segment_review_remaining(segment_id: int) -> int:
+    """Aggregator codes on this segment without an outgoing 'R' edge."""
+    with session() as s:
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        return int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(
+                    Code.segment_id == segment_id,
+                    Code.coder_id == 0,
+                    ~outgoing_r,
+                )
+            ).one()
+        )

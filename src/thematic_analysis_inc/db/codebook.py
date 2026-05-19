@@ -1,170 +1,141 @@
-"""Codebook versions, membership, and JSON hydration."""
+"""Codebook revisions + membership + JSON snapshot serializer."""
 
 from __future__ import annotations
 
 import json
-import sqlite3
-from dataclasses import dataclass
 
-from thematic_analysis_inc.db.connection import now
+from sqlmodel import select
 
-
-@dataclass
-class CodebookVersion:
-    version: int
-    parent_version: int | None
-    created_by: str
-    created_at: str
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    Code,
+    Codebook,
+    CodebookCode,
+    Quote,
+)
 
 
-@dataclass
-class CodebookEntry:
-    code_id: int
-    code: str
-    description: str
-    rationale: str
-    quotes: list[dict]  # [{quote_id, text}, ...]
-
-
-def insert_codebook_version(
-    conn: sqlite3.Connection,
-    *,
-    parent: int | None,
-    created_by: str,
-) -> int:
-    """Insert a new codebook_versions row. Returns the new version id."""
-    cur = conn.execute(
-        "INSERT INTO codebook_versions "
-        "(parent_version, created_by, created_at) "
-        "VALUES (?, ?, ?)",
-        (parent, created_by, now()),
-    )
-    return int(cur.lastrowid)
-
-
-def latest_codebook_version(
-    conn: sqlite3.Connection,
-) -> CodebookVersion | None:
-    row = conn.execute(
-        "SELECT version, parent_version, created_by, created_at "
-        "FROM codebook_versions ORDER BY version DESC LIMIT 1"
-    ).fetchone()
-    if row is None:
-        return None
-    return CodebookVersion(**dict(row))
-
-
-def get_codebook_version(
-    conn: sqlite3.Connection, version: int
-) -> CodebookVersion | None:
-    row = conn.execute(
-        "SELECT version, parent_version, created_by, created_at "
-        "FROM codebook_versions WHERE version = ?",
-        (version,),
-    ).fetchone()
-    if row is None:
-        return None
-    return CodebookVersion(**dict(row))
-
-
-def list_codebook_versions(
-    conn: sqlite3.Connection,
-) -> list[CodebookVersion]:
-    rows = conn.execute(
-        "SELECT version, parent_version, created_by, created_at "
-        "FROM codebook_versions ORDER BY version ASC"
-    ).fetchall()
-    return [CodebookVersion(**dict(r)) for r in rows]
-
-
-def get_codebook_codes(
-    conn: sqlite3.Connection, version: int
-) -> list[CodebookEntry]:
-    """Return the codes belonging to a codebook version, with their quotes."""
-    rows = conn.execute(
-        "SELECT c.code_id, c.code, c.description, c.rationale "
-        "FROM codebook cb "
-        "JOIN codes c ON c.code_id = cb.code_id "
-        "WHERE cb.version = ? "
-        "ORDER BY c.code_id",
-        (version,),
-    ).fetchall()
-    out: list[CodebookEntry] = []
-    for r in rows:
-        qrows = conn.execute(
-            "SELECT q.quote_id, q.text "
-            "FROM codes_supporting_quotes csq "
-            "JOIN quotes q ON q.quote_id = csq.quote_id "
-            "WHERE csq.code_id = ? "
-            "ORDER BY q.quote_id",
-            (r["code_id"],),
-        ).fetchall()
-        out.append(
-            CodebookEntry(
-                code_id=r["code_id"],
-                code=r["code"],
-                description=r["description"] or "",
-                rationale=r["rationale"] or "",
-                quotes=[
-                    {"quote_id": str(q["quote_id"]), "text": q["text"]}
-                    for q in qrows
-                ],
-            )
+def insert_codebook_version(parent: Codebook | None = None) -> Codebook:
+    """Insert a new Codebook revision; returns the persisted row."""
+    with session() as s:
+        cb = Codebook(
+            parent_version=parent.version if parent is not None else None
         )
-    return out
+        s.add(cb)
+        s.commit()
+        s.refresh(cb)
+        s.expunge(cb)
+        return cb
 
 
-def codebook_to_json_for_version(
-    conn: sqlite3.Connection, version: int
-) -> str:
-    """Serialize the codebook as the legacy `{"codes": [...]}` JSON shape."""
-    entries = get_codebook_codes(conn, version)
-    return json.dumps(
-        {
-            "codes": [
-                {"code": e.code, "quotes": e.quotes}
-                for e in entries
+def latest_codebook() -> Codebook | None:
+    with session() as s:
+        cb = s.exec(
+            select(Codebook)
+            .order_by(Codebook.version.desc())  # type: ignore[union-attr]
+            .limit(1)
+        ).first()
+        if cb is not None:
+            s.expunge(cb)
+        return cb
+
+
+def get_codebook(version: int) -> Codebook | None:
+    with session() as s:
+        cb = s.get(Codebook, version)
+        if cb is not None:
+            s.expunge(cb)
+        return cb
+
+
+def list_codebooks() -> list[Codebook]:
+    with session() as s:
+        rows = list(
+            s.exec(select(Codebook).order_by(Codebook.version.asc())).all()  # type: ignore[union-attr]
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+def codebook_to_json_for_version(version: int) -> str:
+    """Serialize codes-in-version as the legacy ``{"codes": [...]}`` shape
+    that ``thematic_analysis.codebook.Codebook.from_json`` consumes."""
+    with session() as s:
+        codes = list(
+            s.exec(
+                select(Code)
+                .join(CodebookCode, CodebookCode.code_id == Code.code_id)
+                .where(CodebookCode.codebook_version == version)
+                .order_by(Code.code_id)
+            ).all()
+        )
+        out_codes: list[dict] = []
+        for c in codes:
+            quotes_payload = [
+                {"quote_id": str(q.quote_id), "text": q.text}
+                for q in sorted(
+                    c.supporting_quotes, key=lambda x: x.quote_id
+                )
             ]
-        },
-        indent=2,
-    )
+            out_codes.append({"code": c.code, "quotes": quotes_payload})
+        return json.dumps({"codes": out_codes}, indent=2)
 
 
-def codebook_add_code(
-    conn: sqlite3.Connection, version: int, code_id: int
-) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO codebook (version, code_id) VALUES (?, ?)",
-        (version, code_id),
-    )
+def add_code_to_codebook(codebook: Codebook, code: Code) -> None:
+    """Membership: place ``code`` into ``codebook`` (idempotent)."""
+    with session() as s:
+        existing = s.get(CodebookCode, (codebook.version, code.code_id))
+        if existing is None:
+            s.add(
+                CodebookCode(
+                    codebook_version=codebook.version, code_id=code.code_id
+                )
+            )
+            s.commit()
 
 
 def copy_codebook_membership(
-    conn: sqlite3.Connection,
     *,
-    from_version: int,
-    to_version: int,
-    drop_code_id: int | None = None,
-    add_code_id: int | None = None,
+    from_codebook: Codebook,
+    to_codebook: Codebook,
+    drop_code: Code | None = None,
+    add_code: Code | None = None,
 ) -> None:
-    """Copy `codebook` rows from one version to another.
+    """Copy membership from one Codebook to another.
 
-    `drop_code_id`: skip this code (used for UPDATE which replaces).
-    `add_code_id`: also append this code (used for ADD / UPDATE).
+    ``drop_code``: omit this code from the copy (used for UPDATE).
+    ``add_code``: also include this code (used for ADD / UPDATE).
     """
-    rows = conn.execute(
-        "SELECT code_id FROM codebook WHERE version = ?", (from_version,)
-    ).fetchall()
-    for r in rows:
-        cid = r["code_id"]
-        if drop_code_id is not None and cid == drop_code_id:
-            continue
-        conn.execute(
-            "INSERT OR IGNORE INTO codebook (version, code_id) VALUES (?, ?)",
-            (to_version, cid),
+    drop_id = drop_code.code_id if drop_code is not None else None
+    add_id = add_code.code_id if add_code is not None else None
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(CodebookCode).where(
+                    CodebookCode.codebook_version == from_codebook.version
+                )
+            ).all()
         )
-    if add_code_id is not None:
-        conn.execute(
-            "INSERT OR IGNORE INTO codebook (version, code_id) VALUES (?, ?)",
-            (to_version, add_code_id),
-        )
+        for r in rows:
+            if drop_id is not None and r.code_id == drop_id:
+                continue
+            existing = s.get(
+                CodebookCode, (to_codebook.version, r.code_id)
+            )
+            if existing is None:
+                s.add(
+                    CodebookCode(
+                        codebook_version=to_codebook.version,
+                        code_id=r.code_id,
+                    )
+                )
+        if add_id is not None:
+            existing = s.get(CodebookCode, (to_codebook.version, add_id))
+            if existing is None:
+                s.add(
+                    CodebookCode(
+                        codebook_version=to_codebook.version, code_id=add_id
+                    )
+                )
+        s.commit()

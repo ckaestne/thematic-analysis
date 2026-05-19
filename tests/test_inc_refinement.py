@@ -404,7 +404,7 @@ class TestWrapWithRefinement:
 class TestWorkerDefaultFactory:
     def test_default_factory_returns_refining_agent(self):
         codebook = Codebook(use_mock_embeddings=True)
-        coder_row = store.Coder(coder_id=1, name="c1", identity="x", created_at="now")
+        coder_row = store.Coder(coder_id=1, identity="x")
         agent = workers.default_coder_factory(codebook, coder_row)
         assert isinstance(agent, RefiningCoderAgent)
         assert isinstance(agent.coder, CoderAgent)
@@ -418,9 +418,9 @@ class TestWorkerEndToEnd:
     def test_code_one_persists_refined_codes(self, tmp_path: Path):
         db = tmp_path / "x.sqlite"
         conn = store.init_db(db)
-        c = store.add_coder(conn, name="c1", identity="id1")
-        doc = store.add_document(conn, "d.md", b"data")
-        store.enqueue_segments(conn, [(doc, "text 0", None, None, 0)])
+        c = store.add_coder("id1")
+        doc = store.add_document("d.md")
+        store.enqueue_segments(doc, [("text 0", 0, 0, 0)])
 
         llm, _ = _fake_llm(
             [
@@ -443,7 +443,7 @@ class TestWorkerEndToEnd:
         assert res["n_codes"] == 1
 
         codes = conn.execute(
-            "SELECT code FROM codes WHERE coder_id = ? ORDER BY code_id",
+            "SELECT code FROM code WHERE coder_id = ? ORDER BY code_id",
             (c.coder_id,),
         ).fetchall()
         assert [row["code"] for row in codes] == ["deeper-concept"]

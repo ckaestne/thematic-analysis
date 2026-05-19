@@ -1,7 +1,8 @@
 """Worker functions for the incremental Stage 1 + Stage 2 pipelines.
 
-These compose the helpers in `thematic_analysis_inc.db`. No SQL lives
-here.
+These compose the helpers in :mod:`thematic_analysis_inc.db`. Stage-1
+helpers are SQLModel-backed and no longer take a ``conn`` parameter;
+Stage-2 helpers (``theme_*``) still need a ``sqlite3.Connection``.
 """
 
 from __future__ import annotations
@@ -33,8 +34,8 @@ from thematic_analysis.agents.theme_coder import (
     ThemeCoderConfig,
     ThemeResult,
 )
-from thematic_analysis.codebook import Codebook
-from thematic_analysis.codebook.codebook import Quote
+from thematic_analysis.codebook import Codebook as DomainCodebook
+from thematic_analysis.codebook.codebook import Quote as DomainQuote
 
 from thematic_analysis_inc import db
 from thematic_analysis_inc.db import (
@@ -46,19 +47,26 @@ from thematic_analysis_inc.db import (
     review as db_review,
     theme as db_theme,
 )
+from thematic_analysis_inc.db.models import (
+    Code,
+    Coder,
+    DECISION_ADD,
+    DECISION_MERGE,
+    DECISION_UPDATE,
+)
 from thematic_analysis_inc.refinement import wrap_with_refinement
 
 
 # ── Codebook cache ───────────────────────────────────────────────────────────
 
-_codebook_cache: dict[int, Codebook] = {}
+_codebook_cache: dict[int, DomainCodebook] = {}
 
 
 def clear_codebook_cache() -> None:
     _codebook_cache.clear()
 
 
-def _apply_research_context(conn: sqlite3.Connection, agent: Any) -> None:
+def _apply_research_context(agent: Any) -> None:
     if not hasattr(agent, "research_context"):
         return
     rc = db.get_research_context()
@@ -70,70 +78,59 @@ def _apply_research_context(conn: sqlite3.Connection, agent: Any) -> None:
     agent.research_context = ctx
 
 
-def _get_codebook(
-    conn: sqlite3.Connection, version: int, use_mock_embeddings: bool
-) -> Codebook:
+def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
     cb = _codebook_cache.get(version)
     if cb is not None:
         return cb
-    snapshot = db_codebook.codebook_to_json_for_version(conn, version)
-    cb = Codebook.from_json(snapshot, use_mock_embeddings=use_mock_embeddings)
+    snapshot = db_codebook.codebook_to_json_for_version(version)
+    cb = DomainCodebook.from_json(
+        snapshot, use_mock_embeddings=use_mock_embeddings
+    )
     _codebook_cache[version] = cb
     return cb
 
 
-# ── Coder agent factory ──────────────────────────────────────────────────────
+# ── Stage-A coder worker ─────────────────────────────────────────────────────
 
-AgentFactory = Callable[[Codebook, db_coders.Coder], Any]
+AgentFactory = Callable[[DomainCodebook, Coder], Any]
 
 
-def default_coder_factory(codebook: Codebook, coder: db_coders.Coder) -> Any:
+def default_coder_factory(codebook: DomainCodebook, coder: Coder) -> Any:
     base = CoderAgent(
         config=CoderConfig(identity=coder.identity), codebook=codebook
     )
     return wrap_with_refinement(base)
 
 
-# ── Stage-A coder worker ─────────────────────────────────────────────────────
-
-
-def code_one(
-    conn: sqlite3.Connection,
+def _code_one_impl(
     coder_id: int,
     *,
-    use_mock_embeddings: bool = False,
-    agent_factory: AgentFactory | None = None,
+    use_mock_embeddings: bool,
+    agent_factory: AgentFactory | None,
+    sync: bool = True,
 ) -> dict | None:
-    """Process one un-coded segment for the given coder. Returns None when
-    the coder has nothing left to do."""
-    coder = db_coders.get_coder(conn, coder_id)
+    coder = db_coders.get_coder(coder_id)
     if coder is None or coder_id < 1:
         raise ValueError(f"unknown or system coder_id: {coder_id}")
-
-    db_coding.sync_coding_queue(conn)
-    assignment = db_coding.claim_next_coding_assignment(conn, coder_id)
+    db_coding.sync_coding_queue()
+    assignment = db_coding.claim_next_assignment(coder)
     if assignment is None:
         return None
-
     factory = agent_factory or default_coder_factory
     segment_id = assignment.segment_id
-    text = assignment.content
-    version = assignment.codebook_version
-
+    version = assignment.codebook_used_id
+    # Re-fetch segment for content (assignment.segment was expunged).
+    seg = db.get_segment(segment_id)
+    text = seg.content if seg is not None else ""
     try:
-        codebook = _get_codebook(conn, version, use_mock_embeddings)
+        codebook = _get_codebook(version, use_mock_embeddings)
         agent = factory(codebook, coder)
-        _apply_research_context(conn, agent)
+        _apply_research_context(agent)
         t0 = time.monotonic()
         result = agent.code_segment(str(segment_id), text)
         db_coding.record_coding_result(
-            conn,
-            segment_id=segment_id,
-            coder_id=coder_id,
-            version=version,
-            codes=list(result.codes),
-            rationales=list(result.rationales),
-            research_context_version=assignment.research_context_version,
+            assignment,
+            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
         )
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
@@ -150,9 +147,7 @@ def code_one(
         return res
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
-        db_coding.record_coding_failure(
-            conn, segment_id=segment_id, coder_id=coder_id, error=msg
-        )
+        db_coding.record_coding_failure(assignment, error=msg)
         return {
             "ok": False,
             "coder_id": coder_id,
@@ -162,44 +157,54 @@ def code_one(
         }
 
 
-async def code_one_async(
-    conn: sqlite3.Connection,
+def code_one(
+    conn: sqlite3.Connection | None,
     coder_id: int,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AgentFactory | None = None,
 ) -> dict | None:
-    coder = db_coders.get_coder(conn, coder_id)
+    """Process one un-coded segment for the given coder. ``conn`` is
+    accepted (and ignored) for backwards compatibility — Stage-1 helpers
+    use their own SQLModel session."""
+    return _code_one_impl(
+        coder_id,
+        use_mock_embeddings=use_mock_embeddings,
+        agent_factory=agent_factory,
+    )
+
+
+async def code_one_async(
+    conn: sqlite3.Connection | None,
+    coder_id: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AgentFactory | None = None,
+) -> dict | None:
+    coder = db_coders.get_coder(coder_id)
     if coder is None or coder_id < 1:
         raise ValueError(f"unknown or system coder_id: {coder_id}")
-
-    db_coding.sync_coding_queue(conn)
-    assignment = db_coding.claim_next_coding_assignment(conn, coder_id)
+    db_coding.sync_coding_queue()
+    assignment = db_coding.claim_next_assignment(coder)
     if assignment is None:
         return None
-
     factory = agent_factory or default_coder_factory
     segment_id = assignment.segment_id
-    text = assignment.content
-    version = assignment.codebook_version
-
+    version = assignment.codebook_used_id
+    seg = db.get_segment(segment_id)
+    text = seg.content if seg is not None else ""
     try:
-        codebook = _get_codebook(conn, version, use_mock_embeddings)
+        codebook = _get_codebook(version, use_mock_embeddings)
         agent = factory(codebook, coder)
-        _apply_research_context(conn, agent)
+        _apply_research_context(agent)
         t0 = time.monotonic()
         if hasattr(agent, "code_segment_async"):
             result = await agent.code_segment_async(str(segment_id), text)
         else:
             result = agent.code_segment(str(segment_id), text)
         db_coding.record_coding_result(
-            conn,
-            segment_id=segment_id,
-            coder_id=coder_id,
-            version=version,
-            codes=list(result.codes),
-            rationales=list(result.rationales),
-            research_context_version=assignment.research_context_version,
+            assignment,
+            list(zip(result.codes, list(result.rationales) + [""] * len(result.codes))),
         )
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
@@ -216,9 +221,7 @@ async def code_one_async(
         return res
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
-        db_coding.record_coding_failure(
-            conn, segment_id=segment_id, coder_id=coder_id, error=msg
-        )
+        db_coding.record_coding_failure(assignment, error=msg)
         return {
             "ok": False,
             "coder_id": coder_id,
@@ -229,7 +232,7 @@ async def code_one_async(
 
 
 async def drain_code_async(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     coder_id: int,
     *,
     workers: int = 1,
@@ -271,66 +274,61 @@ async def drain_code_async(
 
 # ── Aggregator worker ────────────────────────────────────────────────────────
 
-AggregatorFactory = Callable[[Codebook], Any]
+AggregatorFactory = Callable[[DomainCodebook], Any]
 
 
-def default_aggregator_factory(codebook: Codebook) -> CodeAggregatorAgent:
+def default_aggregator_factory(codebook: DomainCodebook) -> CodeAggregatorAgent:
     return CodeAggregatorAgent(config=AggregatorConfig(), codebook=codebook)
 
 
 def _build_assignments(
-    segment_id: int, text: str, coder_codes: list[db_coding.CoderCodes]
+    segment_id: int, text: str, coder_codes: dict[int, list[Code]]
 ) -> list[CodeAssignment]:
     return [
         CodeAssignment(
             segment_id=str(segment_id),
             segment_text=text,
-            codes=[c.code for c in cc.codes],
-            rationales=[c.rationale for c in cc.codes],
-            is_new_code=[False] * len(cc.codes),
+            codes=[c.code for c in codes],
+            rationales=[c.rationale for c in codes],
+            is_new_code=[False] * len(codes),
         )
-        for cc in coder_codes
+        for _cid, codes in sorted(coder_codes.items())
     ]
 
 
 def aggregate_one(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AggregatorFactory | None = None,
 ) -> dict | None:
-    """Aggregate codes for one ready segment."""
-    row = db_aggregation.next_segment_to_aggregate(conn)
-    if row is None:
+    seg = db_aggregation.next_segment_to_aggregate()
+    if seg is None:
         return None
-    segment_id = int(row["segment_id"])
-    text = row["content"]
+    segment_id = seg.segment_id
+    text = seg.content
 
-    # Get latest codebook version for the aggregator code's `version` column.
-    latest = db_codebook.latest_codebook_version(conn)
+    latest = db_codebook.latest_codebook()
     if latest is None:
-        raise RuntimeError("no codebook version exists; run init first")
-    version = latest.version
+        raise RuntimeError("no codebook revision exists; run init first")
 
-    coder_codes = db_coding.load_segment_coder_codes(conn, segment_id)
-    # Build (coder_id, code_text) -> code_id map for resolving sources.
-    code_to_id: dict[tuple[int, str], int] = {}
-    for cc in coder_codes:
-        for c in cc.codes:
-            code_to_id[(cc.coder_id, c.code)] = c.code_id
+    coder_codes = db_coding.load_segment_coder_codes(seg)
+    # Build (coder_id, code_text) -> Code for source resolution.
+    code_map: dict[tuple[int, str], Code] = {}
+    for cid, codes in coder_codes.items():
+        for c in codes:
+            code_map[(cid, c.code)] = c
 
-    n_in = sum(len(cc.codes) for cc in coder_codes)
+    n_in = sum(len(v) for v in coder_codes.values())
     try:
-        codebook = Codebook(use_mock_embeddings=use_mock_embeddings)
+        domain_cb = DomainCodebook(use_mock_embeddings=use_mock_embeddings)
         factory = agent_factory or default_aggregator_factory
-        agent = factory(codebook)
+        agent = factory(domain_cb)
         t0 = time.monotonic()
         assignments = _build_assignments(segment_id, text, coder_codes)
         result = agent.aggregate(assignments)
 
-        # Race-safety check: if another worker already aggregated this
-        # segment, bail before writing.
-        if db_aggregation.segment_has_aggregator_code(conn, segment_id):
+        if db_aggregation.segment_has_aggregator_code(segment_id):
             return {
                 "ok": False,
                 "segment_id": segment_id,
@@ -338,30 +336,26 @@ def aggregate_one(
                 "skipped": True,
             }
 
-        inputs: list[db_aggregation.AggregatorMergeInput] = []
+        merged: list[db_aggregation.AggregatorMergeInput] = []
         for mc in result.all_codes():
-            # Resolve source code_ids by matching original_codes against the
-            # codes produced by any coder for this segment.
-            source_ids: list[int] = []
+            sources: list[Code] = []
             seen: set[int] = set()
             for orig in mc.original_codes:
-                for (cid, ctext), code_id in code_to_id.items():
-                    if ctext == orig and code_id not in seen:
-                        source_ids.append(code_id)
-                        seen.add(code_id)
-            inputs.append(
+                for (cid, ctext), c in code_map.items():
+                    if ctext == orig and c.code_id not in seen:
+                        sources.append(c)
+                        seen.add(c.code_id)
+            merged.append(
                 db_aggregation.AggregatorMergeInput(
                     code=mc.code,
                     description="",
                     rationale=mc.merge_rationale or "",
                     quote_texts=[q.text for q in mc.quotes],
-                    source_code_ids=source_ids,
+                    source_codes=sources,
                 )
             )
 
-        db_aggregation.record_aggregation_result(
-            conn, segment_id=segment_id, version=version, inputs=inputs
-        )
+        db_aggregation.record_aggregation_result(seg, merged)
         return {
             "ok": True,
             "segment_id": segment_id,
@@ -372,15 +366,11 @@ def aggregate_one(
         }
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
-        return {
-            "ok": False,
-            "segment_id": segment_id,
-            "error": msg,
-        }
+        return {"ok": False, "segment_id": segment_id, "error": msg}
 
 
 def drain_aggregate(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None = None,
     *,
     limit: int | None = None,
     use_mock_embeddings: bool = False,
@@ -392,7 +382,7 @@ def drain_aggregate(
         if limit is not None and counters["done"] + counters["failed"] >= limit:
             break
         res = aggregate_one(
-            conn,
+            None,
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=agent_factory,
         )
@@ -411,57 +401,52 @@ def drain_aggregate(
 
 # ── Reviewer worker ──────────────────────────────────────────────────────────
 
-ReviewerFactory = Callable[[Codebook], Any]
+ReviewerFactory = Callable[[DomainCodebook], Any]
 
 
-def default_reviewer_factory(codebook: Codebook) -> ReviewerAgent:
+def default_reviewer_factory(codebook: DomainCodebook) -> ReviewerAgent:
     return ReviewerAgent(config=ReviewerConfig(), codebook=codebook)
 
 
 _DECISION_TO_CHAR = {
-    ReviewDecision.ADD_NEW: db_review.DECISION_ADD,
-    ReviewDecision.MERGE: db_review.DECISION_MERGE,
-    ReviewDecision.UPDATE: db_review.DECISION_UPDATE,
+    ReviewDecision.ADD_NEW: DECISION_ADD,
+    ReviewDecision.MERGE: DECISION_MERGE,
+    ReviewDecision.UPDATE: DECISION_UPDATE,
 }
 
 
 def review_one(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: ReviewerFactory | None = None,
 ) -> dict | None:
-    target = db_review.next_aggregated_code_to_review(conn)
+    target = db_review.next_aggregated_code_to_review()
     if target is None:
         return None
 
-    quotes_data = db_aggregation.load_aggregated_code_quotes(
-        conn, target.code_id
-    )
+    quotes_data = db_aggregation.load_aggregated_code_quotes(target.code_id)
     quotes = [
-        Quote(quote_id=str(q["quote_id"]), text=q["text"]) for q in quotes_data
+        DomainQuote(quote_id=str(q["quote_id"]), text=q["text"])
+        for q in quotes_data
     ]
 
-    latest = db_codebook.latest_codebook_version(conn)
+    latest = db_codebook.latest_codebook()
     if latest is None:
-        raise RuntimeError("no codebook version exists; run init first")
-    parent_version = latest.version
+        raise RuntimeError("no codebook revision exists; run init first")
+    parent_cb = latest
 
-    codebook = _get_codebook(conn, parent_version, use_mock_embeddings)
+    codebook = _get_codebook(parent_cb.version, use_mock_embeddings)
     factory = agent_factory or default_reviewer_factory
     agent = factory(codebook)
-    _apply_research_context(conn, agent)
+    _apply_research_context(agent)
 
     t0 = time.monotonic()
     result = agent.review_code(target.code, quotes)
     agent.apply_review(result)
-    # The in-memory codebook is now stale w.r.t. the DB-derived version,
-    # so evict the cache for the new (about-to-be-created) version.
-    _codebook_cache.pop(parent_version, None)
+    _codebook_cache.pop(parent_cb.version, None)
 
-    new_version: int | None = None
     if result.decision == ReviewDecision.SKIP:
-        # SKIP leaves no DB trace per the design.
         return {
             "ok": True,
             "aggregated_code_id": target.code_id,
@@ -474,52 +459,48 @@ def review_one(
         }
 
     decision_char = _DECISION_TO_CHAR[result.decision]
-    target_code_id: int | None = None
+    target_code: Code | None = None
     if result.decision in (ReviewDecision.MERGE, ReviewDecision.UPDATE):
         if result.target_code is None:
             raise RuntimeError(
                 f"reviewer decision {result.decision.value} requires "
                 "target_code"
             )
-        target_code_id = db_review.resolve_target_code_id(
-            conn, version=parent_version, code_text=result.target_code
+        target_code = db_review.resolve_target_code(
+            parent_cb, result.target_code
         )
-        if target_code_id is None:
+        if target_code is None:
             raise RuntimeError(
                 f"target code {result.target_code!r} not found in codebook "
-                f"v{parent_version}"
+                f"v{parent_cb.version}"
             )
 
     new_text = result.code
-    new_version = db_review.record_review(
-        conn,
-        source_agg_code_id=target.code_id,
+    new_cb = db_review.record_review(
+        source_agg_code=target,
         decision=decision_char,
         new_code_text=new_text,
         new_description="",
         rationale=result.rationale or "",
-        parent_version=parent_version,
-        target_code_id=target_code_id,
+        parent_codebook=parent_cb,
+        target_code=target_code,
     )
 
-    # On MERGE: the new reviewer code isn't in the codebook; copy quotes
-    # onto the existing target reviewer code so the on-disk codebook
-    # accumulates them.
-    if result.decision == ReviewDecision.MERGE and target_code_id is not None:
+    # Quote handling: copy quotes onto the right code in DB so the
+    # codebook revision picks them up via codebook_code membership.
+    seg = db.get_segment(target.segment_id)
+    if result.decision == ReviewDecision.MERGE and target_code is not None:
         for q in quotes:
-            qid = db.add_quote(conn, target.segment_id, q.text)
-            db.link_code_quote(conn, target_code_id, qid)
+            qrow = db.add_quote(seg, q.text)
+            db.link_code_quote(target_code, qrow)
     else:
-        # ADD / UPDATE: link quotes onto the new reviewer code.
-        new_reviewer_code_id = db_review.find_reviewer_code_by_text(
-            conn, new_text
-        )
-        if new_reviewer_code_id is not None:
+        new_reviewer_code = db_review.find_reviewer_code_by_text(new_text)
+        if new_reviewer_code is not None:
             for q in quotes:
-                qid = db.add_quote(conn, target.segment_id, q.text)
-                db.link_code_quote(conn, new_reviewer_code_id, qid)
+                qrow = db.add_quote(seg, q.text)
+                db.link_code_quote(new_reviewer_code, qrow)
 
-    _codebook_cache.pop(new_version, None)
+    _codebook_cache.pop(new_cb.version, None)
 
     return {
         "ok": True,
@@ -528,13 +509,13 @@ def review_one(
         "code": target.code,
         "decision": result.decision.value,
         "target_code": result.target_code,
-        "new_version": new_version,
+        "new_version": new_cb.version,
         "elapsed": time.monotonic() - t0,
     }
 
 
 def drain_review(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None = None,
     *,
     limit: int | None = None,
     use_mock_embeddings: bool = False,
@@ -542,22 +523,17 @@ def drain_review(
     on_event: Callable[[dict, dict], None] | None = None,
 ) -> dict:
     counters = {"done": 0, "failed": 0}
-    # SKIP decisions don't write a `codes_derived` edge (by design), so
-    # `next_aggregated_code_to_review` would keep returning the same code.
-    # Track skipped code_ids in-memory for this drain so we make progress.
     skipped: set[int] = set()
     while True:
         if limit is not None and counters["done"] + counters["failed"] >= limit:
             break
-        target = db_review.next_aggregated_code_to_review(conn)
+        target = db_review.next_aggregated_code_to_review()
         if target is None:
             break
         if target.code_id in skipped:
-            # Everything left in the queue is something we've skipped this
-            # drain; treat as "nothing more to do".
             break
         res = review_one(
-            conn,
+            None,
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=agent_factory,
         )
@@ -571,7 +547,7 @@ def drain_review(
     return counters
 
 
-# ── Stage 2 helpers ──────────────────────────────────────────────────────────
+# ── Stage 2 helpers (raw-SQL theme tables) ───────────────────────────────────
 
 
 def _theme_result_from_json(json_str: str) -> ThemeResult:
@@ -582,7 +558,7 @@ def _theme_result_from_json(json_str: str) -> ThemeResult:
             description=t["description"],
             codes=t.get("codes", []),
             quotes=[
-                Quote(quote_id=q["quote_id"], text=q["text"])
+                DomainQuote(quote_id=q["quote_id"], text=q["text"])
                 for q in t.get("quotes", [])
             ],
         )
@@ -591,11 +567,11 @@ def _theme_result_from_json(json_str: str) -> ThemeResult:
     return ThemeResult(themes=themes)
 
 
-ThemeCoderFactory = Callable[[Codebook, db_theme.ThemeCoder], Any]
+ThemeCoderFactory = Callable[[DomainCodebook, db_theme.ThemeCoder], Any]
 
 
 def default_theme_coder_factory(
-    codebook: Codebook, theme_coder: db_theme.ThemeCoder
+    codebook: DomainCodebook, theme_coder: db_theme.ThemeCoder
 ) -> ThemeCoderAgent:
     return ThemeCoderAgent(
         config=ThemeCoderConfig(identity=theme_coder.identity),
@@ -629,9 +605,9 @@ def theme_code_one(
 
     factory = agent_factory or default_theme_coder_factory
     try:
-        codebook = _get_codebook(conn, codebook_version, use_mock_embeddings)
+        codebook = _get_codebook(codebook_version, use_mock_embeddings)
         agent = factory(codebook, theme_coder)
-        _apply_research_context(conn, agent)
+        _apply_research_context(agent)
         t0 = time.monotonic()
         result = agent.develop_themes()
         result_json = result.to_json()
@@ -745,7 +721,7 @@ def theme_aggregate_one(
     factory = agent_factory or default_theme_aggregator_factory
     try:
         agent = factory()
-        _apply_research_context(conn, agent)
+        _apply_research_context(agent)
         t0 = time.monotonic()
         result: ThemeAggregationResult = agent.aggregate(theme_results)
         result_json = result.to_json()

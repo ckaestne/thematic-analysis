@@ -1,85 +1,58 @@
-"""Coder CRUD with INTEGER ids. System rows (0, -1) are seeded by schema."""
+"""Coder CRUD, backed by SQLModel.
+
+User-supplied coders auto-assign integer ids ≥ 1. The two reserved
+system rows (``0`` aggregator, ``-1`` reviewer) are seeded by
+:func:`db.connection._create_sqlmodel_tables`.
+"""
 
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
+from sqlalchemy import func
+from sqlmodel import select
 
-from thematic_analysis_inc.db.connection import now
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import Coder
 
 
 SYSTEM_AGGREGATOR_ID = 0
 SYSTEM_REVIEWER_ID = -1
 
 
-@dataclass
-class Coder:
-    coder_id: int
-    name: str
-    identity: str
-    created_at: str
+def add_coder(identity: str) -> Coder:
+    """Insert a new real coder (id ≥ 1). Returns the persisted Coder."""
+    with session() as s:
+        row = s.exec(
+            select(func.coalesce(func.max(Coder.coder_id), 0)).where(
+                Coder.coder_id >= 1
+            )
+        ).one()
+        next_id = int(row) + 1
+        c = Coder(coder_id=next_id, identity=identity)
+        s.add(c)
+        s.commit()
+        s.refresh(c)
+        s.expunge(c)
+        return c
 
 
-def _next_coder_id(conn: sqlite3.Connection) -> int:
-    row = conn.execute(
-        "SELECT COALESCE(MAX(coder_id), 0) AS m FROM coders WHERE coder_id >= 1"
-    ).fetchone()
-    return int(row["m"]) + 1
+def get_coder(coder_id: int) -> Coder | None:
+    with session() as s:
+        c = s.get(Coder, coder_id)
+        if c is not None:
+            s.expunge(c)
+        return c
 
 
-def add_coder(
-    conn: sqlite3.Connection, name: str, identity: str
-) -> Coder:
-    """Insert a new real coder (id ≥ 1). Returns the new Coder row."""
-    with conn:
-        coder_id = _next_coder_id(conn)
-        conn.execute(
-            "INSERT INTO coders (coder_id, name, identity, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (coder_id, name, identity, now()),
+def list_coders() -> list[Coder]:
+    """Real coders (id ≥ 1) ordered by id."""
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(Coder)
+                .where(Coder.coder_id >= 1)
+                .order_by(Coder.coder_id)
+            ).all()
         )
-    return Coder(
-        coder_id=coder_id, name=name, identity=identity, created_at=now()
-    )
-
-
-def get_coder(conn: sqlite3.Connection, coder_id: int) -> Coder | None:
-    row = conn.execute(
-        "SELECT coder_id, name, identity, created_at "
-        "FROM coders WHERE coder_id = ?",
-        (coder_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return Coder(**dict(row))
-
-
-def get_coder_by_name(
-    conn: sqlite3.Connection, name: str
-) -> Coder | None:
-    row = conn.execute(
-        "SELECT coder_id, name, identity, created_at "
-        "FROM coders WHERE name = ? AND coder_id >= 1 "
-        "ORDER BY coder_id LIMIT 1",
-        (name,),
-    ).fetchone()
-    if row is None:
-        return None
-    return Coder(**dict(row))
-
-
-def list_coders(conn: sqlite3.Connection) -> list[Coder]:
-    """List real coders (id ≥ 1) ordered by id."""
-    rows = conn.execute(
-        "SELECT coder_id, name, identity, created_at FROM coders "
-        "WHERE coder_id >= 1 ORDER BY coder_id"
-    ).fetchall()
-    return [Coder(**dict(r)) for r in rows]
-
-
-def assert_real_coder(coder_id: int) -> None:
-    if coder_id <= 0:
-        raise ValueError(
-            f"coder_id {coder_id} is a system id; only real coders (id ≥ 1) "
-            "are allowed here"
-        )
+        for r in rows:
+            s.expunge(r)
+        return rows

@@ -90,7 +90,7 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
     current when it was produced, and producing more codes after a new RC
     is set should reference the new RC version."""
     conn = store.init_db(tmp_path / "rc.sqlite")
-    store.add_coder(conn, name="alice", identity="x")
+    store.add_coder("x")
 
     # Set initial RC.
     rc_v1 = store.set_research_context(
@@ -98,27 +98,27 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
     ).research_context_version
 
     # Seed a segment and run the queue sync.
-    doc = store.add_document(conn, "doc.md", b"x")
-    store.enqueue_segments(conn, [(doc, "seg one", None, None, 0)])
-    store.coding.sync_coding_queue(conn)
+    doc = store.add_document("doc.md")
+    store.enqueue_segments(doc, [("seg one", 0, 0, 0)])
+    store.coding.sync_coding_queue()
 
     rows = conn.execute(
-        "SELECT research_context_version FROM coding_queue"
+        "SELECT research_context_used_id FROM coding_queue"
     ).fetchall()
     assert rows and all(
-        int(r["research_context_version"]) == rc_v1 for r in rows
+        int(r["research_context_used_id"]) == rc_v1 for r in rows
     )
 
     # Set a new RC and add another segment; its new queue row picks up v2.
     rc_v2 = store.set_research_context(
         ResearchContext(description="second RC")
     ).research_context_version
-    store.enqueue_segments(conn, [(doc, "seg two", None, None, 1)])
-    store.coding.sync_coding_queue(conn)
+    store.enqueue_segments(doc, [("seg two", 0, 0, 1)])
+    store.coding.sync_coding_queue()
     rows_by_seg = {
-        int(r["segment_id"]): int(r["research_context_version"])
+        int(r["segment_id"]): int(r["research_context_used_id"])
         for r in conn.execute(
-            "SELECT segment_id, research_context_version FROM coding_queue"
+            "SELECT segment_id, research_context_used_id FROM coding_queue"
         ).fetchall()
     }
     # 2 segments, both queue rows present; older one keeps v1; new one is v2.

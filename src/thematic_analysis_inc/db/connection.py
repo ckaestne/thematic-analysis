@@ -1,16 +1,15 @@
 """SQLite connection setup for the incremental pipeline.
 
-Two layers coexist during the SQLModel migration:
+Two layers coexist:
 
-- A raw ``sqlite3.Connection`` returned by :func:`connect` — drives the
-  tables that haven't been migrated to SQLModel yet (``codes``,
-  ``coding_queue``, …).
 - A SQLAlchemy :class:`Engine` plus a :func:`session` factory — drives
-  the tables that *have* been migrated. Currently: just
-  ``research_context``.
+  every Stage-1 table (research_context, document, segment, code,
+  codebook, coder, quote, coding_queue, codebook_code,
+  codes_supporting_quotes, codes_derived).
+- A raw ``sqlite3.Connection`` returned by :func:`connect` — still used
+  by Stage-2 (``theme_*``) helpers in ``db/theme.py``.
 
-Both layers point at the same on-disk database file, so a single
-``connect(path)`` call sets both up.
+Both layers point at the same on-disk database file.
 """
 
 from __future__ import annotations
@@ -20,16 +19,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine
-from sqlmodel import Session
+from sqlmodel import Session, SQLModel
 
 
 def now() -> str:
-    """ISO-8601 UTC timestamp with second precision (raw-SQL layer)."""
+    """ISO-8601 UTC timestamp with second precision (Stage-2 raw-SQL layer)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
-# SQLAlchemy engine (used by the SQLModel-migrated tables)
+# SQLAlchemy engine (used by every Stage-1 helper)
 # ---------------------------------------------------------------------------
 
 
@@ -52,9 +51,6 @@ def session() -> Session:
 
 
 def _ensure_engine(path: str | Path) -> Engine:
-    """Set up the SQLAlchemy engine for ``path``, replacing any previous
-    engine pointing at a different path (matters in tests where each
-    case uses its own ``tmp_path``)."""
     global _engine, _engine_path
     p = str(path)
     if _engine is not None and _engine_path != p:
@@ -70,14 +66,45 @@ def _ensure_engine(path: str | Path) -> Engine:
 
 
 def _create_sqlmodel_tables(engine: Engine) -> None:
-    """Create the tables owned by SQLModel (idempotent).
+    """Create every Stage-1 SQLModel-owned table (idempotent)."""
+    from thematic_analysis_inc.db.models import (
+        Code,
+        Codebook,
+        CodebookCode,
+        Coder,
+        CodesDerived,
+        CodesSupportingQuotes,
+        CodingQueueEntry,
+        Document,
+        Quote,
+        ResearchContext,
+        Segment,
+    )
 
-    As more tables migrate from raw SQL to SQLModel, list them here.
-    """
-    # Local import to avoid circular dependencies at module load.
-    from thematic_analysis_inc.db.models import ResearchContext
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[
+            ResearchContext.__table__,
+            Codebook.__table__,
+            Coder.__table__,
+            Document.__table__,
+            Segment.__table__,
+            Code.__table__,
+            Quote.__table__,
+            CodingQueueEntry.__table__,
+            CodebookCode.__table__,
+            CodesSupportingQuotes.__table__,
+            CodesDerived.__table__,
+        ],
+    )
 
-    ResearchContext.__table__.create(engine, checkfirst=True)
+    # Seed system coders 0 (aggregator) and -1 (reviewer) once.
+    with Session(engine) as s:
+        if s.get(Coder, 0) is None:
+            s.add(Coder(coder_id=0, identity="aggregator system coder"))
+        if s.get(Coder, -1) is None:
+            s.add(Coder(coder_id=-1, identity="reviewer system coder"))
+        s.commit()
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -85,10 +112,8 @@ def connect(path: str | Path) -> sqlite3.Connection:
     engine, both pointing at ``path``. Both layers' schemas are applied
     so a fresh DB is usable immediately.
 
-    We intentionally do NOT pass ``detect_types=sqlite3.PARSE_DECLTYPES``
-    to the sqlite3 connection: the raw-SQL layer compares timestamps as
-    ISO 8601 strings. SQLAlchemy handles datetime conversion natively on
-    its side, independently.
+    The sqlite3 connection is only needed by Stage-2 helpers in
+    ``db/theme.py``. Stage-1 callers should ignore the return value.
     """
     from thematic_analysis_inc.db.schema import create_schema
 
@@ -108,10 +133,10 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     """Connect + apply schema + ensure codebook v1 exists."""
     from thematic_analysis_inc.db.codebook import (
         insert_codebook_version,
-        latest_codebook_version,
+        latest_codebook,
     )
 
     conn = connect(path)
-    if latest_codebook_version(conn) is None:
-        insert_codebook_version(conn, parent=None, created_by="init")
+    if latest_codebook() is None:
+        insert_codebook_version(parent=None)
     return conn

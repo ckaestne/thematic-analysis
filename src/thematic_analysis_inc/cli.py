@@ -128,51 +128,45 @@ def _make_progress(label: str):
 
 
 def _cmd_init(args: SimpleNamespace) -> int:
-    conn = store.init_db(args.db)
-    latest = store.latest_codebook_version(conn)
+    store.init_db(args.db)
+    latest = store.latest_codebook()
     assert latest is not None
     print(f"initialized {args.db} (codebook v{latest.version}, 0 codes)")
     return 0
 
 
-def _resolve_coder_id(conn, ref: str) -> int | None:
-    """Resolve a coder reference (name or integer id) to an INTEGER coder_id."""
+def _parse_coder_id(ref: str) -> int | None:
+    """Parse an integer coder_id from a CLI argument."""
     try:
         cid = int(ref)
-        coder = store.get_coder(conn, cid)
-        return coder.coder_id if coder else None
     except (TypeError, ValueError):
-        pass
-    coder = store.get_coder_by_name(conn, ref)
+        return None
+    coder = store.get_coder(cid)
     return coder.coder_id if coder else None
 
 
 def _cmd_add_coder(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    existing = store.get_coder_by_name(conn, args.coder_id)
-    if existing is not None:
-        print(
-            f"coder '{args.coder_id}' already exists (id={existing.coder_id}); "
-            "not modified"
-        )
-        return 0
-    coder = store.add_coder(conn, name=args.coder_id, identity=args.identity)
+    store.connect(args.db)
+    coder = store.add_coder(args.identity)
     print(
-        f"added coder '{coder.name}' (id={coder.coder_id}, "
-        f"identity: {args.identity!r})"
+        f"added coder id={coder.coder_id} (identity: {args.identity!r})"
     )
     return 0
 
 
 def _cmd_rm_coder(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    cid = _resolve_coder_id(conn, args.coder_id)
+    store.connect(args.db)
+    cid = _parse_coder_id(args.coder_id)
     if cid is None:
-        print(f"no coder with name/id '{args.coder_id}'", file=sys.stderr)
+        print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
+        return 1
+    coder = store.get_coder(cid)
+    if coder is None:
+        print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
         return 1
     try:
         removed, runs_deleted = store.cascades.delete_coder_cascade(
-            conn, cid, force=args.force
+            coder, force=args.force
         )
     except RuntimeError as e:
         print(str(e), file=sys.stderr)
@@ -183,20 +177,20 @@ def _cmd_rm_coder(args: SimpleNamespace) -> int:
             f" (also dropped {runs_deleted} queue row(s))"
             if runs_deleted else ""
         )
-        print(f"removed coder '{args.coder_id}'{suffix}")
+        print(f"removed coder id={cid}{suffix}")
         return 0
     print(f"no coder with id '{args.coder_id}'", file=sys.stderr)
     return 1
 
 
 def _cmd_list_coders(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    coders = store.list_coders(conn)
+    store.connect(args.db)
+    coders = store.list_coders()
     if not coders:
         print("(no coders)")
         return 0
     for c in coders:
-        print(f"{c.coder_id}\t{c.name}\t{c.identity}")
+        print(f"{c.coder_id}\t{c.identity}")
     return 0
 
 
@@ -215,17 +209,17 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
             print(f"expected a file, got a directory: {p}", file=sys.stderr)
         return 1
 
-    conn = store.connect(args.db)
+    store.connect(args.db)
     total_files = total_inserted = total_skipped = total_errors = 0
     with _make_progress("[add-document]") as prog:
         task = prog.add_task("", total=len(paths))
         for path in paths:
-            existing_document_id = store.find_document_id_by_filename(conn, path.name)
-            if existing_document_id is not None:
+            existing_doc = store.find_document_by_filename(path.name)
+            if existing_doc is not None:
                 total_skipped += 1
                 print(
                     f"[add-document] {path.name}: already exists "
-                    f"(doc_id={existing_document_id}, skipped)"
+                    f"(doc_id={existing_doc.document_id}, skipped)"
                 )
                 prog.advance(task)
                 continue
@@ -277,14 +271,14 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 continue
 
             try:
-                document_id = store.add_document(
-                    conn, filename=path.name, content=path.read_bytes()
-                )
+                new_doc = store.add_document(path.name)
                 enqueue_rows = [
-                    (document_id, txt, None, None, i)
+                    (txt, 0, 0, i)
                     for i, (txt, _title) in enumerate(rows)
                 ]
-                result = store.enqueue_segments(conn, enqueue_rows)
+                inserted_segments = store.enqueue_segments(
+                    new_doc, enqueue_rows
+                )
             except Exception as e:  # noqa: BLE001
                 log.error(
                     "[add-document] %s: store failure (%s: %s)",
@@ -297,11 +291,11 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 continue
 
             total_files += 1
-            total_inserted += result.inserted_segments
+            total_inserted += len(inserted_segments)
             print(
-                f"[add-document] {path.name}: doc_id={document_id} "
+                f"[add-document] {path.name}: doc_id={new_doc.document_id} "
                 f"segments={len(rows)} "
-                f"inserted={result.inserted_segments}"
+                f"inserted={len(inserted_segments)}"
             )
             prog.advance(task)
     summary = (
@@ -404,27 +398,26 @@ def _resolve_workers(value: str | int) -> int:
 
 
 def _cmd_code(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    cid = _resolve_coder_id(conn, args.coder_id)
+    store.connect(args.db)
+    cid = _parse_coder_id(args.coder_id)
     if cid is None:
         print(f"unknown coder_id: {args.coder_id}", file=sys.stderr)
         return 1
+    coder = store.get_coder(cid)
 
     if args.recode:
-        from thematic_analysis_inc.db import cascades
-        n = cascades.reset_all_assignments(conn, cid)
+        n = store.coding.reset_all_assignments(coder)
         if n:
             print(f"[code] cleared {n} existing queue row(s) for recoding")
     elif args.retry_failed:
-        from thematic_analysis_inc.db import cascades
-        n = cascades.reset_failed_assignments(conn, cid)
+        n = store.coding.reset_failed_assignments(coder)
         if n:
             print(f"[code] cleared {n} failed queue row(s) for retry")
 
     n_workers = _resolve_workers(args.workers)
 
-    store.coding.sync_coding_queue(conn)
-    todo = store.coding.pending_count(conn, cid)
+    store.coding.sync_coding_queue()
+    todo = store.coding.pending_count(coder)
     print(
         f"[code] coder={args.coder_id} todo={todo} workers={n_workers}"
         + (f" limit={args.limit}" if args.limit else "")
@@ -464,7 +457,7 @@ def _cmd_code(args: SimpleNamespace) -> int:
                 ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
             )
             return await workers.drain_code_async(
-                conn,
+                None,
                 cid,
                 workers=n_workers,
                 limit=args.limit,
@@ -478,7 +471,7 @@ def _cmd_code(args: SimpleNamespace) -> int:
 
 
 def _cmd_aggregate(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
 
     if args.retry_failed:
         # In the new schema, failed aggregations don't leave persistent rows;
@@ -506,7 +499,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
             )
 
     counters = workers.drain_aggregate(
-        conn,
+        None,
         limit=args.limit,
         use_mock_embeddings=args.mock_embeddings,
         on_event=on_event,
@@ -519,7 +512,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
 
 
 def _cmd_review(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
 
     print(
         "[review] starting"
@@ -537,7 +530,7 @@ def _cmd_review(args: SimpleNamespace) -> int:
         )
 
     counters = workers.drain_review(
-        conn,
+        None,
         limit=args.limit,
         use_mock_embeddings=args.mock_embeddings,
         on_event=on_event,
@@ -557,21 +550,21 @@ def _cmd_update_codebook(args: SimpleNamespace) -> int:
 
 
 def _cmd_status(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    print(store.status_counts(conn).format())
+    store.connect(args.db)
+    print(store.status_counts().format())
     return 0
 
 
 def _cmd_export_codebook(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
     if args.version is None:
-        cv = store.latest_codebook_version(conn)
+        cv = store.latest_codebook()
     else:
-        cv = store.get_codebook_version(conn, args.version)
+        cv = store.get_codebook(args.version)
     if cv is None:
         print("no codebook version found", file=sys.stderr)
         return 1
-    snapshot_json = store.codebook_to_json_for_version(conn, cv.version)
+    snapshot_json = store.codebook_to_json_for_version(cv.version)
     if args.output == "-" or args.output is None:
         sys.stdout.write(snapshot_json)
         if not snapshot_json.endswith("\n"):
@@ -584,28 +577,28 @@ def _cmd_export_codebook(args: SimpleNamespace) -> int:
 
 
 def _cmd_list_codebooks(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
-    versions = store.list_codebook_versions(conn)
+    store.connect(args.db)
+    versions = store.list_codebooks()
     if not versions:
         print("(no codebook versions)")
         return 0
-    print(f"{'version':>7}  {'parent':>6}  {'codes':>5}  {'created_by':<20}  created_at")
+    print(f"{'version':>7}  {'parent':>6}  {'codes':>5}  created_at")
     for cv in versions:
-        n_codes = len(store.get_codebook_codes(conn, cv.version))
+        snap = json.loads(store.codebook_to_json_for_version(cv.version))
+        n_codes = len(snap.get("codes", []))
         parent = "-" if cv.parent_version is None else str(cv.parent_version)
         print(
-            f"{cv.version:>7}  {parent:>6}  {n_codes:>5}  "
-            f"{cv.created_by:<20}  {cv.created_at}"
+            f"{cv.version:>7}  {parent:>6}  {n_codes:>5}  {cv.created_at}"
         )
     return 0
 
 
 def _cmd_show_codebook(args: SimpleNamespace) -> int:
-    conn = store.connect(args.db)
+    store.connect(args.db)
     if args.version is None:
-        cv = store.latest_codebook_version(conn)
+        cv = store.latest_codebook()
     else:
-        cv = store.get_codebook_version(conn, args.version)
+        cv = store.get_codebook(args.version)
     if cv is None:
         msg = (
             f"no codebook version {args.version}"
@@ -614,13 +607,13 @@ def _cmd_show_codebook(args: SimpleNamespace) -> int:
         )
         print(msg, file=sys.stderr)
         return 1
-    snapshot_json = store.codebook_to_json_for_version(conn, cv.version)
+    snapshot_json = store.codebook_to_json_for_version(cv.version)
     data = json.loads(snapshot_json)
     codes = data.get("codes", [])
     parent = "-" if cv.parent_version is None else str(cv.parent_version)
     print(
         f"Codebook v{cv.version} (parent={parent}, "
-        f"created_by={cv.created_by}, created_at={cv.created_at})"
+        f"created_at={cv.created_at})"
     )
     print(f"{len(codes)} code(s)")
     print()
@@ -738,7 +731,7 @@ def _cmd_list_theme_coders(args: SimpleNamespace) -> int:
 def _resolve_codebook_version(conn, version_arg: int | None) -> int | None:
     if version_arg is not None:
         return version_arg
-    cv = store.latest_codebook_version(conn)
+    cv = store.latest_codebook()
     if cv is None:
         print(
             "no codebook version found; run 'ta --db ... init' first",
@@ -1073,13 +1066,12 @@ def _cli_add_document(
 )
 def _cli_add_coder(
     ctx: typer.Context,
-    coder_id: str,
     identity: Annotated[
         str,
         typer.Argument(help="free-text identity/persona shown to the coder agent"),
     ],
 ) -> None:
-    _run(ctx, _cmd_add_coder, coder_id=coder_id, identity=identity)
+    _run(ctx, _cmd_add_coder, identity=identity)
 
 
 @app.command(

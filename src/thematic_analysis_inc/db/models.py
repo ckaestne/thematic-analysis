@@ -181,7 +181,7 @@ class Codebook(SQLModel, table=True):
 class Coder(SQLModel, table=True):
     """An agent (or human) that produces codes.
 
-    Two reserved system rows are seeded by the schema:
+    Two reserved system rows are seeded on table creation:
 
     - `coder_id = 0` — aggregator
     - `coder_id = -1` — reviewer
@@ -215,7 +215,8 @@ class Code(SQLModel, table=True):
     codebook_used_id: int = Field(
         foreign_key="codebook.version", index=True
     )
-    research_context_used_id: int = Field(
+    research_context_used_id: Optional[int] = Field(
+        default=None,
         foreign_key="research_context.research_context_version",
     )
     code: str
@@ -290,7 +291,8 @@ class CodingQueueEntry(SQLModel, table=True):
         foreign_key="coder.coder_id", primary_key=True, index=True
     )
     codebook_used_id: int = Field(foreign_key="codebook.version")
-    research_context_used_id: int = Field(
+    research_context_used_id: Optional[int] = Field(
+        default=None,
         foreign_key="research_context.research_context_version",
     )
     claimed_at: Optional[datetime] = None

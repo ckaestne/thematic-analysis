@@ -21,21 +21,22 @@ from thematic_analysis_inc import db as store
 from thematic_analysis_inc.db.schema import create_schema
 
 
-def _add_segments(conn, doc_id: int, n: int) -> list[int]:
-    rows = [(doc_id, f"text {i}", None, None, i) for i in range(n)]
-    store.enqueue_segments(conn, rows)
-    return [
-        int(r["segment_id"])
-        for r in conn.execute(
-            "SELECT segment_id FROM segments WHERE document_id = ? "
-            "ORDER BY position",
-            (doc_id,),
-        ).fetchall()
-    ]
+def _add_segments(conn, doc, n: int):
+    """``doc`` may be a Document object or a document_id."""
+    if isinstance(doc, int):
+        # legacy: look it up
+        from thematic_analysis_inc.db.connection import session
+        from thematic_analysis_inc.db.models import Document
+        with session() as s:
+            doc = s.get(Document, doc)
+            s.expunge(doc)
+    rows = [(f"text {i}", 0, 0, i) for i in range(n)]
+    segs = store.enqueue_segments(doc, rows)
+    return [s.segment_id for s in segs]
 
 
-def _seed_document(conn) -> int:
-    return store.add_document(conn, "doc.md", b"content")
+def _seed_document(conn):
+    return store.add_document("doc.md")
 
 
 # ---------------------------------------------------------------------------
@@ -46,31 +47,31 @@ def _seed_document(conn) -> int:
 def test_init_creates_schema_and_v1(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
     conn = store.init_db(db)
-    latest = store.latest_codebook_version(conn)
+    latest = store.latest_codebook()
     assert latest is not None
     assert latest.version == 1
     assert latest.parent_version is None
     # Empty codebook serialises to {"codes": []}
-    snap = json.loads(store.codebook_to_json_for_version(conn, 1))
+    snap = json.loads(store.codebook_to_json_for_version(1))
     assert snap == {"codes": []}
 
 
 def test_init_seeds_system_coders(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    agg = store.get_coder(conn, 0)
-    rev = store.get_coder(conn, -1)
-    assert agg is not None and agg.name == "aggregator"
-    assert rev is not None and rev.name == "reviewer"
+    store.init_db(db)
+    agg = store.get_coder(0)
+    rev = store.get_coder(-1)
+    assert agg is not None and "aggregator" in agg.identity
+    assert rev is not None and "reviewer" in rev.identity
     # list_coders only returns real coders.
-    assert store.list_coders(conn) == []
+    assert store.list_coders() == []
 
 
 def test_init_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
     store.init_db(db).close()
     conn = store.init_db(db)
-    latest = store.latest_codebook_version(conn)
+    latest = store.latest_codebook()
     assert latest is not None
     assert latest.version == 1
 
@@ -83,10 +84,11 @@ def test_create_schema_idempotent(tmp_path: Path) -> None:
 
 def test_insert_codebook_version_appends(tmp_path: Path) -> None:
     db = tmp_path / "x.sqlite"
-    conn = store.init_db(db)
-    v2 = store.insert_codebook_version(conn, parent=1, created_by="reviewer")
-    assert v2 == 2
-    latest = store.latest_codebook_version(conn)
+    store.init_db(db)
+    parent = store.latest_codebook()
+    cb2 = store.insert_codebook_version(parent=parent)
+    assert cb2.version == 2
+    latest = store.latest_codebook()
     assert latest is not None
     assert latest.version == 2
     assert latest.parent_version == 1
@@ -99,22 +101,22 @@ def test_insert_codebook_version_appends(tmp_path: Path) -> None:
 
 def test_add_coder_assigns_increasing_ids(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    c1 = store.add_coder(conn, name="alice", identity="feminist scholar")
-    c2 = store.add_coder(conn, name="bob", identity="marxist")
+    c1 = store.add_coder("feminist scholar")
+    c2 = store.add_coder("marxist")
     assert c1.coder_id == 1 and c2.coder_id == 2
-    assert [c.coder_id for c in store.list_coders(conn)] == [1, 2]
+    assert [c.coder_id for c in store.list_coders()] == [1, 2]
 
 
 def test_remove_coder_refuses_when_queue_rows_exist(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    c = store.add_coder(conn, name="alice", identity="x")
+    c = store.add_coder("x")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
-    store.coding.sync_coding_queue(conn)
+    store.coding.sync_coding_queue()
     with pytest.raises(RuntimeError):
-        store.cascades.delete_coder_cascade(conn, c.coder_id)
+        store.cascades.delete_coder_cascade(c)
     removed, queue_deleted = store.cascades.delete_coder_cascade(
-        conn, c.coder_id, force=True
+        c, force=True
     )
     assert removed is True and queue_deleted == 1
     n_queue = conn.execute(
@@ -135,26 +137,21 @@ def test_enqueue_inserts_segments_only(tmp_path: Path) -> None:
 
 def test_add_document_and_link_segments(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    doc_id = store.add_document(conn, "post.md", b"# hello\n\nworld\n")
-    assert doc_id >= 1
-    sids = _add_segments(conn, doc_id, 2)
+    doc = store.add_document("post.md")
+    assert doc.document_id >= 1
+    sids = _add_segments(conn, doc, 2)
     assert len(sids) == 2
-
-    doc = conn.execute(
-        "SELECT filename, content FROM documents WHERE document_id = ?",
-        (doc_id,),
-    ).fetchone()
-    assert doc["filename"] == "post.md"
-    assert bytes(doc["content"]) == b"# hello\n\nworld\n"
+    found = store.find_document_by_filename("post.md")
+    assert found is not None and found.filename == "post.md"
 
 
 def test_sync_coding_queue_pairs_segments_and_coders(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    store.add_coder(conn, name="alice", identity="i")
-    store.add_coder(conn, name="bob", identity="i")
+    store.add_coder("i")
+    store.add_coder("i")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 3)
-    n = store.coding.sync_coding_queue(conn)
+    n = store.coding.sync_coding_queue()
     assert n == 6  # 3 segments x 2 real coders
 
 
@@ -203,7 +200,7 @@ def _stub_factory(raise_on: str | None = None):
 
 def test_code_one_persists_codes(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    c = store.add_coder(conn, name="alice", identity="id1")
+    c = store.add_coder("id1")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
 
@@ -224,7 +221,7 @@ def test_code_one_persists_codes(tmp_path: Path) -> None:
     assert row is not None and row["error"] is None
 
     codes = conn.execute(
-        "SELECT code, rationale FROM codes WHERE coder_id = ? ORDER BY code_id",
+        "SELECT code, rationale FROM code WHERE coder_id = ? ORDER BY code_id",
         (c.coder_id,),
     ).fetchall()
     assert {row["code"] for row in codes} >= {"shared"}
@@ -232,7 +229,7 @@ def test_code_one_persists_codes(tmp_path: Path) -> None:
 
 def test_code_one_returns_none_when_done(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    c = store.add_coder(conn, name="alice", identity="id1")
+    c = store.add_coder("id1")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
     workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
@@ -242,7 +239,7 @@ def test_code_one_returns_none_when_done(tmp_path: Path) -> None:
 
 def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    c = store.add_coder(conn, name="alice", identity="id1")
+    c = store.add_coder("id1")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, 1)
     res = workers.code_one(
@@ -257,7 +254,7 @@ def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
     assert row is not None and "boom" in row["error"]
 
     # Reset failed → retry.
-    cleared = store.cascades.reset_failed_assignments(conn, c.coder_id)
+    cleared = store.coding.reset_failed_assignments(store.get_coder(c.coder_id))
     assert cleared == 1
     res2 = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
     assert res2 is not None and res2["ok"]
@@ -265,8 +262,8 @@ def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
 
 def test_code_one_two_coders_independent(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    a = store.add_coder(conn, name="alice", identity="id1")
-    b = store.add_coder(conn, name="bob", identity="id2")
+    a = store.add_coder("id1")
+    b = store.add_coder("id2")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
     while workers.code_one(conn, a.coder_id, agent_factory=_stub_factory()) is not None:
@@ -298,21 +295,21 @@ def test_cli_init_status(tmp_path: Path, capsys) -> None:
 def test_cli_add_and_list_coders(tmp_path: Path, capsys) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "alice", "feminist"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "bob", "marxist"]) == 0
+    assert cli.main(["--db", str(db), "add-coder", "feminist"]) == 0
+    assert cli.main(["--db", str(db), "add-coder", "marxist"]) == 0
     capsys.readouterr()
     assert cli.main(["--db", str(db), "list-coders"]) == 0
     out = capsys.readouterr().out
-    assert "alice" in out and "feminist" in out
-    assert "bob" in out and "marxist" in out
+    assert "feminist" in out
+    assert "marxist" in out
 
 
 def test_cli_rm_coder(tmp_path: Path, capsys) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "alice", "x"]) == 0
-    assert cli.main(["--db", str(db), "rm-coder", "alice"]) == 0
-    assert cli.main(["--db", str(db), "rm-coder", "ghost"]) == 1
+    assert cli.main(["--db", str(db), "add-coder", "x"]) == 0
+    assert cli.main(["--db", str(db), "rm-coder", "1"]) == 0
+    assert cli.main(["--db", str(db), "rm-coder", "999"]) == 1
 
 
 def test_cli_add_document_markdown(tmp_path: Path, capsys) -> None:
@@ -357,7 +354,7 @@ def test_cli_add_document_skips_existing_filename(tmp_path: Path, capsys) -> Non
     assert "already exists" in out
 
     conn = store.connect(db)
-    n_docs = conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+    n_docs = conn.execute("SELECT COUNT(*) AS n FROM document").fetchone()["n"]
     assert n_docs == 1
 
 
@@ -373,7 +370,7 @@ def test_cli_add_document_missing_file(tmp_path: Path) -> None:
 def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "c1", "voice"]) == 0
+    assert cli.main(["--db", str(db), "add-coder", "voice"]) == 0
     conn = store.connect(db)
     doc = _seed_document(conn)
     _add_segments(conn, doc, 3)
@@ -383,7 +380,7 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
 
     capsys.readouterr()
     rc = cli.main(
-        ["--db", str(db), "code", "c1", "--mock-embeddings"]
+        ["--db", str(db), "code", "1", "--mock-embeddings"]
     )
     assert rc == 0
     out = capsys.readouterr().out

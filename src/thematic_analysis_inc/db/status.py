@@ -6,6 +6,21 @@ import json
 import sqlite3
 from dataclasses import dataclass
 
+from sqlalchemy import func
+from sqlmodel import select
+
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    Code,
+    Codebook,
+    CodebookCode,
+    Coder,
+    CodesDerived,
+    CodingQueueEntry,
+    Segment,
+    DERIVATION_REVIEW,
+)
+
 
 @dataclass
 class StatusCounts:
@@ -43,124 +58,144 @@ class StatusCounts:
         return "\n".join(lines)
 
 
-def coding_queue_by_status(conn: sqlite3.Connection) -> dict[str, int]:
-    rows = conn.execute(
-        "SELECT CASE "
-        "  WHEN error IS NOT NULL THEN 'failed' "
-        "  WHEN finished_at IS NOT NULL THEN 'done' "
-        "  WHEN claimed_at IS NOT NULL THEN 'running' "
-        "  ELSE 'pending' END AS status, COUNT(*) AS n "
-        "FROM coding_queue GROUP BY status"
-    ).fetchall()
-    return {r["status"]: r["n"] for r in rows}
+def derive_segment_status(segment: Segment | int) -> str:
+    seg_id = segment if isinstance(segment, int) else segment.segment_id
+    with session() as s:
+        qrows = list(
+            s.exec(
+                select(CodingQueueEntry).where(
+                    CodingQueueEntry.segment_id == seg_id
+                )
+            ).all()
+        )
+        if not qrows:
+            return "pending"
+        if any(r.error is not None for r in qrows):
+            return "failed"
+        if any(
+            r.finished_at is None and r.claimed_at is not None for r in qrows
+        ):
+            return "coding"
+        if any(r.claimed_at is None for r in qrows):
+            return "pending"
+        has_agg = s.exec(
+            select(Code.code_id).where(
+                Code.segment_id == seg_id, Code.coder_id == 0
+            ).limit(1)
+        ).first()
+        if has_agg is None:
+            return "aggregating"
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        remaining = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(
+                    Code.segment_id == seg_id,
+                    Code.coder_id == 0,
+                    ~outgoing_r,
+                )
+            ).one()
+        )
+    return "reviewing" if remaining > 0 else "done"
 
 
-def segments_by_derived_status(
-    conn: sqlite3.Connection,
-) -> dict[str, int]:
-    """Per-segment derived status; reduces all coding_queue rows + codes."""
-    rows = conn.execute("SELECT segment_id FROM segments").fetchall()
+def segments_by_derived_status() -> dict[str, int]:
     out: dict[str, int] = {}
-    for r in rows:
-        s = derive_segment_status(conn, int(r["segment_id"]))
-        out[s] = out.get(s, 0) + 1
+    with session() as s:
+        ids = list(s.exec(select(Segment.segment_id)).all())  # type: ignore[arg-type]
+    for sid in ids:
+        st = derive_segment_status(sid)
+        out[st] = out.get(st, 0) + 1
     return out
 
 
-def derive_segment_status(
-    conn: sqlite3.Connection, segment_id: int
-) -> str:
-    qrows = conn.execute(
-        "SELECT claimed_at, finished_at, error FROM coding_queue "
-        "WHERE segment_id = ?",
-        (segment_id,),
-    ).fetchall()
-    if not qrows:
-        return "pending"
-    if any(r["error"] is not None for r in qrows):
-        return "failed"
-    if any(
-        r["finished_at"] is None and r["claimed_at"] is not None
-        for r in qrows
-    ):
-        return "coding"
-    if any(r["claimed_at"] is None for r in qrows):
-        return "pending"
-    # all queue rows done.
-    has_agg = conn.execute(
-        "SELECT 1 FROM codes WHERE segment_id = ? AND coder_id = 0 LIMIT 1",
-        (segment_id,),
-    ).fetchone()
-    if has_agg is None:
-        return "aggregating"
-    remaining = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes c "
-        "WHERE c.segment_id = ? AND c.coder_id = 0 "
-        "  AND NOT EXISTS ("
-        "    SELECT 1 FROM codes_derived d "
-        "    WHERE d.source_code_id = c.code_id AND d.derivation_type = 'R'"
-        "  )",
-        (segment_id,),
-    ).fetchone()["n"]
-    if remaining > 0:
-        return "reviewing"
-    return "done"
+def _coding_queue_by_status() -> dict[str, int]:
+    out: dict[str, int] = {}
+    with session() as s:
+        rows = list(s.exec(select(CodingQueueEntry)).all())
+    for r in rows:
+        out[r.status] = out.get(r.status, 0) + 1
+    return out
 
 
-def status_counts(conn: sqlite3.Connection) -> StatusCounts:
-    seg_total = conn.execute(
-        "SELECT COUNT(*) AS n FROM segments"
-    ).fetchone()["n"]
-    seg_by = segments_by_derived_status(conn)
+def status_counts() -> StatusCounts:
+    with session() as s:
+        seg_total = int(
+            s.exec(select(func.count()).select_from(Segment)).one()
+        )
+        coders_total = int(
+            s.exec(
+                select(func.count())
+                .select_from(Coder)
+                .where(Coder.coder_id >= 1)
+            ).one()
+        )
+        agg_codes_total = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(Code.coder_id == 0)
+            ).one()
+        )
+        agg_segs_total = int(
+            s.exec(
+                select(func.count(func.distinct(Code.segment_id))).where(
+                    Code.coder_id == 0
+                )
+            ).one()
+        )
+        rev_total = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(Code.coder_id == -1)
+            ).one()
+        )
+        rev_rows = list(
+            s.exec(
+                select(CodesDerived.decision, func.count())
+                .where(CodesDerived.derivation_type == DERIVATION_REVIEW)
+                .group_by(CodesDerived.decision)
+            ).all()
+        )
+        rev_by = {r[0]: int(r[1]) for r in rev_rows}
+        cb_row = s.exec(
+            select(Codebook).order_by(Codebook.version.desc()).limit(1)  # type: ignore[union-attr]
+        ).first()
+        cb_version = 0 if cb_row is None else int(cb_row.version)
+        cb_codes = int(
+            s.exec(
+                select(func.count())
+                .select_from(CodebookCode)
+                .where(CodebookCode.codebook_version == cb_version)
+            ).one()
+        )
 
-    coders_total = conn.execute(
-        "SELECT COUNT(*) AS n FROM coders WHERE coder_id >= 1"
-    ).fetchone()["n"]
-
-    cq_by = coding_queue_by_status(conn)
-    cq_total = sum(cq_by.values())
-
-    agg_codes_total = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes WHERE coder_id = 0"
-    ).fetchone()["n"]
-    agg_segs_total = conn.execute(
-        "SELECT COUNT(DISTINCT segment_id) AS n FROM codes WHERE coder_id = 0"
-    ).fetchone()["n"]
-
-    rev_total = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes WHERE coder_id = -1"
-    ).fetchone()["n"]
-    rev_rows = conn.execute(
-        "SELECT decision, COUNT(*) AS n FROM codes_derived "
-        "WHERE derivation_type = 'R' GROUP BY decision"
-    ).fetchall()
-    rev_by = {r["decision"]: r["n"] for r in rev_rows}
-
-    cb_row = conn.execute(
-        "SELECT version FROM codebook_versions ORDER BY version DESC LIMIT 1"
-    ).fetchone()
-    cb_version = 0 if cb_row is None else int(cb_row["version"])
-    cb_codes = conn.execute(
-        "SELECT COUNT(*) AS n FROM codebook WHERE version = ?",
-        (cb_version,),
-    ).fetchone()["n"]
-
+    cq_by = _coding_queue_by_status()
     return StatusCounts(
-        segments_total=int(seg_total),
-        segments_by_status=seg_by,
-        coders_total=int(coders_total),
-        coding_queue_total=int(cq_total),
+        segments_total=seg_total,
+        segments_by_status=segments_by_derived_status(),
+        coders_total=coders_total,
+        coding_queue_total=sum(cq_by.values()),
         coding_queue_by_status=cq_by,
-        aggregator_codes_total=int(agg_codes_total),
-        aggregator_segments_total=int(agg_segs_total),
-        reviewer_codes_total=int(rev_total),
+        aggregator_codes_total=agg_codes_total,
+        aggregator_segments_total=agg_segs_total,
+        reviewer_codes_total=rev_total,
         review_decisions_by_kind=rev_by,
         codebook_version=cb_version,
-        codebook_codes=int(cb_codes),
+        codebook_codes=cb_codes,
     )
 
 
-# Stage 2 status (unchanged; reuses old theme_* tables) -----------------------
+# Stage 2 status (unchanged; still raw-SQL because theme_* tables are raw) ----
 
 
 @dataclass

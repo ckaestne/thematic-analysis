@@ -12,21 +12,29 @@ from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
 
 
-def _seed_document(conn) -> int:
-    return store.add_document(conn, "doc.md", b"content")
+def _get_codebook_codes(version: int):
+    """Adapter for the legacy CodebookEntry-style accessor used by tests."""
+    import json
+    snap = json.loads(store.codebook_to_json_for_version(version))
+    class _E:
+        def __init__(self, d): self.code = d["code"]
+    return [_E(c) for c in snap.get("codes", [])]
 
 
-def _add_segments(conn, doc_id: int, n: int) -> list[int]:
-    rows = [(doc_id, f"text {i}", None, None, i) for i in range(n)]
-    store.enqueue_segments(conn, rows)
-    return [
-        int(r["segment_id"])
-        for r in conn.execute(
-            "SELECT segment_id FROM segments WHERE document_id = ? "
-            "ORDER BY position",
-            (doc_id,),
-        ).fetchall()
-    ]
+def _seed_document(conn):
+    return store.add_document("doc.md")
+
+
+def _add_segments(conn, doc, n: int) -> list[int]:
+    if isinstance(doc, int):
+        from thematic_analysis_inc.db.connection import session
+        from thematic_analysis_inc.db.models import Document
+        with session() as s:
+            doc = s.get(Document, doc)
+            s.expunge(doc)
+    rows = [(f"text {i}", 0, 0, i) for i in range(n)]
+    segs = store.enqueue_segments(doc, rows)
+    return [s.segment_id for s in segs]
 
 
 @dataclass
@@ -81,10 +89,10 @@ class _StubAggregator:
 
 
 def _seed_ready_to_review(conn, n: int = 1) -> list[int]:
-    store.add_coder(conn, name="alice", identity="i")
+    store.add_coder("i")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, n)
-    for c in store.list_coders(conn):
+    for c in store.list_coders():
         while workers.code_one(
             conn, c.coder_id, use_mock_embeddings=True,
             agent_factory=lambda cb, x: _StubCoder(cb, x),
@@ -136,7 +144,7 @@ def _make_reviewer_factory(decision: ReviewDecision, target_code: str | None = N
 def test_review_one_add_new_creates_version(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=1)
-    v_before = store.latest_codebook_version(conn).version
+    v_before = store.latest_codebook().version
 
     res = workers.review_one(
         conn, use_mock_embeddings=True,
@@ -147,10 +155,10 @@ def test_review_one_add_new_creates_version(tmp_path: Path) -> None:
     assert res["new_version"] is not None
     assert res["new_version"] > v_before
 
-    cv = store.latest_codebook_version(conn)
+    cv = store.latest_codebook()
     assert cv.version == res["new_version"]
     codes_in_new = {
-        e.code for e in store.get_codebook_codes(conn, cv.version)
+        e.code for e in _get_codebook_codes(cv.version)
     }
     assert res["code"] in codes_in_new
 
@@ -166,7 +174,7 @@ def test_review_one_add_new_creates_version(tmp_path: Path) -> None:
 def test_review_one_skip_leaves_no_trace(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=1)
-    v_before = store.latest_codebook_version(conn).version
+    v_before = store.latest_codebook().version
 
     res = workers.review_one(
         conn, use_mock_embeddings=True,
@@ -177,7 +185,7 @@ def test_review_one_skip_leaves_no_trace(tmp_path: Path) -> None:
     assert res["new_version"] is None
 
     # Codebook version unchanged.
-    assert store.latest_codebook_version(conn).version == v_before
+    assert store.latest_codebook().version == v_before
 
     # No codes_derived row for this aggregator code.
     n = conn.execute(
@@ -206,9 +214,9 @@ def test_review_one_merge_keeps_target(tmp_path: Path) -> None:
     )
     assert res is not None and res["ok"]
     assert res["decision"] == "merge"
-    cv = store.latest_codebook_version(conn)
+    cv = store.latest_codebook()
     codes_in_new = {
-        e.code for e in store.get_codebook_codes(conn, cv.version)
+        e.code for e in _get_codebook_codes(cv.version)
     }
     assert "alpha" in codes_in_new
 
@@ -230,9 +238,9 @@ def test_review_one_update_replaces_target(tmp_path: Path) -> None:
         ),
     )
     assert res is not None and res["ok"]
-    cv = store.latest_codebook_version(conn)
+    cv = store.latest_codebook()
     codes_in_new = {
-        e.code for e in store.get_codebook_codes(conn, cv.version)
+        e.code for e in _get_codebook_codes(cv.version)
     }
     # 'alpha' should be gone, 'beta' (the reviewer's new code text) present.
     assert "alpha" not in codes_in_new
@@ -249,10 +257,10 @@ def test_review_one_segment_done_after_all_reviewed_non_skip(
     factory = _make_reviewer_factory(ReviewDecision.ADD_NEW)
 
     workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
-    s1 = store.status.derive_segment_status(conn, sids[0])
+    s1 = store.status.derive_segment_status(sids[0])
     assert s1 == "reviewing"
     workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
-    s2 = store.status.derive_segment_status(conn, sids[0])
+    s2 = store.status.derive_segment_status(sids[0])
     assert s2 == "done"
 
 
@@ -266,7 +274,7 @@ def test_review_one_skip_leaves_segment_reviewing(tmp_path: Path) -> None:
 
     workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
     workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
-    assert store.status.derive_segment_status(conn, sids[0]) == "reviewing"
+    assert store.status.derive_segment_status(sids[0]) == "reviewing"
 
 
 def test_review_one_returns_none_when_idle(tmp_path: Path) -> None:
@@ -285,6 +293,6 @@ def test_drain_review_processes_all_codes(tmp_path: Path) -> None:
     assert counters == {"done": 4, "failed": 0}
 
     n_rev_codes = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes WHERE coder_id = -1"
+        "SELECT COUNT(*) AS n FROM code WHERE coder_id = -1"
     ).fetchone()["n"]
     assert n_rev_codes == 4

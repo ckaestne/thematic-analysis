@@ -1,294 +1,326 @@
-"""Coding queue + Stage-A coder codes."""
+"""Coding queue + Stage-A coder code authoring."""
 
 from __future__ import annotations
 
-import sqlite3
-from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from thematic_analysis_inc.db.connection import now
+from sqlalchemy import func
+from sqlmodel import select
+
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    Code,
+    Codebook,
+    Coder,
+    CodingQueueEntry,
+    Segment,
+)
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
 )
 
 
-@dataclass
-class CodingAssignment:
-    segment_id: int
-    coder_id: int
-    codebook_version: int
-    research_context_version: int | None
-    content: str
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
-@dataclass
-class CoderCode:
-    code_id: int
-    segment_id: int
-    coder_id: int
-    code: str
-    description: str
-    rationale: str
+def sync_coding_queue() -> int:
+    """Insert a ``CodingQueueEntry`` for every (Segment, real-Coder) pair at
+    the latest Codebook revision. Returns rows inserted."""
+    with session() as s:
+        cb = s.exec(
+            select(Codebook).order_by(Codebook.version.desc()).limit(1)  # type: ignore[union-attr]
+        ).first()
+        if cb is None:
+            return 0
+        rc_version = latest_research_context_version()
+        # Existing pairs.
+        existing = {
+            (q.segment_id, q.coder_id)
+            for q in s.exec(select(CodingQueueEntry)).all()
+        }
+        seg_ids = list(
+            s.exec(select(Segment.segment_id)).all()  # type: ignore[arg-type]
+        )
+        coder_ids = list(
+            s.exec(
+                select(Coder.coder_id).where(Coder.coder_id >= 1)  # type: ignore[arg-type]
+            ).all()
+        )
+        inserted = 0
+        for sid in seg_ids:
+            for cid in coder_ids:
+                if (sid, cid) in existing:
+                    continue
+                s.add(
+                    CodingQueueEntry(
+                        segment_id=sid,
+                        coder_id=cid,
+                        codebook_used_id=cb.version,
+                        research_context_used_id=rc_version,
+                    )
+                )
+                inserted += 1
+        if inserted:
+            s.commit()
+        return inserted
 
 
-@dataclass
-class CoderCodes:
-    coder_id: int
-    codes: list[CoderCode]
+def pending_count(coder: Coder) -> int:
+    with session() as s:
+        return int(
+            s.exec(
+                select(func.count())
+                .select_from(CodingQueueEntry)
+                .where(
+                    CodingQueueEntry.coder_id == coder.coder_id,
+                    CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
+                    CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+                    CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
+                )
+            ).one()
+        )
 
 
-def sync_coding_queue(conn: sqlite3.Connection) -> int:
-    """Ensure a `coding_queue` row exists for every (segment, real-coder) at
-    the latest codebook version. New rows also capture the latest
-    research-context version (if any) at the moment the row is created.
-    Returns rows inserted."""
-    row = conn.execute(
-        "SELECT MAX(version) AS v FROM codebook_versions"
-    ).fetchone()
-    if row is None or row["v"] is None:
-        return 0
-    version = int(row["v"])
-    rc_version = latest_research_context_version()
-    cur = conn.execute(
-        "INSERT OR IGNORE INTO coding_queue "
-        "(segment_id, coder_id, codebook_version, research_context_version) "
-        "SELECT s.segment_id, c.coder_id, ?, ? "
-        "FROM segments s CROSS JOIN coders c "
-        "WHERE c.coder_id >= 1",
-        (version, rc_version),
-    )
-    return cur.rowcount or 0
-
-
-def pending_count(conn: sqlite3.Connection, coder_id: int) -> int:
-    """Count pending rows for a coder (claimed_at IS NULL)."""
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM coding_queue "
-        "WHERE coder_id = ? AND claimed_at IS NULL AND finished_at IS NULL "
-        "AND error IS NULL",
-        (coder_id,),
-    ).fetchone()
-    return int(row["n"])
-
-
-def claim_next_coding_assignment(
-    conn: sqlite3.Connection, coder_id: int
-) -> CodingAssignment | None:
-    """Atomically claim the next pending row for `coder_id`. Returns None if
-    nothing is pending."""
+def claim_next_assignment(coder: Coder) -> CodingQueueEntry | None:
+    """Atomically claim the next pending row for ``coder``."""
     while True:
-        row = conn.execute(
-            "SELECT segment_id, codebook_version, research_context_version "
-            "FROM coding_queue "
-            "WHERE coder_id = ? AND claimed_at IS NULL "
-            "  AND finished_at IS NULL AND error IS NULL "
-            "ORDER BY segment_id LIMIT 1",
-            (coder_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        seg_id = int(row["segment_id"])
-        version = int(row["codebook_version"])
-        rc_version = (
-            int(row["research_context_version"])
-            if row["research_context_version"] is not None
-            else None
-        )
-        # Conditional UPDATE for atomic claim.
-        cur = conn.execute(
-            "UPDATE coding_queue SET claimed_at = ? "
-            "WHERE segment_id = ? AND coder_id = ? AND claimed_at IS NULL",
-            (now(), seg_id, coder_id),
-        )
-        if cur.rowcount == 0:
-            # Race: someone else grabbed it; try the next.
-            continue
-        seg = conn.execute(
-            "SELECT content FROM segments WHERE segment_id = ?",
-            (seg_id,),
-        ).fetchone()
-        if seg is None:
-            # Segment vanished; skip.
-            continue
-        return CodingAssignment(
-            segment_id=seg_id,
-            coder_id=coder_id,
-            codebook_version=version,
-            research_context_version=rc_version,
-            content=seg["content"],
-        )
+        with session() as s:
+            row = s.exec(
+                select(CodingQueueEntry)
+                .where(
+                    CodingQueueEntry.coder_id == coder.coder_id,
+                    CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
+                    CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+                    CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
+                )
+                .order_by(CodingQueueEntry.segment_id)
+                .limit(1)
+            ).first()
+            if row is None:
+                return None
+            # Conditional UPDATE for atomic claim — re-fetch and check.
+            now_ts = _utcnow()
+            row.claimed_at = now_ts
+            s.add(row)
+            try:
+                s.commit()
+            except Exception:
+                s.rollback()
+                continue
+            s.refresh(row)
+            # Load segment eagerly so caller can use row.segment.
+            _ = row.segment.content  # noqa: B018
+            s.expunge_all()
+            return row
 
 
 def record_coding_result(
-    conn: sqlite3.Connection,
-    *,
-    segment_id: int,
-    coder_id: int,
-    version: int,
-    codes: list[str],
-    rationales: list[str],
-    research_context_version: int | None = None,
-) -> list[int]:
-    """Insert codes for a finished coding assignment and mark queue done.
-
-    The Python kwarg ``version`` writes to the renamed ``codebook_version``
-    column; callers don't need to change. ``research_context_version`` is
-    optional; if ``None``, falls back to the latest known RC version at the
-    time of writing.
-    """
-    if research_context_version is None:
-        research_context_version = latest_research_context_version()
-    new_ids: list[int] = []
-    with conn:
-        for i, code in enumerate(codes):
-            rat = rationales[i] if i < len(rationales) else ""
-            cur = conn.execute(
-                "INSERT INTO codes "
-                "(segment_id, coder_id, codebook_version, "
-                " research_context_version, code, description, rationale) "
-                "VALUES (?, ?, ?, ?, ?, '', ?)",
-                (
-                    segment_id,
-                    coder_id,
-                    version,
-                    research_context_version,
-                    code,
-                    rat,
-                ),
-            )
-            new_ids.append(int(cur.lastrowid))
-        conn.execute(
-            "UPDATE coding_queue SET finished_at = ? "
-            "WHERE segment_id = ? AND coder_id = ?",
-            (now(), segment_id, coder_id),
+    assignment: CodingQueueEntry, codes: list[tuple[str, str]]
+) -> list[Code]:
+    """For each ``(code_text, rationale)`` insert a Code row attributed to
+    ``assignment.coder_id``. Marks the queue entry done. Returns the
+    persisted Codes."""
+    with session() as s:
+        a = s.get(
+            CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
         )
-    return new_ids
+        if a is None:
+            raise RuntimeError(
+                f"assignment ({assignment.segment_id}, "
+                f"{assignment.coder_id}) not found"
+            )
+        out: list[Code] = []
+        for code_text, rationale in codes:
+            c = Code(
+                segment_id=a.segment_id,
+                coder_id=a.coder_id,
+                codebook_used_id=a.codebook_used_id,
+                research_context_used_id=a.research_context_used_id,
+                code=code_text,
+                description="",
+                rationale=rationale,
+            )
+            s.add(c)
+            out.append(c)
+        a.finished_at = _utcnow()
+        s.add(a)
+        s.commit()
+        for c in out:
+            s.refresh(c)
+            s.expunge(c)
+        return out
 
 
 def record_coding_failure(
-    conn: sqlite3.Connection,
-    *,
-    segment_id: int,
-    coder_id: int,
-    error: str,
+    assignment: CodingQueueEntry, error: str
 ) -> None:
-    conn.execute(
-        "UPDATE coding_queue SET error = ?, finished_at = ? "
-        "WHERE segment_id = ? AND coder_id = ?",
-        (error, now(), segment_id, coder_id),
+    with session() as s:
+        a = s.get(
+            CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
+        )
+        if a is None:
+            return
+        a.error = error
+        a.finished_at = _utcnow()
+        s.add(a)
+        s.commit()
+
+
+def reset_assignment(
+    assignment: CodingQueueEntry, *, force: bool = False
+) -> None:
+    """Drop this coder's codes for the segment and clear the queue
+    entry's claim/finish/error. ``force`` is accepted for symmetry with
+    other cascades but has no extra effect here."""
+    from thematic_analysis_inc.db.cascades import (
+        _delete_codes_and_dependents,
     )
 
-
-def load_segment_coder_codes(
-    conn: sqlite3.Connection, segment_id: int
-) -> list[CoderCodes]:
-    """Load Stage-A codes for the segment, grouped by coder."""
-    rows = conn.execute(
-        "SELECT code_id, segment_id, coder_id, code, description, rationale "
-        "FROM codes WHERE segment_id = ? AND coder_id >= 1 "
-        "ORDER BY coder_id, code_id",
-        (segment_id,),
-    ).fetchall()
-    out: dict[int, list[CoderCode]] = {}
-    for r in rows:
-        out.setdefault(r["coder_id"], []).append(
-            CoderCode(
-                code_id=r["code_id"],
-                segment_id=r["segment_id"],
-                coder_id=r["coder_id"],
-                code=r["code"],
-                description=r["description"] or "",
-                rationale=r["rationale"] or "",
-            )
+    with session() as s:
+        a = s.get(
+            CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
         )
-    return [
-        CoderCodes(coder_id=cid, codes=codes)
-        for cid, codes in sorted(out.items())
-    ]
+        if a is None:
+            return
+        code_ids = list(s.exec(
+            select(Code.code_id).where(  # type: ignore[arg-type]
+                Code.segment_id == a.segment_id,
+                Code.coder_id == a.coder_id,
+            )
+        ).all())
+        _delete_codes_and_dependents(s, code_ids)
+        a.claimed_at = None
+        a.finished_at = None
+        a.error = None
+        s.add(a)
+        s.commit()
 
 
-def queue_status_char(row: sqlite3.Row) -> str:
-    if row["error"] is not None:
-        return "failed"
-    if row["finished_at"] is not None:
-        return "done"
-    if row["claimed_at"] is not None:
-        return "running"
-    return "pending"
+def load_segment_coder_codes(segment: Segment) -> dict[int, list[Code]]:
+    """Map coder_id → list[Code] for real coders only (id ≥ 1)."""
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(Code)
+                .where(Code.segment_id == segment.segment_id, Code.coder_id >= 1)
+                .order_by(Code.coder_id, Code.code_id)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        out: dict[int, list[Code]] = {}
+        for c in rows:
+            out.setdefault(c.coder_id, []).append(c)
+        return out
 
 
-def list_coder_progress(
-    conn: sqlite3.Connection, coder_id: int
-) -> dict[str, int]:
-    rows = conn.execute(
-        "SELECT claimed_at, finished_at, error FROM coding_queue "
-        "WHERE coder_id = ?",
-        (coder_id,),
-    ).fetchall()
+def edit_code_text(code: Code, new_text: str) -> bool:
+    with session() as s:
+        c = s.get(Code, code.code_id)
+        if c is None:
+            return False
+        c.code = new_text
+        s.add(c)
+        s.commit()
+        return True
+
+
+def list_queue_entries(
+    coder: Coder | None = None, *, limit: int = 100, offset: int = 0
+) -> tuple[int, list[CodingQueueEntry]]:
+    with session() as s:
+        stmt = select(CodingQueueEntry)
+        count_stmt = select(func.count()).select_from(CodingQueueEntry)
+        if coder is not None:
+            stmt = stmt.where(CodingQueueEntry.coder_id == coder.coder_id)
+            count_stmt = count_stmt.where(
+                CodingQueueEntry.coder_id == coder.coder_id
+            )
+        total = int(s.exec(count_stmt).one())
+        rows = list(
+            s.exec(
+                stmt.order_by(
+                    CodingQueueEntry.segment_id.desc(),  # type: ignore[union-attr]
+                    CodingQueueEntry.coder_id,
+                )
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return total, rows
+
+
+def get_queue_entry(
+    segment_id: int, coder_id: int
+) -> CodingQueueEntry | None:
+    with session() as s:
+        q = s.get(CodingQueueEntry, (segment_id, coder_id))
+        if q is not None:
+            s.expunge(q)
+        return q
+
+
+def coder_progress(coder: Coder) -> dict[str, int]:
+    """Counts by derived status for this coder's queue rows."""
     out = {"done": 0, "running": 0, "failed": 0, "pending": 0}
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(CodingQueueEntry).where(
+                    CodingQueueEntry.coder_id == coder.coder_id
+                )
+            ).all()
+        )
     for r in rows:
-        out[queue_status_char(r)] = out.get(queue_status_char(r), 0) + 1
+        out[r.status] = out.get(r.status, 0) + 1
     return out
 
 
-def list_queue_rows(
-    conn: sqlite3.Connection,
-    *,
-    coder_id: int | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> tuple[int, list[dict]]:
-    where: list[str] = []
-    params: list = []
-    if coder_id is not None:
-        where.append("coder_id = ?")
-        params.append(coder_id)
-    clause = ("WHERE " + " AND ".join(where)) if where else ""
-    total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM coding_queue {clause}", params
-    ).fetchone()["n"]
-    rows = conn.execute(
-        f"SELECT segment_id, coder_id, codebook_version, "
-        f"  research_context_version, claimed_at, "
-        f"  finished_at, error, "
-        f"  (SELECT COUNT(*) FROM codes "
-        f"   WHERE codes.segment_id = coding_queue.segment_id "
-        f"     AND codes.coder_id = coding_queue.coder_id) AS n_codes "
-        f"FROM coding_queue {clause} "
-        f"ORDER BY segment_id DESC, coder_id LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
-    items = []
-    for r in rows:
-        d = dict(r)
-        d["status"] = queue_status_char(r)
-        items.append(d)
-    return int(total), items
+def reset_failed_assignments(coder: Coder) -> int:
+    """Clear error + claim/finish on this coder's failed queue rows."""
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(CodingQueueEntry).where(
+                    CodingQueueEntry.coder_id == coder.coder_id,
+                    CodingQueueEntry.error.is_not(None),  # type: ignore[union-attr]
+                )
+            ).all()
+        )
+        for r in rows:
+            r.claimed_at = None
+            r.finished_at = None
+            r.error = None
+            s.add(r)
+        s.commit()
+        return len(rows)
 
 
-def get_queue_row(
-    conn: sqlite3.Connection, segment_id: int, coder_id: int
-) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT claimed_at, finished_at, error FROM coding_queue "
-        "WHERE segment_id = ? AND coder_id = ?",
-        (segment_id, coder_id),
-    ).fetchone()
-
-
-def get_review_edge_for_aggregator_code(
-    conn: sqlite3.Connection, agg_code_id: int
-) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT new_code_id, decision, rationale FROM codes_derived "
-        "WHERE source_code_id = ? AND derivation_type = 'R'",
-        (agg_code_id,),
-    ).fetchone()
-
-
-def edit_code_text(
-    conn: sqlite3.Connection, code_id: int, new_code: str
-) -> bool:
-    cur = conn.execute(
-        "UPDATE codes SET code = ? WHERE code_id = ?", (new_code, code_id)
+def reset_all_assignments(coder: Coder) -> int:
+    """Drop this coder's codes and clear all their queue rows."""
+    from thematic_analysis_inc.db.cascades import (
+        _delete_codes_and_dependents,
     )
-    return cur.rowcount > 0
+
+    with session() as s:
+        code_ids = list(s.exec(
+            select(Code.code_id).where(Code.coder_id == coder.coder_id)  # type: ignore[arg-type]
+        ).all())
+        _delete_codes_and_dependents(s, code_ids)
+        rows = list(
+            s.exec(
+                select(CodingQueueEntry).where(
+                    CodingQueueEntry.coder_id == coder.coder_id
+                )
+            ).all()
+        )
+        for r in rows:
+            r.claimed_at = None
+            r.finished_at = None
+            r.error = None
+            s.add(r)
+        s.commit()
+        return len(rows)

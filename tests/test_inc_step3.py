@@ -12,21 +12,20 @@ from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
 
 
-def _seed_document(conn) -> int:
-    return store.add_document(conn, "doc.md", b"content")
+def _seed_document(conn):
+    return store.add_document("doc.md")
 
 
-def _add_segments(conn, doc_id: int, n: int) -> list[int]:
-    rows = [(doc_id, f"text {i}", None, None, i) for i in range(n)]
-    store.enqueue_segments(conn, rows)
-    return [
-        int(r["segment_id"])
-        for r in conn.execute(
-            "SELECT segment_id FROM segments WHERE document_id = ? "
-            "ORDER BY position",
-            (doc_id,),
-        ).fetchall()
-    ]
+def _add_segments(conn, doc, n: int) -> list[int]:
+    if isinstance(doc, int):
+        from thematic_analysis_inc.db.connection import session
+        from thematic_analysis_inc.db.models import Document
+        with session() as s:
+            doc = s.get(Document, doc)
+            s.expunge(doc)
+    rows = [(f"text {i}", 0, 0, i) for i in range(n)]
+    segs = store.enqueue_segments(doc, rows)
+    return [s.segment_id for s in segs]
 
 
 @dataclass
@@ -93,11 +92,11 @@ def _agg_factory():
 
 
 def _seed_two_coders_done(conn, n: int = 1) -> list[int]:
-    store.add_coder(conn, name="alice", identity="id-a")
-    store.add_coder(conn, name="bob", identity="id-b")
+    store.add_coder("id-a")
+    store.add_coder("id-b")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, n)
-    for c in store.list_coders(conn):
+    for c in store.list_coders():
         while workers.code_one(conn, c.coder_id, agent_factory=_coder_factory()) is not None:
             pass
     return sids
@@ -110,17 +109,17 @@ def _seed_two_coders_done(conn, n: int = 1) -> list[int]:
 
 def test_next_segment_requires_all_coders_done(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    a = store.add_coder(conn, name="alice", identity="i")
-    store.add_coder(conn, name="bob", identity="i")
+    a = store.add_coder("i")
+    store.add_coder("i")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
     workers.code_one(conn, a.coder_id, agent_factory=_coder_factory())
-    assert store.aggregation.next_segment_to_aggregate(conn) is None
+    assert store.aggregation.next_segment_to_aggregate() is None
     # finish bob too
-    for c in store.list_coders(conn):
+    for c in store.list_coders():
         while workers.code_one(conn, c.coder_id, agent_factory=_coder_factory()) is not None:
             pass
-    row = store.aggregation.next_segment_to_aggregate(conn)
+    row = store.aggregation.next_segment_to_aggregate()
     assert row is not None
 
 
@@ -128,16 +127,16 @@ def test_next_segment_none_with_no_coders(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
-    assert store.aggregation.next_segment_to_aggregate(conn) is None
+    assert store.aggregation.next_segment_to_aggregate() is None
 
 
 def test_next_segment_excludes_already_aggregated(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_two_coders_done(conn, n=1)
     workers.aggregate_one(conn, use_mock_embeddings=True, agent_factory=_agg_factory())
-    assert store.aggregation.next_segment_to_aggregate(conn) is None
+    assert store.aggregation.next_segment_to_aggregate() is None
     # Aggregator codes exist for this segment.
-    assert store.aggregation.segment_has_aggregator_code(conn, sids[0])
+    assert store.aggregation.segment_has_aggregator_code(sids[0])
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +157,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
     assert res["n_in"] == 4  # 2 coders × 2 codes
 
     rows = conn.execute(
-        "SELECT code FROM codes WHERE coder_id = 0 ORDER BY code"
+        "SELECT code FROM code WHERE coder_id = 0 ORDER BY code"
     ).fetchall()
     assert {r["code"] for r in rows} == {"shared", "unique"}
 
@@ -166,7 +165,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
     # span both coders' '-only' codes.
     rows = conn.execute(
         "SELECT c.code, COUNT(d.source_code_id) AS n_src "
-        "FROM codes c LEFT JOIN codes_derived d "
+        "FROM code c LEFT JOIN codes_derived d "
         "  ON d.new_code_id = c.code_id AND d.derivation_type = 'A' "
         "WHERE c.coder_id = 0 GROUP BY c.code"
     ).fetchall()
@@ -177,12 +176,12 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
     # Quotes attached via codes_supporting_quotes.
     n_links = conn.execute(
         "SELECT COUNT(*) AS n FROM codes_supporting_quotes csq "
-        "JOIN codes c ON c.code_id = csq.code_id WHERE c.coder_id = 0"
+        "JOIN code c ON c.code_id = csq.code_id WHERE c.coder_id = 0"
     ).fetchone()["n"]
     assert n_links >= 2
 
     # Derived segment status now reads as 'reviewing'.
-    s = store.status.derive_segment_status(conn, sids[0])
+    s = store.status.derive_segment_status(sids[0])
     assert s == "reviewing"
 
 
@@ -204,7 +203,7 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
     assert res is not None and res["ok"]
     # With no aggregator codes the segment can't progress to reviewing — it
     # stays at "aggregating" in the derived view (no agg codes recorded).
-    s = store.status.derive_segment_status(conn, sids[0])
+    s = store.status.derive_segment_status(sids[0])
     assert s == "aggregating"
 
 
@@ -217,7 +216,7 @@ def test_drain_aggregate_processes_all_segments(tmp_path: Path) -> None:
     )
     assert counters == {"done": 3, "failed": 0}
     n_agg_segments = conn.execute(
-        "SELECT COUNT(DISTINCT segment_id) AS n FROM codes WHERE coder_id = 0"
+        "SELECT COUNT(DISTINCT segment_id) AS n FROM code WHERE coder_id = 0"
     ).fetchone()["n"]
     assert n_agg_segments == 3
 
@@ -232,8 +231,8 @@ def test_cli_aggregate_runs_against_stub(
 ) -> None:
     db = tmp_path / "x.sqlite"
     assert cli.main(["--db", str(db), "init"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "alice", "i"]) == 0
-    assert cli.main(["--db", str(db), "add-coder", "bob", "i"]) == 0
+    assert cli.main(["--db", str(db), "add-coder", "alice-identity"]) == 0
+    assert cli.main(["--db", str(db), "add-coder", "bob-identity"]) == 0
 
     conn = store.connect(db)
     doc = _seed_document(conn)
@@ -262,10 +261,10 @@ def test_cli_aggregate_runs_against_stub(
     monkeypatch.setattr(workers, "default_reviewer_factory", lambda cb: _Reviewer(cb))
 
     assert cli.main(
-        ["--db", str(db), "code", "alice", "--mock-embeddings"]
+        ["--db", str(db), "code", "1", "--mock-embeddings"]
     ) == 0
     assert cli.main(
-        ["--db", str(db), "code", "bob", "--mock-embeddings"]
+        ["--db", str(db), "code", "2", "--mock-embeddings"]
     ) == 0
     capsys.readouterr()
 

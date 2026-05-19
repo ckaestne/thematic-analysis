@@ -1,245 +1,230 @@
-"""Cascade-delete helpers that respect FK relationships."""
+"""Cascade-delete helpers, SQLModel-backed.
+
+These helpers walk the same FK structure the schema declares (no
+``ON DELETE CASCADE`` magic — we do it explicitly so the order is
+predictable). Most take SQLModel object arguments.
+"""
 
 from __future__ import annotations
 
-import sqlite3
+from sqlalchemy import delete
+from sqlmodel import Session, select
+
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    Code,
+    CodebookCode,
+    Coder,
+    CodesDerived,
+    CodesSupportingQuotes,
+    CodingQueueEntry,
+    Document,
+    Quote,
+    Segment,
+    DERIVATION_REVIEW,
+)
 
 
-def _delete_codes_and_dependents(
-    conn: sqlite3.Connection, code_ids: list[int]
-) -> None:
+# ---------------------------------------------------------------------------
+# Low-level helpers (take an open session)
+# ---------------------------------------------------------------------------
+
+
+def _delete_codes_and_dependents(s: Session, code_ids: list[int]) -> None:
     if not code_ids:
         return
-    ph = ",".join("?" * len(code_ids))
-    # Delete provenance edges that touch any of these codes.
-    conn.execute(
-        f"DELETE FROM codes_derived "
-        f"WHERE new_code_id IN ({ph}) OR source_code_id IN ({ph})",
-        code_ids + code_ids,
+    s.exec(  # type: ignore[call-overload]
+        delete(CodesDerived).where(
+            (CodesDerived.new_code_id.in_(code_ids))  # type: ignore[attr-defined]
+            | (CodesDerived.source_code_id.in_(code_ids))  # type: ignore[attr-defined]
+        )
     )
-    conn.execute(
-        f"DELETE FROM codes_supporting_quotes WHERE code_id IN ({ph})",
-        code_ids,
+    s.exec(  # type: ignore[call-overload]
+        delete(CodesSupportingQuotes).where(
+            CodesSupportingQuotes.code_id.in_(code_ids)  # type: ignore[attr-defined]
+        )
     )
-    conn.execute(
-        f"DELETE FROM codebook WHERE code_id IN ({ph})", code_ids
+    s.exec(  # type: ignore[call-overload]
+        delete(CodebookCode).where(
+            CodebookCode.code_id.in_(code_ids)  # type: ignore[attr-defined]
+        )
     )
-    conn.execute(f"DELETE FROM codes WHERE code_id IN ({ph})", code_ids)
+    s.exec(  # type: ignore[call-overload]
+        delete(Code).where(Code.code_id.in_(code_ids))  # type: ignore[attr-defined]
+    )
 
 
-def _delete_quotes_for_segment(
-    conn: sqlite3.Connection, segment_id: int
-) -> None:
-    qids = [
-        r["quote_id"]
-        for r in conn.execute(
-            "SELECT quote_id FROM quotes WHERE segment_id = ?",
-            (segment_id,),
-        ).fetchall()
-    ]
-    if qids:
-        ph = ",".join("?" * len(qids))
-        conn.execute(
-            f"DELETE FROM codes_supporting_quotes WHERE quote_id IN ({ph})",
-            qids,
+def _delete_quotes_for_segment(s: Session, segment_id: int) -> None:
+    qids = list(s.exec(
+            select(Quote.quote_id).where(Quote.segment_id == segment_id)  # type: ignore[arg-type]
+        ).all())
+    if not qids:
+        return
+    s.exec(  # type: ignore[call-overload]
+        delete(CodesSupportingQuotes).where(
+            CodesSupportingQuotes.quote_id.in_(qids)  # type: ignore[attr-defined]
         )
-        conn.execute(
-            f"DELETE FROM quotes WHERE quote_id IN ({ph})", qids
+    )
+    s.exec(  # type: ignore[call-overload]
+        delete(Quote).where(Quote.quote_id.in_(qids))  # type: ignore[attr-defined]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public cascades (take SQLModel objects)
+# ---------------------------------------------------------------------------
+
+
+def delete_segment_cascade(segment: Segment) -> bool:
+    """Delete a Segment and every row that points back at it."""
+    with session() as s:
+        seg = s.get(Segment, segment.segment_id)
+        if seg is None:
+            return False
+        code_ids = list(s.exec(
+                select(Code.code_id).where(  # type: ignore[arg-type]
+                    Code.segment_id == seg.segment_id
+                )
+            ).all())
+        _delete_codes_and_dependents(s, code_ids)
+        _delete_quotes_for_segment(s, seg.segment_id)
+        s.exec(  # type: ignore[call-overload]
+            delete(CodingQueueEntry).where(
+                CodingQueueEntry.segment_id == seg.segment_id
+            )
         )
+        s.delete(seg)
+        s.commit()
+        return True
 
 
-def delete_segment_cascade(
-    conn: sqlite3.Connection, segment_id: int
-) -> bool:
-    """Delete a segment and every row that points back at it."""
-    with conn:
-        code_ids = [
-            r["code_id"]
-            for r in conn.execute(
-                "SELECT code_id FROM codes WHERE segment_id = ?",
-                (segment_id,),
-            ).fetchall()
-        ]
-        _delete_codes_and_dependents(conn, code_ids)
-        _delete_quotes_for_segment(conn, segment_id)
-        conn.execute(
-            "DELETE FROM coding_queue WHERE segment_id = ?", (segment_id,)
-        )
-        cur = conn.execute(
-            "DELETE FROM segments WHERE segment_id = ?", (segment_id,)
-        )
-        return cur.rowcount > 0
-
-
-def delete_document_cascade(
-    conn: sqlite3.Connection, document_id: int
-) -> tuple[bool, int]:
-    """Delete a document and every segment it owns (with cascades).
-
-    Returns (removed_document, segments_removed)."""
-    with conn:
-        seg_ids = [
-            int(r["segment_id"])
-            for r in conn.execute(
-                "SELECT segment_id FROM segments WHERE document_id = ?",
-                (document_id,),
-            ).fetchall()
-        ]
+def delete_document_cascade(document: Document) -> tuple[bool, int]:
+    """Delete a Document and every Segment it owns (with cascades)."""
+    with session() as s:
+        d = s.get(Document, document.document_id)
+        if d is None:
+            return False, 0
+        seg_ids = list(s.exec(
+                select(Segment.segment_id).where(  # type: ignore[arg-type]
+                    Segment.document_id == d.document_id
+                )
+            ).all())
         for sid in seg_ids:
-            code_ids = [
-                r["code_id"]
-                for r in conn.execute(
-                    "SELECT code_id FROM codes WHERE segment_id = ?",
-                    (sid,),
-                ).fetchall()
-            ]
-            _delete_codes_and_dependents(conn, code_ids)
-            _delete_quotes_for_segment(conn, sid)
-            conn.execute(
-                "DELETE FROM coding_queue WHERE segment_id = ?", (sid,)
+            code_ids = list(s.exec(
+                    select(Code.code_id).where(Code.segment_id == sid)  # type: ignore[arg-type]
+                ).all())
+            _delete_codes_and_dependents(s, code_ids)
+            _delete_quotes_for_segment(s, sid)
+            s.exec(  # type: ignore[call-overload]
+                delete(CodingQueueEntry).where(
+                    CodingQueueEntry.segment_id == sid
+                )
             )
-            conn.execute(
-                "DELETE FROM segments WHERE segment_id = ?", (sid,)
+            s.exec(  # type: ignore[call-overload]
+                delete(Segment).where(Segment.segment_id == sid)
             )
-        cur = conn.execute(
-            "DELETE FROM documents WHERE document_id = ?", (document_id,)
-        )
-        return cur.rowcount > 0, len(seg_ids)
+        s.delete(d)
+        s.commit()
+        return True, len(seg_ids)
 
 
 def delete_coder_cascade(
-    conn: sqlite3.Connection, coder_id: int, *, force: bool = False
+    coder: Coder, *, force: bool = False
 ) -> tuple[bool, int]:
-    """Delete a real coder (id ≥ 1) and their codes/queue rows.
-
-    If `force=False` and any queue rows exist, raises RuntimeError.
-    Returns (removed, queue_rows_deleted)."""
-    if coder_id <= 0:
+    """Delete a real Coder and (optionally) all their queue rows."""
+    if coder.coder_id <= 0:
         raise ValueError(
-            f"refusing to delete system coder (coder_id={coder_id})"
+            f"refusing to delete system coder (coder_id={coder.coder_id})"
         )
-    n = conn.execute(
-        "SELECT COUNT(*) AS n FROM coding_queue WHERE coder_id = ?",
-        (coder_id,),
-    ).fetchone()["n"]
-    if n > 0 and not force:
-        raise RuntimeError(
-            f"coder {coder_id} has {n} coding_queue rows; pass force=True "
-            "to cascade"
+    with session() as s:
+        c = s.get(Coder, coder.coder_id)
+        if c is None:
+            return False, 0
+        n = int(
+            s.exec(
+                select(CodingQueueEntry).where(
+                    CodingQueueEntry.coder_id == coder.coder_id
+                )
+            ).all().__len__()
         )
-    with conn:
-        code_ids = [
-            r["code_id"]
-            for r in conn.execute(
-                "SELECT code_id FROM codes WHERE coder_id = ?", (coder_id,)
-            ).fetchall()
-        ]
-        _delete_codes_and_dependents(conn, code_ids)
-        cur_q = conn.execute(
-            "DELETE FROM coding_queue WHERE coder_id = ?", (coder_id,)
+        if n > 0 and not force:
+            raise RuntimeError(
+                f"coder {coder.coder_id} has {n} coding_queue rows; "
+                "pass force=True to cascade"
+            )
+        code_ids = list(s.exec(
+                select(Code.code_id).where(Code.coder_id == coder.coder_id)  # type: ignore[arg-type]
+            ).all())
+        _delete_codes_and_dependents(s, code_ids)
+        n_q = int(
+            s.exec(  # type: ignore[call-overload]
+                delete(CodingQueueEntry).where(
+                    CodingQueueEntry.coder_id == coder.coder_id
+                )
+            ).rowcount or 0
         )
-        cur = conn.execute(
-            "DELETE FROM coders WHERE coder_id = ?", (coder_id,)
-        )
-        return cur.rowcount == 1, int(cur_q.rowcount)
+        s.delete(c)
+        s.commit()
+        return True, n_q
 
 
-def delete_aggregation_for_segment_cascade(
-    conn: sqlite3.Connection, segment_id: int
-) -> int:
-    """Delete every aggregator code (and its downstream reviewer codes)
-    for a segment. Returns count of aggregator codes deleted."""
-    with conn:
-        agg_ids = [
-            r["code_id"]
-            for r in conn.execute(
-                "SELECT code_id FROM codes WHERE segment_id = ? AND coder_id = 0",
-                (segment_id,),
-            ).fetchall()
-        ]
-        # Find reviewer codes that came from these aggregator codes.
+def delete_aggregation_for_segment_cascade(segment: Segment) -> int:
+    """Delete every aggregator code (and downstream reviewer codes) for a
+    segment. Returns count of aggregator codes deleted."""
+    with session() as s:
+        agg_ids = list(s.exec(
+                select(Code.code_id).where(  # type: ignore[arg-type]
+                    Code.segment_id == segment.segment_id,
+                    Code.coder_id == 0,
+                )
+            ).all())
         rev_ids: list[int] = []
         if agg_ids:
-            ph = ",".join("?" * len(agg_ids))
-            rev_ids = [
-                int(r["new_code_id"])
-                for r in conn.execute(
-                    f"SELECT new_code_id FROM codes_derived "
-                    f"WHERE source_code_id IN ({ph}) "
-                    f"  AND derivation_type = 'R'",
-                    agg_ids,
-                ).fetchall()
-            ]
-        _delete_codes_and_dependents(conn, rev_ids)
-        _delete_codes_and_dependents(conn, agg_ids)
-        # Clear any quotes that were created exclusively for these aggregator
-        # codes and are no longer referenced.
-        conn.execute(
-            "DELETE FROM quotes WHERE segment_id = ? "
-            "AND quote_id NOT IN (SELECT quote_id FROM codes_supporting_quotes)",
-            (segment_id,),
+            rev_ids = list(s.exec(
+                    select(CodesDerived.new_code_id).where(  # type: ignore[arg-type]
+                        CodesDerived.source_code_id.in_(agg_ids),  # type: ignore[attr-defined]
+                        CodesDerived.derivation_type == DERIVATION_REVIEW,
+                    )
+                ).all())
+        _delete_codes_and_dependents(s, rev_ids)
+        _delete_codes_and_dependents(s, agg_ids)
+        # Drop any now-orphaned quotes on this segment.
+        s.exec(  # type: ignore[call-overload]
+            delete(Quote).where(
+                Quote.segment_id == segment.segment_id,
+                ~Quote.quote_id.in_(  # type: ignore[attr-defined]
+                    select(CodesSupportingQuotes.quote_id)
+                ),
+            )
         )
+        s.commit()
         return len(agg_ids)
 
 
-def reset_coding_assignment(
-    conn: sqlite3.Connection,
-    *,
-    segment_id: int,
-    coder_id: int,
+def reset_coding_assignment_cascade(
+    assignment: CodingQueueEntry, *, force: bool = False
 ) -> bool:
-    """Drop this coder's codes for the segment, clear queue claim, and
-    cascade-delete any aggregator/reviewer codes for the segment."""
-    with conn:
-        code_ids = [
-            r["code_id"]
-            for r in conn.execute(
-                "SELECT code_id FROM codes WHERE segment_id = ? AND coder_id = ?",
-                (segment_id, coder_id),
-            ).fetchall()
-        ]
-        _delete_codes_and_dependents(conn, code_ids)
-        # Reset the queue row.
-        cur = conn.execute(
-            "UPDATE coding_queue "
-            "SET claimed_at = NULL, finished_at = NULL, error = NULL "
-            "WHERE segment_id = ? AND coder_id = ?",
-            (segment_id, coder_id),
+    """Drop this coder's codes for the segment, clear the queue claim,
+    and cascade-delete any aggregator/reviewer codes for the segment."""
+    with session() as s:
+        a = s.get(
+            CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
         )
-        # Aggregator output is now stale; nuke it (and downstream review).
-        delete_aggregation_for_segment_cascade(conn, segment_id)
-        return cur.rowcount > 0
-
-
-def reset_failed_assignments(
-    conn: sqlite3.Connection, coder_id: int
-) -> int:
-    """Clear `error` (and reset claim) for failed queue rows for this coder."""
-    cur = conn.execute(
-        "UPDATE coding_queue "
-        "SET claimed_at = NULL, finished_at = NULL, error = NULL "
-        "WHERE coder_id = ? AND error IS NOT NULL",
-        (coder_id,),
-    )
-    return int(cur.rowcount)
-
-
-def reset_all_assignments(
-    conn: sqlite3.Connection, coder_id: int
-) -> int:
-    """For every queue row for this coder, drop their codes and reset claim."""
-    with conn:
-        code_ids = [
-            r["code_id"]
-            for r in conn.execute(
-                "SELECT code_id FROM codes WHERE coder_id = ?", (coder_id,)
-            ).fetchall()
-        ]
-        _delete_codes_and_dependents(conn, code_ids)
-        cur = conn.execute(
-            "UPDATE coding_queue "
-            "SET claimed_at = NULL, finished_at = NULL, error = NULL "
-            "WHERE coder_id = ?",
-            (coder_id,),
-        )
-        return int(cur.rowcount)
+        if a is None:
+            return False
+        code_ids = list(s.exec(
+                select(Code.code_id).where(  # type: ignore[arg-type]
+                    Code.segment_id == a.segment_id,
+                    Code.coder_id == a.coder_id,
+                )
+            ).all())
+        _delete_codes_and_dependents(s, code_ids)
+        a.claimed_at = None
+        a.finished_at = None
+        a.error = None
+        s.add(a)
+        s.commit()
+        # Now nuke downstream aggregator/reviewer codes for the segment.
+        seg = Segment(segment_id=a.segment_id)  # only id needed
+        delete_aggregation_for_segment_cascade(seg)
+        return True
