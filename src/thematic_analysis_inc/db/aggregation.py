@@ -20,6 +20,7 @@ from thematic_analysis_inc.db.models import (
     DERIVATION_AGGREGATION,
     Quote,
     Segment,
+    SENTINEL_CODE_LABEL,
 )
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
@@ -35,19 +36,6 @@ class AggregatorMergeInput:
     rationale: str = ""
     quote_texts: list[str] = field(default_factory=list)
     source_codes: list[Code] = field(default_factory=list)
-
-
-# Sentinel for an aggregator Code row that records "this segment was
-# aggregated for this (codebook, research_context) version, but yielded
-# no codes". We store an empty `code` text so the row participates in
-# the same uniqueness checks as real aggregator codes (and downstream
-# consumers can skip it via :func:`is_empty_aggregation_marker`).
-EMPTY_AGGREGATION_CODE = ""
-
-
-def is_empty_aggregation_marker(c: Code) -> bool:
-    """Whether ``c`` is the sentinel "aggregated, no codes" row."""
-    return c.coder_id == SYSTEM_AGGREGATOR_ID and c.code == EMPTY_AGGREGATION_CODE
 
 
 def _target_versions() -> tuple[int, int | None]:
@@ -162,7 +150,7 @@ def record_aggregation_result(
     the new aggregator Codes (detached).
 
     If ``merged`` is empty, a single sentinel aggregator row is inserted
-    (see :data:`EMPTY_AGGREGATION_CODE`) so the segment is marked as
+    (see :data:`SENTINEL_CODE_LABEL`) so the segment is marked as
     aggregated for this version even though no codes were produced.
 
     ``codebook_version`` / ``rc_version`` default to the latest of each.
@@ -171,7 +159,7 @@ def record_aggregation_result(
         codebook_version, rc_version = _target_versions()
 
     if not merged:
-        merged = [AggregatorMergeInput(code=EMPTY_AGGREGATION_CODE)]
+        merged = [AggregatorMergeInput(code=SENTINEL_CODE_LABEL)]
 
     out_ids: list[int] = []
     out_texts: list[tuple[str, str, str]] = []
@@ -255,7 +243,7 @@ def list_aggregator_codes_for_segment(segment_id: int) -> list[Code]:
                 .where(
                     Code.segment_id == segment_id,
                     Code.coder_id == SYSTEM_AGGREGATOR_ID,
-                    Code.code != EMPTY_AGGREGATION_CODE,
+                    Code.code != SENTINEL_CODE_LABEL,
                 )
                 .order_by(Code.code_id)
             ).all()

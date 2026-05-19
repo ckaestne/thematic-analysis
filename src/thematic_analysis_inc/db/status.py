@@ -19,6 +19,7 @@ from thematic_analysis_inc.db.models import (
     CodingQueueEntry,
     Segment,
     DERIVATION_REVIEW,
+    SENTINEL_CODE_LABEL,
 )
 
 
@@ -100,7 +101,7 @@ def derive_segment_status(segment: Segment | int) -> str:
                 .where(
                     Code.segment_id == seg_id,
                     Code.coder_id == 0,
-                    Code.code != "",  # exclude empty-aggregation sentinel
+                    Code.code != SENTINEL_CODE_LABEL,
                     ~outgoing_r,
                 )
             ).one()

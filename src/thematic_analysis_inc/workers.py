@@ -53,6 +53,7 @@ from thematic_analysis_inc.db.models import (
     DECISION_ADD,
     DECISION_MERGE,
     DECISION_UPDATE,
+    is_sentinel_code,
 )
 from thematic_analysis_inc.refinement import wrap_with_refinement
 
@@ -345,6 +346,16 @@ def aggregate_one(
     coder_codes = db_coding.load_segment_coder_codes(
         seg, codebook_version=target_cb, rc_version=target_rc
     )
+    # Drop coder sentinel rows — they mean "this coder produced nothing"
+    # and must not be treated as real input codes for the aggregator. A
+    # coder whose only row is a sentinel is dropped from the input map
+    # entirely, so the `not coder_codes` branch below short-circuits to
+    # an aggregator sentinel without calling the LLM.
+    coder_codes = {
+        cid: [c for c in codes if not is_sentinel_code(c)]
+        for cid, codes in coder_codes.items()
+    }
+    coder_codes = {cid: codes for cid, codes in coder_codes.items() if codes}
     code_map: dict[tuple[int, str], Code] = {}
     for cid, codes in coder_codes.items():
         for c in codes:

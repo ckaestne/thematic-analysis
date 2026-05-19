@@ -29,6 +29,7 @@ from thematic_analysis_inc.db.models import (
     CodingQueueEntry,
     Quote,
     Segment,
+    SENTINEL_CODE_LABEL,
 )
 from thematic_analysis_inc.db.research_context import (
     latest_research_context_version,
@@ -238,6 +239,11 @@ def record_coding_result(
     ``code.supporting_quotes`` (their ``text`` is read; ``segment_id``
     is set here). Inserts ``Quote`` rows and ``codes_supporting_quotes``
     link rows alongside each Code. Marks the queue entry done.
+
+    If ``codes`` is empty, a single sentinel ``Code`` row with
+    ``code = SENTINEL_CODE_LABEL`` (the empty string) is recorded so we
+    can later distinguish "this assignment has not run yet" from "it ran
+    and produced no codes" without consulting the queue.
     """
     with session() as s:
         a = s.get(CodingQueueEntry, _assignment_pk(assignment))
@@ -269,6 +275,19 @@ def record_coding_result(
                     CodesSupportingQuotes(code_id=c.code_id, quote_id=q.quote_id)
                 )
             out.append(c)
+        if not out:
+            sentinel = Code(
+                segment_id=a.segment_id,
+                coder_id=a.coder_id,
+                codebook_used_id=a.codebook_used_id,
+                research_context_used_id=a.research_context_used_id,
+                code=SENTINEL_CODE_LABEL,
+                description="",
+                rationale="",
+            )
+            s.add(sentinel)
+            s.flush()
+            out.append(sentinel)
         a.finished_at = _utcnow()
         s.add(a)
         s.commit()
