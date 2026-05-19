@@ -74,6 +74,7 @@ _REQUIRES_EXISTING_DB = {
     "rm-coder",
     "list-coders",
     "add-document",
+    "list-documents",
     "code",
     "update-codebook",
     "status",
@@ -194,6 +195,19 @@ def _cmd_list_coders(args: SimpleNamespace) -> int:
     return 0
 
 
+def _cmd_list_documents(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    docs = store.list_documents()
+    if not docs:
+        print("(no documents)")
+        return 0
+    for doc in docs:
+        print(
+            f"{doc.document_id}\t{doc.filename}\t{len(doc.segments)}"
+        )
+    return 0
+
+
 def _cmd_add_document(args: SimpleNamespace) -> int:
     from thematic_analysis.loaders import load_text_file  # lazy
 
@@ -297,6 +311,7 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 f"segments={len(rows)} "
                 f"inserted={len(inserted_segments)}"
             )
+            print(f"created_document_id\t{new_doc.document_id}")
             prog.advance(task)
     summary = (
         f"done: {total_files} file(s), inserted={total_inserted} "
@@ -1090,6 +1105,15 @@ def _cli_add_document(
         model=model,
         batch=batch,
     )
+
+
+@app.command(
+    name="list-documents",
+    rich_help_panel=PANEL_DOCUMENTS,
+    help="list document ids, filenames, and segment counts",
+)
+def _cli_list_documents(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_list_documents)
 
 
 # Stage 1 coder management ---------------------------------------------------

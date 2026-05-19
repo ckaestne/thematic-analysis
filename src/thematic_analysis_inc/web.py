@@ -406,9 +406,81 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.get("/api/documents")
     def list_documents() -> dict[str, Any]:
         _ensure_connected()
+        from sqlmodel import select
+
         docs = store.list_documents()
+        coders = store.list_coders()
+        coder_ids = [c.coder_id for c in coders]
+
+        with store.session() as s:
+            queue_rows = list(
+                s.exec(
+                    select(
+                        store.Segment.document_id,
+                        store.CodingQueueEntry.coder_id,
+                        store.CodingQueueEntry.claimed_at,
+                        store.CodingQueueEntry.finished_at,
+                        store.CodingQueueEntry.error,
+                    ).join(
+                        store.Segment,
+                        store.Segment.segment_id  # type: ignore[arg-type]
+                        == store.CodingQueueEntry.segment_id,
+                    )
+                ).all()
+            )
+            agg_rows = list(
+                s.exec(
+                    select(
+                        store.Segment.document_id,
+                        store.Code.segment_id,
+                    )
+                    .join(
+                        store.Segment,
+                        store.Segment.segment_id  # type: ignore[arg-type]
+                        == store.Code.segment_id,
+                    )
+                    .where(store.Code.coder_id == 0)
+                    .distinct()
+                ).all()
+            )
+
+        def _derive(claimed_at, finished_at, error) -> str:
+            if error is not None:
+                return "failed"
+            if finished_at is not None:
+                return "done"
+            if claimed_at is not None:
+                return "running"
+            return "pending"
+
+        # (document_id, coder_id) -> {status: count}
+        per_doc_coder: dict[tuple[int, int], dict[str, int]] = {}
+        for doc_id, coder_id, claimed_at, finished_at, error in queue_rows:
+            key = (doc_id, coder_id)
+            buckets = per_doc_coder.setdefault(key, {})
+            st = _derive(claimed_at, finished_at, error)
+            buckets[st] = buckets.get(st, 0) + 1
+
+        # document_id -> count of distinct segments with an aggregator code
+        agg_done_per_doc: dict[int, int] = {}
+        for doc_id, _seg_id in agg_rows:
+            agg_done_per_doc[doc_id] = agg_done_per_doc.get(doc_id, 0) + 1
+
         items = []
         for d in docs:
+            size_bytes = sum(len(seg.content) for seg in d.segments)
+            per_coder = []
+            for cid in coder_ids:
+                b = per_doc_coder.get((d.document_id, cid), {})
+                per_coder.append(
+                    {
+                        "coder_id": cid,
+                        "runs_done": b.get("done", 0),
+                        "runs_running": b.get("running", 0),
+                        "runs_failed": b.get("failed", 0),
+                    }
+                )
+            agg_done = agg_done_per_doc.get(d.document_id, 0)
             items.append(
                 {
                     "document_id": d.document_id,
@@ -417,9 +489,13 @@ def create_app(db_path: str | Path) -> FastAPI:
                         d.created_at.isoformat() if d.created_at else None
                     ),
                     "segments_total": len(d.segments),
+                    "size_bytes": size_bytes,
+                    "per_coder": per_coder,
+                    "aggregations_by_status": (
+                        {"done": agg_done} if agg_done else {}
+                    ),
                 }
             )
-        coder_ids = [c.coder_id for c in store.list_coders()]
         return {"items": items, "coder_ids": coder_ids}
 
     @app.get("/api/documents/{document_id}")

@@ -353,6 +353,7 @@ def test_cli_add_document_markdown(tmp_path: Path, capsys) -> None:
     assert rc == 0
     out = capsys.readouterr().out
     assert "alpha.md" in out and "inserted=" in out
+    assert "created_document_id\t1" in out
 
 
 def test_cli_add_document_skips_existing_filename(tmp_path: Path, capsys) -> None:
@@ -381,6 +382,33 @@ def test_cli_add_document_skips_existing_filename(tmp_path: Path, capsys) -> Non
     conn = store.connect(db)
     n_docs = conn.execute("SELECT COUNT(*) AS n FROM document").fetchone()["n"]
     assert n_docs == 1
+
+
+def test_cli_list_documents(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "x.sqlite"
+    first = tmp_path / "alpha.md"
+    second = tmp_path / "beta.md"
+    first.write_text(
+        ("This is a paragraph that has more than twenty words " * 5)
+        + "\n\n"
+        + ("Another paragraph that also clears the minimum word threshold " * 5)
+    )
+    second.write_text(" ".join(["word"] * 80))
+
+    assert cli.main(["--db", str(db), "init"]) == 0
+    assert cli.main(
+        ["--db", str(db), "add-document", "--segmentation", "paragraph", str(first)]
+    ) == 0
+    capsys.readouterr()
+    assert cli.main(
+        ["--db", str(db), "add-document", "--segmentation", "fixed", str(second)]
+    ) == 0
+    capsys.readouterr()
+
+    rc = cli.main(["--db", str(db), "list-documents"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out == ["2\tbeta.md\t1", "1\talpha.md\t2"]
 
 
 def test_cli_add_document_missing_file(tmp_path: Path) -> None:
