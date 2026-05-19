@@ -170,12 +170,15 @@ def create_app(db_path: str | Path) -> FastAPI:
             latest = store.latest_codebook_version(conn)
             codebook_version = latest.version if latest else 0
             s2 = store.stage2_status_counts(conn, codebook_version)
-            ctx = store.get_research_context(conn)
+            loaded_ctx = store.get_research_context(conn)
+            ctx = loaded_ctx[1] if loaded_ctx is not None else None
+            latest_rc_version = store.latest_research_context_version(conn)
             db_size = _DB_PATH.stat().st_size if _DB_PATH and _DB_PATH.exists() else 0
             return {
                 "db_path": str(_DB_PATH),
                 "db_size_bytes": db_size,
                 "research_context_set": ctx is not None,
+                "latest_research_context_version": latest_rc_version,
                 "stage1": {
                     "segments_total": s1.segments_total,
                     "segments_by_status": s1.segments_by_status,
@@ -220,10 +223,39 @@ def create_app(db_path: str | Path) -> FastAPI:
     def get_research_context() -> dict[str, Any] | None:
         conn = _conn()
         try:
-            ctx = store.get_research_context(conn)
-            if ctx is None:
+            loaded = store.get_research_context(conn)
+            if loaded is None:
                 return None
+            version, ctx = loaded
             return {
+                "research_context_version": version,
+                "description": ctx.description,
+                "tailored_prompts": dict(ctx.tailored_prompts),
+                "roles": list(AGENT_ROLES),
+            }
+        finally:
+            conn.close()
+
+    @app.get("/api/research-context/versions")
+    def list_research_context_versions() -> list[dict[str, Any]]:
+        conn = _conn()
+        try:
+            return store.list_research_context_versions(conn)
+        finally:
+            conn.close()
+
+    @app.get("/api/research-context/versions/{v}")
+    def get_research_context_version(v: int) -> dict[str, Any]:
+        conn = _conn()
+        try:
+            loaded = store.get_research_context(conn, version=v)
+            if loaded is None:
+                raise HTTPException(
+                    status_code=404, detail="research context version not found"
+                )
+            version, ctx = loaded
+            return {
+                "research_context_version": version,
                 "description": ctx.description,
                 "tailored_prompts": dict(ctx.tailored_prompts),
                 "roles": list(AGENT_ROLES),
@@ -233,26 +265,21 @@ def create_app(db_path: str | Path) -> FastAPI:
 
     @app.put("/api/research-context")
     def put_research_context(body: ResearchContextIn) -> dict[str, Any]:
+        """Create a new research-context version; returns its id."""
         conn = _conn()
         try:
-            existing = store.get_research_context(conn)
-            tailored = dict(body.tailored_prompts)
-            if existing is not None and existing.description != body.description:
-                tailored = {
-                    k: v
-                    for k, v in tailored.items()
-                    if k in existing.tailored_prompts
-                    and v == existing.tailored_prompts[k]
-                }
             ctx = ResearchContext(
                 description=body.description,
                 tailored_prompts={
-                    k: v for k, v in tailored.items() if k in AGENT_ROLES and v
+                    k: v
+                    for k, v in body.tailored_prompts.items()
+                    if k in AGENT_ROLES and v
                 },
             )
-            store.set_research_context(conn, ctx)
+            new_version = store.set_research_context(conn, ctx)
             return {
                 "status": "ok",
+                "research_context_version": new_version,
                 "description": ctx.description,
                 "tailored_prompts": dict(ctx.tailored_prompts),
             }
@@ -261,6 +288,7 @@ def create_app(db_path: str | Path) -> FastAPI:
 
     @app.delete("/api/research-context")
     def delete_research_context() -> dict[str, bool]:
+        """Wipe research-context history entirely (fresh-DB policy)."""
         conn = _conn()
         try:
             return {"removed": store.clear_research_context(conn)}
@@ -275,18 +303,20 @@ def create_app(db_path: str | Path) -> FastAPI:
 
         conn = _conn()
         try:
-            ctx = store.get_research_context(conn)
-            if ctx is None or ctx.is_empty():
+            loaded = store.get_research_context(conn)
+            if loaded is None or loaded[1].is_empty():
                 raise HTTPException(
                     status_code=400,
                     detail="no research context description set",
                 )
+            _, ctx = loaded
             prompts = generate_all_tailored_prompts(ctx.description)
             new_ctx = ResearchContext(
                 description=ctx.description, tailored_prompts=prompts
             )
-            store.set_research_context(conn, new_ctx)
+            new_version = store.set_research_context(conn, new_ctx)
             return {
+                "research_context_version": new_version,
                 "description": new_ctx.description,
                 "tailored_prompts": dict(new_ctx.tailored_prompts),
                 "roles": list(AGENT_ROLES),

@@ -7,6 +7,9 @@ from dataclasses import dataclass
 
 from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
 from thematic_analysis_inc.db.documents import add_quote, link_code_quote
+from thematic_analysis_inc.db.research_context import (
+    latest_research_context_version,
+)
 
 
 @dataclass
@@ -63,21 +66,31 @@ def record_aggregation_result(
     segment_id: int,
     version: int,
     inputs: list[AggregatorMergeInput],
+    research_context_version: int | None = None,
 ) -> list[int]:
     """For each merged/retained code: insert quotes, an aggregator code
     row, link the quotes, and add one codes_derived('A') edge per source
-    code. Returns the new aggregator code_ids."""
+    code. Returns the new aggregator code_ids.
+
+    The Python kwarg ``version`` writes to the renamed
+    ``codes.codebook_version`` column. ``research_context_version`` is
+    optional; if ``None`` the latest known RC version is used.
+    """
+    if research_context_version is None:
+        research_context_version = latest_research_context_version(conn)
     new_ids: list[int] = []
     with conn:
         for inp in inputs:
             cur = conn.execute(
                 "INSERT INTO codes "
-                "(segment_id, coder_id, version, code, description, rationale) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(segment_id, coder_id, codebook_version, "
+                " research_context_version, code, description, rationale) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     segment_id,
                     SYSTEM_AGGREGATOR_ID,
                     version,
+                    research_context_version,
                     inp.code,
                     inp.description or "",
                     inp.rationale or "",
@@ -103,7 +116,7 @@ def load_aggregated_code(
     conn: sqlite3.Connection, code_id: int
 ) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT code_id, segment_id, coder_id, version, code, "
+        "SELECT code_id, segment_id, coder_id, codebook_version, code, "
         "       description, rationale "
         "FROM codes WHERE code_id = ? AND coder_id = 0",
         (code_id,),

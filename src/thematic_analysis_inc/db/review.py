@@ -10,6 +10,9 @@ from thematic_analysis_inc.db.codebook import (
     insert_codebook_version,
 )
 from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
+from thematic_analysis_inc.db.research_context import (
+    latest_research_context_version,
+)
 
 
 # Single-char decisions stored in codes_derived.decision when
@@ -92,14 +95,17 @@ def record_review(
             f"decision {decision!r} requires target_code_id"
         )
 
+    rc_version = latest_research_context_version(conn)
     with conn:
         cur = conn.execute(
             "INSERT INTO codes "
-            "(segment_id, coder_id, version, code, description, rationale) "
-            "VALUES (NULL, ?, ?, ?, ?, ?)",
+            "(segment_id, coder_id, codebook_version, "
+            " research_context_version, code, description, rationale) "
+            "VALUES (NULL, ?, ?, ?, ?, ?, ?)",
             (
                 SYSTEM_REVIEWER_ID,
                 parent_version,
+                rc_version,
                 new_code_text,
                 new_description or "",
                 rationale or "",

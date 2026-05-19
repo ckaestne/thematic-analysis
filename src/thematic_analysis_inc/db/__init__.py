@@ -51,8 +51,11 @@ from thematic_analysis_inc.db.documents import (
     link_code_quote,
 )
 from thematic_analysis_inc.db.research_context import (
+    RC_AGENT_ROLES,
     clear_research_context,
     get_research_context,
+    latest_research_context_version,
+    list_research_context_versions,
     set_research_context,
 )
 from thematic_analysis_inc.db.schema import create_schema
@@ -99,8 +102,11 @@ __all__ = [
     "init_db",
     "now",
     # research context
+    "RC_AGENT_ROLES",
     "set_research_context",
     "get_research_context",
+    "latest_research_context_version",
+    "list_research_context_versions",
     "clear_research_context",
     # codebook
     "CodebookEntry",

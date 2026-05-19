@@ -15,16 +15,33 @@ from the previous schema.
 ## Stage 1 — core tables
 
 ### research_context
-Singleton (id=1) row carrying the freeform research context + the
-per-role tailored prompts.
+Append-only history of research-context revisions. Each call to
+`set_research_context` inserts a new row; the row with the highest
+`research_context_version` is the "current" one. Other tables that need
+to remember which research context was active when a row was produced
+carry a nullable `research_context_version` FK back here (see
+[Versioning of research context](#versioning-of-research-context)).
 
 ```
 research_context(
-    id           INTEGER PK CHECK (id = 1),
-    context_json TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    research_context_version  INTEGER PK AUTOINCREMENT,
+    description               TEXT NOT NULL DEFAULT '',
+    coder_prompt              TEXT,
+    coding_critic_prompt      TEXT,
+    reviewer_prompt           TEXT,
+    theme_coder_prompt        TEXT,
+    theme_aggregator_prompt   TEXT,
+    created_at                DATETIME NOT NULL
 )
 ```
+
+The five `*_prompt` columns map to the role names exposed by
+`thematic_analysis.research_context.AGENT_ROLES`:
+`coder`, `coding_critic`, `reviewer`, `theme_coder`, `theme_aggregator`.
+A `NULL` value means "no tailored prompt set for this role"; the agent
+falls back to the freeform `description`.
+
+`clear_research_context` deletes **all** rows (fresh-DB policy).
 
 ### codebook_versions
 Append-only history of codebook revisions. Membership is stored in a
@@ -34,7 +51,7 @@ separate `codebook` table; this table only carries metadata.
 codebook_versions(
     version         INTEGER PK,
     parent_version  INTEGER REFERENCES codebook_versions(version),
-    created_at      TEXT NOT NULL,
+    created_at      DATETIME NOT NULL,
     created_by      TEXT NOT NULL
 )
 ```
@@ -57,7 +74,7 @@ coders(
     coder_id    INTEGER PK,
     name        TEXT NOT NULL,
     identity    TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    created_at  DATETIME NOT NULL
 )
 ```
 
@@ -68,7 +85,7 @@ documents(
     document_id  INTEGER PK AUTOINCREMENT,
     filename     TEXT NOT NULL,
     content      BLOB NOT NULL,
-    created_at   TEXT NOT NULL
+    created_at   DATETIME NOT NULL
 )
 ```
 
@@ -94,21 +111,25 @@ this table. The author is identified by `coder_id`:
 - `coder_id = 0` — aggregator output
 - `coder_id = -1` — reviewer output (the canonical codebook code)
 
-`version` is the codebook version active when the code was authored.
+`codebook_version` is the codebook version active when the code was
+authored. `research_context_version` records the research context that
+was active at the moment of authoring (nullable: may be NULL if no
+research context was set yet).
 
 ```
 codes(
-    code_id      INTEGER PK AUTOINCREMENT,
-    segment_id   INTEGER REFERENCES segments(segment_id),
-    coder_id     INTEGER NOT NULL REFERENCES coders(coder_id),
-    version      INTEGER REFERENCES codebook_versions(version),
-    code         TEXT NOT NULL,
-    description  TEXT NOT NULL DEFAULT '',
-    rationale    TEXT NOT NULL DEFAULT ''
+    code_id                   INTEGER PK AUTOINCREMENT,
+    segment_id                INTEGER REFERENCES segments(segment_id),
+    coder_id                  INTEGER NOT NULL REFERENCES coders(coder_id),
+    codebook_version          INTEGER REFERENCES codebook_versions(version),
+    research_context_version  INTEGER REFERENCES research_context(research_context_version),
+    code                      TEXT NOT NULL,
+    description               TEXT NOT NULL DEFAULT '',
+    rationale                 TEXT NOT NULL DEFAULT ''
 )
 ```
 
-Indexes: `(segment_id)`, `(coder_id)`, `(version)`.
+Indexes: `(segment_id)`, `(coder_id)`, `(codebook_version)`.
 
 Reviewer codes have `segment_id = NULL` (a reviewer code is not tied to a
 specific segment).
@@ -186,12 +207,13 @@ at the chosen codebook version; status is *derived* from
 
 ```
 coding_queue(
-    segment_id        INTEGER NOT NULL REFERENCES segments(segment_id),
-    coder_id          INTEGER NOT NULL REFERENCES coders(coder_id),
-    codebook_version  INTEGER NOT NULL REFERENCES codebook_versions(version),
-    claimed_at        TEXT,
-    finished_at       TEXT,
-    error             TEXT,
+    segment_id                INTEGER NOT NULL REFERENCES segments(segment_id),
+    coder_id                  INTEGER NOT NULL REFERENCES coders(coder_id),
+    codebook_version          INTEGER NOT NULL REFERENCES codebook_versions(version),
+    research_context_version  INTEGER REFERENCES research_context(research_context_version),
+    claimed_at                DATETIME,
+    finished_at               DATETIME,
+    error                     TEXT,
     PRIMARY KEY (segment_id, coder_id)
 )
 ```
@@ -211,11 +233,13 @@ Index: `(coder_id)`.
 
 ## Stage 2 — theme tables (unchanged)
 
-Stage 2 schema is carried over verbatim from the previous design:
+Stage 2 schema is largely carried over from the previous design;
+`theme_coder_runs` and `theme_aggregations` additionally capture the
+research-context version active when the run started (nullable):
 
 - `theme_coders(theme_coder_id, identity, created_at)`
-- `theme_coder_runs(id, theme_coder_id, codebook_version, status, claimed_at, finished_at, result_json, raw_response, error)`
-- `theme_aggregations(id, codebook_version UNIQUE, status, created_at, finished_at, result_json, error)`
+- `theme_coder_runs(id, theme_coder_id, codebook_version, research_context_version, status, claimed_at, finished_at, result_json, raw_response, error)`
+- `theme_aggregations(id, codebook_version UNIQUE, research_context_version, status, created_at, finished_at, result_json, error)`
 - `theme_aggregation_inputs(theme_aggregation_id, theme_coder_run_id)`
 
 These keep their explicit `status` column; the surrounding pipeline
@@ -259,6 +283,36 @@ encoded by the presence/absence of rows in the tables above:
    for callers, and `codebook_to_json_for_version` serialises it in the
    legacy `{"codes":[{code, quotes}]}` shape consumed by
    `Codebook.from_json`.
+
+## Datetime columns
+
+Every timestamp column above is declared as `DATETIME` and stored as an
+**ISO 8601** UTC string (e.g. `2024-08-22T14:32:01+00:00`). The declared
+type is purely documentation: the connection layer deliberately does *not*
+enable `sqlite3.PARSE_DECLTYPES`, so reads return plain strings, matching
+all existing comparison sites (`finished_at IS NOT NULL`, string equality
+in tests, JSON serialisation, …). Writes use
+`datetime.now(timezone.utc).isoformat(timespec="seconds")`.
+
+## Versioning of research context
+
+The research context evolves over time; each `set_research_context` call
+creates a new row in `research_context` with a fresh
+`research_context_version`. Other tables that depend on which context
+was active when a row was produced carry a nullable
+`research_context_version INTEGER REFERENCES research_context(...)`:
+
+- `codes.research_context_version` — set when a code is authored
+  (coding, aggregation, or review).
+- `coding_queue.research_context_version` — captured when the queue row
+  is first inserted (in `sync_coding_queue`).
+- `theme_coder_runs.research_context_version` — captured at run start.
+- `theme_aggregations.research_context_version` — captured at start.
+
+A `NULL` value means "no research context was set at the time"; it is
+not an error.
+
+---
 
 Segment-level derived status (used by status payloads):
 

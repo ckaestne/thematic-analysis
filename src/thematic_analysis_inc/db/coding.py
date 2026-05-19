@@ -6,6 +6,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from thematic_analysis_inc.db.connection import now
+from thematic_analysis_inc.db.research_context import (
+    latest_research_context_version,
+)
 
 
 @dataclass
@@ -13,6 +16,7 @@ class CodingAssignment:
     segment_id: int
     coder_id: int
     codebook_version: int
+    research_context_version: int | None
     content: str
 
 
@@ -34,20 +38,23 @@ class CoderCodes:
 
 def sync_coding_queue(conn: sqlite3.Connection) -> int:
     """Ensure a `coding_queue` row exists for every (segment, real-coder) at
-    the latest codebook version. Returns rows inserted."""
+    the latest codebook version. New rows also capture the latest
+    research-context version (if any) at the moment the row is created.
+    Returns rows inserted."""
     row = conn.execute(
         "SELECT MAX(version) AS v FROM codebook_versions"
     ).fetchone()
     if row is None or row["v"] is None:
         return 0
     version = int(row["v"])
+    rc_version = latest_research_context_version(conn)
     cur = conn.execute(
         "INSERT OR IGNORE INTO coding_queue "
-        "(segment_id, coder_id, codebook_version) "
-        "SELECT s.segment_id, c.coder_id, ? "
+        "(segment_id, coder_id, codebook_version, research_context_version) "
+        "SELECT s.segment_id, c.coder_id, ?, ? "
         "FROM segments s CROSS JOIN coders c "
         "WHERE c.coder_id >= 1",
-        (version,),
+        (version, rc_version),
     )
     return cur.rowcount or 0
 
@@ -70,7 +77,8 @@ def claim_next_coding_assignment(
     nothing is pending."""
     while True:
         row = conn.execute(
-            "SELECT segment_id, codebook_version FROM coding_queue "
+            "SELECT segment_id, codebook_version, research_context_version "
+            "FROM coding_queue "
             "WHERE coder_id = ? AND claimed_at IS NULL "
             "  AND finished_at IS NULL AND error IS NULL "
             "ORDER BY segment_id LIMIT 1",
@@ -80,6 +88,11 @@ def claim_next_coding_assignment(
             return None
         seg_id = int(row["segment_id"])
         version = int(row["codebook_version"])
+        rc_version = (
+            int(row["research_context_version"])
+            if row["research_context_version"] is not None
+            else None
+        )
         # Conditional UPDATE for atomic claim.
         cur = conn.execute(
             "UPDATE coding_queue SET claimed_at = ? "
@@ -100,6 +113,7 @@ def claim_next_coding_assignment(
             segment_id=seg_id,
             coder_id=coder_id,
             codebook_version=version,
+            research_context_version=rc_version,
             content=seg["content"],
         )
 
@@ -112,21 +126,34 @@ def record_coding_result(
     version: int,
     codes: list[str],
     rationales: list[str],
+    research_context_version: int | None = None,
 ) -> list[int]:
     """Insert codes for a finished coding assignment and mark queue done.
 
-    Stage-A codes carry empty description and no quote links (the coder
-    agent doesn't emit those yet). Returns the new code_ids in order.
+    The Python kwarg ``version`` writes to the renamed ``codebook_version``
+    column; callers don't need to change. ``research_context_version`` is
+    optional; if ``None``, falls back to the latest known RC version at the
+    time of writing.
     """
+    if research_context_version is None:
+        research_context_version = latest_research_context_version(conn)
     new_ids: list[int] = []
     with conn:
         for i, code in enumerate(codes):
             rat = rationales[i] if i < len(rationales) else ""
             cur = conn.execute(
                 "INSERT INTO codes "
-                "(segment_id, coder_id, version, code, description, rationale) "
-                "VALUES (?, ?, ?, ?, '', ?)",
-                (segment_id, coder_id, version, code, rat),
+                "(segment_id, coder_id, codebook_version, "
+                " research_context_version, code, description, rationale) "
+                "VALUES (?, ?, ?, ?, ?, '', ?)",
+                (
+                    segment_id,
+                    coder_id,
+                    version,
+                    research_context_version,
+                    code,
+                    rat,
+                ),
             )
             new_ids.append(int(cur.lastrowid))
         conn.execute(
@@ -220,7 +247,8 @@ def list_queue_rows(
         f"SELECT COUNT(*) AS n FROM coding_queue {clause}", params
     ).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT segment_id, coder_id, codebook_version, claimed_at, "
+        f"SELECT segment_id, coder_id, codebook_version, "
+        f"  research_context_version, claimed_at, "
         f"  finished_at, error, "
         f"  (SELECT COUNT(*) FROM codes "
         f"   WHERE codes.segment_id = coding_queue.segment_id "

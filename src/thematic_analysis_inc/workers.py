@@ -61,8 +61,11 @@ def clear_codebook_cache() -> None:
 def _apply_research_context(conn: sqlite3.Connection, agent: Any) -> None:
     if not hasattr(agent, "research_context"):
         return
-    ctx = db.get_research_context(conn)
-    if ctx is None or ctx.is_empty():
+    loaded = db.get_research_context(conn)
+    if loaded is None:
+        return
+    _, ctx = loaded
+    if ctx.is_empty():
         return
     agent.research_context = ctx
 
@@ -130,6 +133,7 @@ def code_one(
             version=version,
             codes=list(result.codes),
             rationales=list(result.rationales),
+            research_context_version=assignment.research_context_version,
         )
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
@@ -195,6 +199,7 @@ async def code_one_async(
             version=version,
             codes=list(result.codes),
             rationales=list(result.rationales),
+            research_context_version=assignment.research_context_version,
         )
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
