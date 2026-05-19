@@ -92,6 +92,7 @@ def _seed_ready_to_review(conn, n: int = 1) -> list[int]:
     store.add_coder("i")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, n)
+    store.coding.enqueue_document(doc.document_id)
     for c in store.list_coders():
         while workers.code_one(
             conn, c.coder_id, use_mock_embeddings=True,

@@ -112,7 +112,7 @@ def test_remove_coder_refuses_when_queue_rows_exist(tmp_path: Path) -> None:
     c = store.add_coder("x")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
-    store.coding.sync_coding_queue()
+    store.coding.enqueue_document(doc.document_id)
     with pytest.raises(RuntimeError):
         store.cascades.delete_coder_cascade(c)
     removed, queue_deleted = store.cascades.delete_coder_cascade(
@@ -132,7 +132,7 @@ def test_enqueue_inserts_segments_only(tmp_path: Path) -> None:
     n_queue = conn.execute(
         "SELECT COUNT(*) AS n FROM coding_queue"
     ).fetchone()["n"]
-    assert n_queue == 0  # no queue rows until sync_coding_queue runs
+    assert n_queue == 0  # no queue rows until enqueue_document is called
 
 
 def test_add_document_and_link_segments(tmp_path: Path) -> None:
@@ -145,14 +145,41 @@ def test_add_document_and_link_segments(tmp_path: Path) -> None:
     assert found is not None and found.filename == "post.md"
 
 
-def test_sync_coding_queue_pairs_segments_and_coders(tmp_path: Path) -> None:
+def test_enqueue_document_pairs_segments_and_coders(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     store.add_coder("i")
     store.add_coder("i")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 3)
-    n = store.coding.sync_coding_queue()
+    n = store.coding.enqueue_document(doc.document_id)
     assert n == 6  # 3 segments x 2 real coders
+    # Re-enqueueing at the same codebook+RC is a no-op.
+    assert store.coding.enqueue_document(doc.document_id) == 0
+
+
+def test_enqueue_segment_default_all_coders(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    store.add_coder("a")
+    store.add_coder("b")
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    n = store.coding.enqueue_segment(sids[0])
+    assert n == 2
+
+
+def test_enqueue_creates_new_row_when_codebook_changes(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    store.add_coder("a")
+    doc = _seed_document(conn)
+    _add_segments(conn, doc, 1)
+    assert store.coding.enqueue_document(doc.document_id) == 1
+    # Bump the codebook revision and re-enqueue → fresh row.
+    store.insert_codebook_version(parent=store.latest_codebook())
+    assert store.coding.enqueue_document(doc.document_id) == 1
+    n_queue = conn.execute(
+        "SELECT COUNT(*) AS n FROM coding_queue"
+    ).fetchone()["n"]
+    assert n_queue == 2
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +230,7 @@ def test_code_one_persists_codes(tmp_path: Path) -> None:
     c = store.add_coder("id1")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
+    store.coding.enqueue_document(doc.document_id)
 
     res = workers.code_one(
         conn, c.coder_id, use_mock_embeddings=True,
@@ -232,6 +260,7 @@ def test_code_one_returns_none_when_done(tmp_path: Path) -> None:
     c = store.add_coder("id1")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
+    store.coding.enqueue_document(doc.document_id)
     workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
     res = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
     assert res is None
@@ -242,6 +271,7 @@ def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
     c = store.add_coder("id1")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, 1)
+    store.coding.enqueue_document(doc.document_id)
     res = workers.code_one(
         conn, c.coder_id,
         agent_factory=_stub_factory(raise_on=str(sids[0])),
@@ -266,6 +296,7 @@ def test_code_one_two_coders_independent(tmp_path: Path) -> None:
     b = store.add_coder("id2")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
+    store.coding.enqueue_document(doc.document_id)
     while workers.code_one(conn, a.coder_id, agent_factory=_stub_factory()) is not None:
         pass
     while workers.code_one(conn, b.coder_id, agent_factory=_stub_factory()) is not None:
@@ -375,6 +406,11 @@ def test_cli_code_runs_against_stub(tmp_path: Path, capsys, monkeypatch) -> None
     doc = _seed_document(conn)
     _add_segments(conn, doc, 3)
     conn.close()
+
+    # Enqueue all segments for the registered coder via the CLI.
+    assert cli.main(
+        ["--db", str(db), "enqueue", "--document", str(doc.document_id)]
+    ) == 0
 
     monkeypatch.setattr(workers, "default_coder_factory", _stub_factory())
 

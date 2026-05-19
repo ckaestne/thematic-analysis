@@ -421,6 +421,7 @@ class TestWorkerEndToEnd:
         c = store.add_coder("id1")
         doc = store.add_document("d.md")
         store.enqueue_segments(doc, [("text 0", 0, 0, 0)])
+        store.coding.enqueue_document(doc.document_id)
 
         llm, _ = _fake_llm(
             [

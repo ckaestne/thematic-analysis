@@ -30,37 +30,38 @@ def _ctx() -> ResearchContext:
 def test_set_get_clear_research_context(tmp_path: Path) -> None:
     store.init_db(tmp_path / "rc.sqlite")
 
-    assert store.get_research_context() is None
-    assert store.latest_research_context_version() is None
+    # init_db seeds an empty research-context revision (v1) so the queue
+    # primary key always has a valid revision to point at.
+    seed = store.get_research_context()
+    assert seed is not None
+    assert seed.research_context_version == 1
+    assert seed.description == ""
 
     ctx = _ctx()
-    rc1 = store.set_research_context(ctx)
-    assert rc1.research_context_version == 1
+    rc2 = store.set_research_context(ctx)
+    assert rc2.research_context_version == 2
 
-    got1 = store.get_research_context()
-    assert got1 is not None
-    assert got1.research_context_version == 1
-    domain1 = store.research_context_to_domain(got1)
-    assert domain1.description == CTX_DESCRIPTION
-    assert domain1.tailored_prompts == {}
-    assert store.latest_research_context_version() == 1
+    got = store.get_research_context()
+    assert got is not None
+    assert got.research_context_version == 2
+    domain = store.research_context_to_domain(got)
+    assert domain.description == CTX_DESCRIPTION
+    assert domain.tailored_prompts == {}
+    assert store.latest_research_context_version() == 2
 
     # Setting again produces a NEW version (history preserved).
-    rc2 = store.set_research_context(ResearchContext(description="different focus"))
-    assert rc2.research_context_version == 2
-    got2 = store.get_research_context()
-    assert got2 is not None
-    assert got2.research_context_version == 2
-    assert got2.description == "different focus"
+    rc3 = store.set_research_context(ResearchContext(description="different focus"))
+    assert rc3.research_context_version == 3
+    got3 = store.get_research_context()
+    assert got3 is not None and got3.research_context_version == 3
+    assert got3.description == "different focus"
 
-    # Original version still retrievable by id.
-    by_v1 = store.get_research_context(version=1)
-    assert by_v1 is not None
-    assert by_v1.research_context_version == 1
-    assert by_v1.description == CTX_DESCRIPTION
+    # Original versions still retrievable by id.
+    by_v2 = store.get_research_context(version=2)
+    assert by_v2 is not None and by_v2.description == CTX_DESCRIPTION
 
     versions = store.list_research_context_versions()
-    assert [r.research_context_version for r in versions] == [1, 2]
+    assert [r.research_context_version for r in versions] == [1, 2, 3]
 
     assert store.clear_research_context() is True
     assert store.get_research_context() is None
@@ -100,7 +101,7 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
     # Seed a segment and run the queue sync.
     doc = store.add_document("doc.md")
     store.enqueue_segments(doc, [("seg one", 0, 0, 0)])
-    store.coding.sync_coding_queue()
+    store.coding.enqueue_document(doc.document_id)
 
     rows = conn.execute(
         "SELECT research_context_used_id FROM coding_queue"
@@ -109,20 +110,28 @@ def test_codes_and_queue_capture_rc_version(tmp_path: Path) -> None:
         int(r["research_context_used_id"]) == rc_v1 for r in rows
     )
 
-    # Set a new RC and add another segment; its new queue row picks up v2.
+    # Set a new RC, add another segment, and re-enqueue the document.
+    # The new RC creates a fresh queue row for every (segment, coder)
+    # pair (existing rows at the old RC stay as history).
     rc_v2 = store.set_research_context(
         ResearchContext(description="second RC")
     ).research_context_version
     store.enqueue_segments(doc, [("seg two", 0, 0, 1)])
-    store.coding.sync_coding_queue()
-    rows_by_seg = {
-        int(r["segment_id"]): int(r["research_context_used_id"])
+    store.coding.enqueue_document(doc.document_id)
+    seg_rc_pairs = {
+        (int(r["segment_id"]), int(r["research_context_used_id"]))
         for r in conn.execute(
             "SELECT segment_id, research_context_used_id FROM coding_queue"
         ).fetchall()
     }
-    # 2 segments, both queue rows present; older one keeps v1; new one is v2.
-    assert set(rows_by_seg.values()) == {rc_v1, rc_v2}
+    # seg-one has a row at rc_v1 (original) AND rc_v2 (re-enqueued under
+    # the new RC). seg-two only has rc_v2 (it was added after the bump).
+    seg_ids = sorted({sid for sid, _ in seg_rc_pairs})
+    assert seg_rc_pairs == {
+        (seg_ids[0], rc_v1),
+        (seg_ids[0], rc_v2),
+        (seg_ids[1], rc_v2),
+    }
 
 
 class _CapturingThemeCoder:
@@ -180,7 +189,9 @@ def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
         "WHERE id = ?",
         (res["run_id"],),
     ).fetchone()
-    assert row is not None and int(row["research_context_version"]) == 1
+    # RC v1 is the seeded empty revision; the explicit set_research_context
+    # above produced v2, which is what the worker should reference.
+    assert row is not None and int(row["research_context_version"]) == 2
 
 
 def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
@@ -211,7 +222,9 @@ def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
         "WHERE id = ?",
         (res["aggregation_id"],),
     ).fetchone()
-    assert row is not None and int(row["research_context_version"]) == 1
+    # RC v1 is the seeded empty revision; the explicit set_research_context
+    # above produced v2, which is what the worker should reference.
+    assert row is not None and int(row["research_context_version"]) == 2
 
 
 def test_workers_skip_injection_when_no_context(tmp_path: Path) -> None:

@@ -96,6 +96,7 @@ def _seed_two_coders_done(conn, n: int = 1) -> list[int]:
     store.add_coder("id-b")
     doc = _seed_document(conn)
     sids = _add_segments(conn, doc, n)
+    store.coding.enqueue_document(doc.document_id)
     for c in store.list_coders():
         while workers.code_one(conn, c.coder_id, agent_factory=_coder_factory()) is not None:
             pass
@@ -113,6 +114,7 @@ def test_next_segment_requires_all_coders_done(tmp_path: Path) -> None:
     store.add_coder("i")
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
+    store.coding.enqueue_document(doc.document_id)
     workers.code_one(conn, a.coder_id, agent_factory=_coder_factory())
     assert store.aggregation.next_segment_to_aggregate() is None
     # finish bob too
@@ -238,6 +240,10 @@ def test_cli_aggregate_runs_against_stub(
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
     conn.close()
+
+    assert cli.main(
+        ["--db", str(db), "enqueue", "--document", str(doc.document_id)]
+    ) == 0
 
     monkeypatch.setattr(workers, "default_coder_factory", _coder_factory())
     monkeypatch.setattr(

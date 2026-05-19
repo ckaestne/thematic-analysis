@@ -112,7 +112,6 @@ def _code_one_impl(
     coder = db_coders.get_coder(coder_id)
     if coder is None or coder_id < 1:
         raise ValueError(f"unknown or system coder_id: {coder_id}")
-    db_coding.sync_coding_queue()
     assignment = db_coding.claim_next_assignment(coder)
     if assignment is None:
         return None
@@ -184,7 +183,6 @@ async def code_one_async(
     coder = db_coders.get_coder(coder_id)
     if coder is None or coder_id < 1:
         raise ValueError(f"unknown or system coder_id: {coder_id}")
-    db_coding.sync_coding_queue()
     assignment = db_coding.claim_next_assignment(coder)
     if assignment is None:
         return None
