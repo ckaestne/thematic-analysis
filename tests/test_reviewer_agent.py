@@ -14,6 +14,7 @@ from thematic_analysis.agents import (
     ReviewResult,
 )
 from thematic_analysis.codebook import Codebook, Quote
+from thematic_analysis.research_context import ResearchContext
 
 
 class TestReviewerConfig:
@@ -116,6 +117,19 @@ class TestReviewerAgent:
         assert "MERGE" in prompt
         assert "UPDATE" in prompt
         assert "ADD_NEW" in prompt
+
+    def test_get_system_prompt_orders_research_context_after_general(self):
+        agent = ReviewerAgent(
+            research_context=ResearchContext(
+                description="Study. Research question: How is risk framed?"
+            )
+        )
+        prompt = agent.get_system_prompt()
+
+        assert "Research Context" in prompt
+        assert prompt.index("You are an expert qualitative researcher") < prompt.index(
+            "Research Context"
+        )
 
     def test_format_quotes_section(self, agent: ReviewerAgent):
         """Test formatting quotes section."""

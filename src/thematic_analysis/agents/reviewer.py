@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from thematic_analysis.agents.aggregator import AggregationResult
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook, CodeEntry, Quote
+from thematic_analysis.prompts import join_system_prompt_sections
 
 if TYPE_CHECKING:
     from thematic_analysis.research_context import ResearchContext
@@ -141,10 +142,15 @@ class ReviewerAgent(BaseAgent):
 
     def get_system_prompt(self) -> str:
         """Get the system prompt for review."""
+        research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            section = self.research_context.to_prompt_section(role="reviewer")
-            return section + "\n\n" + REVIEWER_SYSTEM_PROMPT
-        return REVIEWER_SYSTEM_PROMPT
+            research_section = self.research_context.to_prompt_section(
+                role="reviewer"
+            )
+        return join_system_prompt_sections(
+            REVIEWER_SYSTEM_PROMPT,
+            research_context_instructions=research_section,
+        )
 
     def _format_quotes_section(self, quotes: list[Quote]) -> str:
         """Format quotes for the prompt."""

@@ -34,6 +34,13 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
     handler._ta_cli_handler = True  # type: ignore[attr-defined]
     root.addHandler(handler)
     root.setLevel(level)
+    for name in (
+        "sqlalchemy",
+        "sqlalchemy.engine",
+        "sqlalchemy.pool",
+        "sqlalchemy.orm",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def require_db(path: str | Path) -> int:

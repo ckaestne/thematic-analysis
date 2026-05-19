@@ -256,6 +256,10 @@ class TestCoderAgentResearchContext:
         assert "Healthcare Study" in prompt
         assert "Your Perspective" in prompt
         assert "patient advocate" in prompt
+        assert prompt.index("You are a coder in thematic analysis") < prompt.index(
+            "Research Context"
+        )
+        assert prompt.index("Research Context") < prompt.index("Your Perspective")
 
     def test_config_has_6rs_guidance_option(self):
         config = CoderConfig()

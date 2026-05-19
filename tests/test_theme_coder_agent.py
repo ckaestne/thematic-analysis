@@ -512,6 +512,10 @@ class TestThemeCoderAgentResearchContext:
         assert "Environmental Study" in prompt
         assert "Your Perspective" in prompt
         assert "environmental psychologist" in prompt
+        assert prompt.index("You are an expert qualitative researcher") < prompt.index(
+            "Research Context"
+        )
+        assert prompt.index("Research Context") < prompt.index("Your Perspective")
 
     def test_config_has_theory_guidance_option(self):
         """Test that config has theory guidance option."""

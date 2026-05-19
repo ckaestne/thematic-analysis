@@ -44,10 +44,11 @@ class ResearchContext:
     def to_prompt_section(self, role: str | None = None) -> str:
         """Return the prompt section to inject into an agent's system prompt.
 
-        If a tailored prompt exists for ``role``, return it as-is — it is
-        already a fully-formed section authored for that role. Otherwise
-        fall back to the raw description wrapped in a generic header so the
-        system stays usable before tailored prompts have been generated.
+      If a tailored prompt exists for ``role``, return the stored fragment
+      as-is. These fragments are generated only when the research context is
+      updated/regenerated, then reused for every downstream coding step.
+      Otherwise fall back to the raw description wrapped in a generic header
+      so the system stays usable before tailored prompts have been generated.
         """
         if role is not None:
             tailored = self.tailored_prompts.get(role)

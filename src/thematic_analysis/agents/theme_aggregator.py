@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.theme_coder import Theme, ThemeResult
 from thematic_analysis.codebook import EmbeddingService, Quote
+from thematic_analysis.prompts import join_system_prompt_sections
 
 if TYPE_CHECKING:
     from thematic_analysis.research_context import ResearchContext
@@ -203,12 +204,15 @@ class ThemeAggregatorAgent(BaseAgent):
 
     def get_system_prompt(self) -> str:
         """Get the system prompt for aggregation."""
+        research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            section = self.research_context.to_prompt_section(
+            research_section = self.research_context.to_prompt_section(
                 role="theme_aggregator"
             )
-            return section + "\n\n" + THEME_AGGREGATOR_SYSTEM_PROMPT
-        return THEME_AGGREGATOR_SYSTEM_PROMPT
+        return join_system_prompt_sections(
+            THEME_AGGREGATOR_SYSTEM_PROMPT,
+            research_context_instructions=research_section,
+        )
 
     def _collect_all_themes(self, theme_results: list[ThemeResult]) -> dict[str, Theme]:
         """Collect all themes from multiple results.

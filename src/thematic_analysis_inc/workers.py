@@ -102,6 +102,86 @@ def default_coder_factory(codebook: DomainCodebook, coder: Coder) -> Any:
     return wrap_with_refinement(base)
 
 
+async def _run_coder_for_segment(
+    segment_id: int,
+    coder: Coder,
+    version: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AgentFactory | None = None,
+) -> dict[str, Any]:
+    seg = db.get_segment(segment_id)
+    if seg is None:
+        raise ValueError(f"unknown segment_id: {segment_id}")
+
+    text = seg.content
+    codebook = _get_codebook(version, use_mock_embeddings)
+    factory = agent_factory or default_coder_factory
+    agent = factory(codebook, coder)
+    _apply_research_context(agent)
+
+    t0 = time.monotonic()
+    if hasattr(agent, "code_segment_async"):
+        codes = await agent.code_segment_async(str(segment_id), text)
+    else:
+        codes = agent.code_segment(str(segment_id), text)
+
+    res: dict[str, Any] = {
+        "ok": True,
+        "coder_id": coder.coder_id,
+        "segment_id": segment_id,
+        "version": version,
+        "n_codes": len(codes),
+        "elapsed": time.monotonic() - t0,
+        "codes": codes,
+    }
+    trace = getattr(agent, "last_trace", None)
+    if trace is not None:
+        res["trace"] = trace
+    return res
+
+
+def test_code_segment(
+    segment_id: int,
+    coder_id: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AgentFactory | None = None,
+) -> dict[str, Any]:
+    return asyncio.run(
+        test_code_segment_async(
+            segment_id,
+            coder_id,
+            use_mock_embeddings=use_mock_embeddings,
+            agent_factory=agent_factory,
+        )
+    )
+
+
+async def test_code_segment_async(
+    segment_id: int,
+    coder_id: int,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AgentFactory | None = None,
+) -> dict[str, Any]:
+    coder = db_coders.get_coder(coder_id)
+    if coder is None or coder_id < 1:
+        raise ValueError(f"unknown or system coder_id: {coder_id}")
+
+    latest = db_codebook.latest_codebook()
+    if latest is None:
+        raise RuntimeError("no codebook revision exists; run init first")
+
+    return await _run_coder_for_segment(
+        segment_id,
+        coder,
+        latest.version,
+        use_mock_embeddings=use_mock_embeddings,
+        agent_factory=agent_factory,
+    )
+
+
 def code_one(
     conn: sqlite3.Connection | None,
     coder_id: int,
@@ -141,27 +221,15 @@ async def code_one_async(
     seg = db.get_segment(segment_id)
     text = seg.content if seg is not None else ""
     try:
-        codebook = _get_codebook(version, use_mock_embeddings)
-        agent = factory(codebook, coder)
-        _apply_research_context(agent)
-        t0 = time.monotonic()
-        if hasattr(agent, "code_segment_async"):
-            result = await agent.code_segment_async(str(segment_id), text)
-        else:
-            result = agent.code_segment(str(segment_id), text)
-        db_coding.record_coding_result(assignment, result)
-        elapsed = time.monotonic() - t0
-        res: dict[str, Any] = {
-            "ok": True,
-            "coder_id": coder_id,
-            "segment_id": segment_id,
-            "version": version,
-            "n_codes": len(result),
-            "elapsed": elapsed,
-        }
-        trace = getattr(agent, "last_trace", None)
-        if trace is not None:
-            res["trace"] = trace
+        res = await _run_coder_for_segment(
+            segment_id,
+            coder,
+            version,
+            use_mock_embeddings=use_mock_embeddings,
+            agent_factory=factory,
+        )
+        db_coding.record_coding_result(assignment, res["codes"])
+        res.pop("codes", None)
         return res
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"

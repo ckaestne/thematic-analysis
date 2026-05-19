@@ -12,6 +12,38 @@ Based on Issue #38: Externalize prompts from agent code.
 from dataclasses import dataclass, field
 
 
+def join_system_prompt_sections(
+  general_instructions: str,
+  *,
+  research_context_instructions: str = "",
+  identity_instructions: str = "",
+) -> str:
+  """Join precomputed system-prompt sections.
+
+  The default layout is fixed role instructions first, then any
+  research-context-specific guidance, then identity/persona guidance.
+  This is a pure string operation at runtime; any role-specific research
+  context fragment is assumed to have been generated earlier and stored on
+  the ``ResearchContext`` object. Older templates that still embed
+  ``{identity_section}`` are supported so custom prompts keep working.
+  """
+  identity = identity_instructions.strip()
+  general = general_instructions.strip()
+  if "{identity_section}" in general:
+    general = general.format(identity_section=identity)
+    identity = ""
+  else:
+    general = general.format(identity_section="")
+
+  sections = [general]
+  research = research_context_instructions.strip()
+  if research:
+    sections.append(research)
+  if identity:
+    sections.append(identity)
+  return "\n\n".join(section for section in sections if section)
+
+
 # Coder prompts. The system prompt follows the Thematic-LM paper
 # (Appendix "Main Prompts", p.1106–1112): 1–3 codes per segment, each
 # with a short description and one or more verbatim quotes.
@@ -60,9 +92,7 @@ segment, not paraphrased.
 When an existing code in the codebook fits, reuse its exact label.
 
 If the segment does not address the research focus, return an empty
-list of codes. Do not invent codes to cover off-topic material.
-
-{identity_section}"""
+list of codes. Do not invent codes to cover off-topic material."""
 
 
 CODER_USER_PROMPT = """\
@@ -70,10 +100,7 @@ CODER_USER_PROMPT = """\
 {codebook_section}
 
 ## Text Segment to Code:
-ID: {segment_id}
 Text: "{segment_text}"
-
-{similar_codes_section}
 
 Output codes following the required schema."""
 

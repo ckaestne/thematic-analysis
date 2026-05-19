@@ -78,7 +78,12 @@ export function CoderRuns() {
             label="Coder"
             placeholder="All"
             clearable
-            data={coders.data?.map((c) => c.coder_id) ?? []}
+            data={
+              coders.data?.map((c) => ({
+                value: String(c.coder_id),
+                label: c.identity ?? String(c.coder_id),
+              })) ?? []
+            }
             value={coderId || null}
             onChange={(v) => setParam("coder_id", v)}
             style={{ width: 220 }}

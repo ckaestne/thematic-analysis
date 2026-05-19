@@ -40,6 +40,7 @@ from thematic_analysis.agents.coder import (
     CODER_RESPONSE_SCHEMA,
     CoderAgent,
 )
+from thematic_analysis.prompts import join_system_prompt_sections
 from thematic_analysis_inc.db.models import Code
 
 
@@ -139,12 +140,12 @@ class Critic:
 
     def _system_prompt(self) -> str:
         ctx = self.research_context
-        if ctx is None or ctx.is_empty():
-            return CRITIC_SYSTEM_PROMPT
-        return (
-            CRITIC_SYSTEM_PROMPT
-            + "\n\n"
-            + ctx.to_prompt_section(role="coding_critic")
+        research_section = ""
+        if ctx is not None and not ctx.is_empty():
+            research_section = ctx.to_prompt_section(role="coding_critic")
+        return join_system_prompt_sections(
+            CRITIC_SYSTEM_PROMPT,
+            research_context_instructions=research_section,
         )
 
     def _messages(

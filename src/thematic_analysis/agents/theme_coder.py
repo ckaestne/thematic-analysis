@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook, Quote
+from thematic_analysis.prompts import join_system_prompt_sections
 
 
 if TYPE_CHECKING:
@@ -93,8 +94,6 @@ Your task is to identify overarching themes from a codebook of codes and quotes.
 - **Distinctive**: Themes should be clearly distinguishable from each other
 - **Data-driven**: Themes should emerge from and be supported by the codes
 - **Insightful**: Themes should reveal patterns not obvious from codes alone
-
-{identity_section}
 
 ## Output Format:
 Respond with a JSON object containing a list of themes:
@@ -201,18 +200,14 @@ while staying grounded in the data."""
         # Add research context for theory-aligned theme development
         research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            research_section = (
-                "\n"
-                + self.research_context.to_prompt_section(role="theme_coder")
-                + "\n"
+            research_section = self.research_context.to_prompt_section(
+                role="theme_coder"
             )
-
-        prompt = THEME_CODER_SYSTEM_PROMPT.format(identity_section=identity_section)
-
-        if research_section:
-            prompt = research_section + "\n\n" + prompt
-
-        return prompt
+        return join_system_prompt_sections(
+            THEME_CODER_SYSTEM_PROMPT,
+            research_context_instructions=research_section,
+            identity_instructions=identity_section,
+        )
 
     def _format_codes_section(self) -> str:
         """Format codes and quotes for the prompt."""

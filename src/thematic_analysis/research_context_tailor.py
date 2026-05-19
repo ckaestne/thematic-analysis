@@ -85,16 +85,26 @@ no markdown code fences. It will be inserted verbatim under a heading
 like "## Research Context" inside the target agent's system prompt.
 
 Write in second person, addressing the target agent. Keep it tight
-(roughly 150–300 words). Start by stating the research context and the
+(roughly 50–200 words). Start by stating the research context and the
 research question(s) the researcher wrote, in your own slightly
 condensed phrasing if helpful, then give the target agent specific
 guidance for its job — what to attend to, what counts as relevant, what
 to avoid. Stay grounded in what the researcher actually wrote; do not
 invent research questions or framings they did not state.
 
+Assume the base system prompt already defines the agent's general role,
+workflow, and output format. Do not restate that generic role guidance.
+In particular, do not repeat boilerplate such as "you are a coder",
+"you are a critic", "your job is to...", summaries of what inputs the
+agent sees, or generic instructions about coding/reviewing/themeing.
+Write only the research-context-specific delta: what this study is about,
+what counts as on-topic vs. off-topic for this study, what kinds of
+features matter here, and any study-specific framing the agent should use.
+
 Do not add boilerplate methodology advice (6 Rs, definitions of
-"theme", etc.) — that is supplied separately. Focus on what is specific
-to this research context.
+"theme", etc.) — that is supplied separately. Focus on what the role
+needs to know about the research context and how it needs to apply the
+research context.
 """
 
 
@@ -105,7 +115,8 @@ def _meta_user_prompt(description: str, role: str) -> str:
         f'"""\n{description.strip()}\n"""\n\n'
         "## Target agent\n"
         f"{brief}\n\n"
-        "Now write the tailored prompt section for this agent."
+        "Now write only the research-context-specific prompt fragment for this "
+        "agent. Do not repeat the agent's generic role or workflow."
     )
 
 

@@ -22,7 +22,11 @@ from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook
-from thematic_analysis.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT
+from thematic_analysis.prompts import (
+    CODER_SYSTEM_PROMPT,
+    CODER_USER_PROMPT,
+    join_system_prompt_sections,
+)
 from thematic_analysis_inc.db.models import Code, Quote
 
 
@@ -122,22 +126,18 @@ analytical rigor and staying grounded in the text."""
 
         research_section = ""
         if self.research_context and not self.research_context.is_empty():
-            research_section = (
-                "\n"
-                + self.research_context.to_prompt_section(role="coder")
-                + "\n"
+            research_section = "## Research context\n" + self.research_context.to_prompt_section(
+                role="coder"
             )
 
         base_prompt = CODER_SYSTEM_PROMPT
         if self.coder_config.custom_prompts is not None:
             base_prompt = self.coder_config.custom_prompts.system_prompt
-
-        prompt = base_prompt.format(identity_section=identity_section)
-
-        if research_section:
-            prompt = research_section + "\n\n" + prompt
-
-        return prompt
+        return join_system_prompt_sections(
+            base_prompt,
+            research_context_instructions=research_section,
+            identity_instructions=identity_section,
+        )
 
     def _get_user_prompt_template(self) -> str:
         if self.coder_config.custom_prompts is not None:
