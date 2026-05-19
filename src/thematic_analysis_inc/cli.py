@@ -397,6 +397,38 @@ def _resolve_workers(value: str | int) -> int:
     return 4
 
 
+def _cmd_enqueue(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    coder_ids: list[int] | None = None
+    if args.coders:
+        resolved: list[int] = []
+        for raw in args.coders:
+            cid = _parse_coder_id(raw)
+            if cid is None:
+                print(f"unknown coder_id: {raw}", file=sys.stderr)
+                return 1
+            resolved.append(cid)
+        coder_ids = resolved
+
+    if args.document is not None and args.segment is not None:
+        print(
+            "specify either --document or --segment, not both",
+            file=sys.stderr,
+        )
+        return 1
+    if args.document is None and args.segment is None:
+        print("specify --document or --segment", file=sys.stderr)
+        return 1
+
+    if args.document is not None:
+        n = store.coding.enqueue_document(args.document, coder_ids=coder_ids)
+        print(f"[enqueue] document={args.document} enqueued={n}")
+    else:
+        n = store.coding.enqueue_segment(args.segment, coder_ids=coder_ids)
+        print(f"[enqueue] segment={args.segment} enqueued={n}")
+    return 0
+
+
 def _cmd_code(args: SimpleNamespace) -> int:
     store.connect(args.db)
     cid = _parse_coder_id(args.coder_id)
@@ -416,7 +448,6 @@ def _cmd_code(args: SimpleNamespace) -> int:
 
     n_workers = _resolve_workers(args.workers)
 
-    store.coding.sync_coding_queue()
     todo = store.coding.pending_count(coder)
     print(
         f"[code] coder={args.coder_id} todo={todo} workers={n_workers}"
@@ -1103,6 +1134,50 @@ def _cli_list_coders(ctx: typer.Context) -> None:
 
 
 # Stage 1 codebook pipeline --------------------------------------------------
+
+
+@app.command(
+    name="enqueue",
+    rich_help_panel=PANEL_S1_PIPELINE,
+    help="enqueue a document or segment for coding (defaults to all coders)",
+)
+def _cli_enqueue(
+    ctx: typer.Context,
+    document: Annotated[
+        int | None,
+        typer.Option(
+            "--document",
+            "-d",
+            help="document_id whose segments should be enqueued",
+        ),
+    ] = None,
+    segment: Annotated[
+        int | None,
+        typer.Option(
+            "--segment",
+            "-s",
+            help="segment_id to enqueue (single segment form)",
+        ),
+    ] = None,
+    coder: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--coder",
+            "-c",
+            help=(
+                "coder_id(s) to enqueue for; pass multiple times. "
+                "Defaults to every registered coder."
+            ),
+        ),
+    ] = None,
+) -> None:
+    _run(
+        ctx,
+        _cmd_enqueue,
+        document=document,
+        segment=segment,
+        coders=coder or [],
+    )
 
 
 @app.command(

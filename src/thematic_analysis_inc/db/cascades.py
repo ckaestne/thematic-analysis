@@ -208,7 +208,13 @@ def reset_coding_assignment_cascade(
     and cascade-delete any aggregator/reviewer codes for the segment."""
     with session() as s:
         a = s.get(
-            CodingQueueEntry, (assignment.segment_id, assignment.coder_id)
+            CodingQueueEntry,
+            (
+                assignment.segment_id,
+                assignment.coder_id,
+                assignment.codebook_used_id,
+                assignment.research_context_used_id,
+            ),
         )
         if a is None:
             return False

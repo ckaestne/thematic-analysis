@@ -130,13 +130,28 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
-    """Connect + apply schema + ensure codebook v1 exists."""
+    """Connect + apply schema + ensure codebook v1 and an initial empty
+    research-context revision exist.
+
+    Seeding an empty research context up front means every queue row
+    always references a real revision — `coding_queue.research_context_used_id`
+    is part of the primary key and therefore cannot be NULL.
+    """
     from thematic_analysis_inc.db.codebook import (
         insert_codebook_version,
         latest_codebook,
+    )
+    from thematic_analysis_inc.db.research_context import (
+        latest_research_context_version,
+        set_research_context,
+    )
+    from thematic_analysis.research_context import (
+        ResearchContext as DomainResearchContext,
     )
 
     conn = connect(path)
     if latest_codebook() is None:
         insert_codebook_version(parent=None)
+    if latest_research_context_version() is None:
+        set_research_context(DomainResearchContext(description=""))
     return conn

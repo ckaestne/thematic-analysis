@@ -63,6 +63,10 @@ class CodeEdit(BaseModel):
     code: str
 
 
+class EnqueueIn(BaseModel):
+    coder_ids: list[int] | None = None
+
+
 def _coder_payload(c) -> dict[str, Any]:
     return {
         "coder_id": c.coder_id,
@@ -449,6 +453,38 @@ def create_app(db_path: str | Path) -> FastAPI:
         if not removed:
             raise HTTPException(status_code=404, detail="document not found")
         return {"removed_document": True, "removed_segments": n_segs}
+
+    @app.post("/api/documents/{document_id}/enqueue")
+    def enqueue_document(
+        document_id: int, body: EnqueueIn | None = None
+    ) -> dict[str, Any]:
+        """Schedule every segment of a document for coding (default: all
+        registered real coders) at the latest codebook + research-context
+        revisions. Re-enqueueing at the same revisions is a no-op."""
+        _ensure_connected()
+        with store.session() as s:
+            doc = s.get(store.Document, document_id)
+            if doc is None:
+                raise HTTPException(
+                    status_code=404, detail="document not found"
+                )
+        coder_ids = body.coder_ids if body else None
+        n = db_coding.enqueue_document(document_id, coder_ids=coder_ids)
+        return {"enqueued": n}
+
+    @app.post("/api/segments/{segment_id}/enqueue")
+    def enqueue_segment(
+        segment_id: int, body: EnqueueIn | None = None
+    ) -> dict[str, Any]:
+        """Schedule a single segment for coding (default: all registered
+        real coders) at the latest codebook + research-context revisions."""
+        _ensure_connected()
+        seg = store.get_segment(segment_id)
+        if seg is None:
+            raise HTTPException(status_code=404, detail="segment not found")
+        coder_ids = body.coder_ids if body else None
+        n = db_coding.enqueue_segment(segment_id, coder_ids=coder_ids)
+        return {"enqueued": n}
 
     # ── coders ───────────────────────────────────────────────────────────
     @app.get("/api/coders")

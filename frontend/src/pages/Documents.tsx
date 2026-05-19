@@ -10,7 +10,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconTrash } from "@tabler/icons-react";
+import { IconPlayerPlay, IconTrash } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api } from "../api";
@@ -78,6 +78,27 @@ export function Documents() {
       }),
   });
 
+  const enqueue = useMutation({
+    mutationFn: (id: number) => api.enqueueDocument(id),
+    onSuccess: (res) => {
+      notifications.show({
+        message:
+          res.enqueued > 0
+            ? `Enqueued ${res.enqueued} (segment, coder) pair${res.enqueued === 1 ? "" : "s"} for coding`
+            : "Already enqueued at the current codebook + research-context revisions",
+        color: "teal",
+      });
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["status"] });
+      qc.invalidateQueries({ queryKey: ["coding-queue"] });
+    },
+    onError: (e) =>
+      notifications.show({
+        message: e instanceof Error ? e.message : String(e),
+        color: "red",
+      }),
+  });
+
   if (error) return <ErrorAlert error={error} />;
 
   const coderIds = data?.coder_ids ?? [];
@@ -101,7 +122,7 @@ export function Documents() {
               <Table.Th style={{ minWidth: 140 }}>Aggregations</Table.Th>
               <Table.Th>Size</Table.Th>
               <Table.Th>Added</Table.Th>
-              <Table.Th w={40}></Table.Th>
+              <Table.Th w={80}></Table.Th>
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -197,6 +218,19 @@ export function Documents() {
                   </Text>
                 </Table.Td>
                 <Table.Td>
+                  <Tooltip label="Enqueue every segment in this document for coding by all registered coders (at the latest codebook + research-context revisions)">
+                    <ActionIcon
+                      variant="subtle"
+                      color="blue"
+                      loading={
+                        enqueue.isPending &&
+                        enqueue.variables === d.document_id
+                      }
+                      onClick={() => enqueue.mutate(d.document_id)}
+                    >
+                      <IconPlayerPlay size={16} />
+                    </ActionIcon>
+                  </Tooltip>
                   <Tooltip label="Delete document (and all its segments + derived data)">
                     <ActionIcon
                       variant="subtle"

@@ -273,13 +273,16 @@ class Quote(SQLModel, table=True):
 
 
 class CodingQueueEntry(SQLModel, table=True):
-    """One (Segment, Coder) assignment.
+    """One (Segment, Coder, Codebook revision, ResearchContext revision)
+    assignment.
+
+    The primary key includes the codebook and research-context revisions
+    so that, when either revision moves forward, the same (segment, coder)
+    can be enqueued again as a separate work item. Re-enqueueing at the
+    same revisions is a no-op (idempotent).
 
     Status is derived from `claimed_at` / `finished_at` / `error` (see
     `status` property below) — there is no status column.
-
-    The entry records which Codebook and Research Context the worker
-    should use when running this assignment.
     """
 
     __tablename__ = "coding_queue"
@@ -290,11 +293,14 @@ class CodingQueueEntry(SQLModel, table=True):
     coder_id: int = Field(
         foreign_key="coder.coder_id", primary_key=True, index=True
     )
-    codebook_used_id: int = Field(foreign_key="codebook.version")
-    research_context_used_id: Optional[int] = Field(
-        default=None,
-        foreign_key="research_context.research_context_version",
+    codebook_used_id: int = Field(
+        foreign_key="codebook.version", primary_key=True
     )
+    research_context_used_id: int = Field(
+        foreign_key="research_context.research_context_version",
+        primary_key=True,
+    )
+    enqueued_at: datetime = Field(default_factory=_utcnow)
     claimed_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     error: Optional[str] = None
