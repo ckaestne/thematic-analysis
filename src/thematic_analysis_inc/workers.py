@@ -17,11 +17,7 @@ from thematic_analysis.agents.aggregator import (
     AggregatorConfig,
     CodeAggregatorAgent,
 )
-from thematic_analysis.agents.coder import (
-    CodeAssignment,
-    CoderAgent,
-    CoderConfig,
-)
+from thematic_analysis.agents.coder import CoderAgent, CoderConfig
 from thematic_analysis.agents.reviewer import (
     ReviewDecision,
     ReviewerAgent,
@@ -132,7 +128,6 @@ def _code_one_impl(
         _apply_research_context(agent)
         t0 = time.monotonic()
         result = agent.code_segment(str(segment_id), text)
-        result = _normalize_coder_result(result)
         db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
@@ -204,7 +199,6 @@ async def code_one_async(
             result = await agent.code_segment_async(str(segment_id), text)
         else:
             result = agent.code_segment(str(segment_id), text)
-        result = _normalize_coder_result(result)
         db_coding.record_coding_result(assignment, result)
         elapsed = time.monotonic() - t0
         res: dict[str, Any] = {
@@ -281,36 +275,11 @@ def default_aggregator_factory(codebook: DomainCodebook) -> CodeAggregatorAgent:
     return CodeAggregatorAgent(config=AggregatorConfig(), codebook=codebook)
 
 
-def _build_assignments(
-    segment_id: int, text: str, coder_codes: dict[int, list[Code]]
-) -> list[CodeAssignment]:
-    return [
-        CodeAssignment(
-            segment_id=str(segment_id),
-            segment_text=text,
-            codes=[c.code for c in codes],
-        )
-        for _cid, codes in sorted(coder_codes.items())
-    ]
-
-
-def _normalize_coder_result(result: Any) -> list[Code]:
-    """Accept either a ``list[Code]`` (new) or a legacy assignment-like
-    object exposing ``.codes`` (list[str]). Returns ``list[Code]``."""
-    if result is None:
-        return []
-    if isinstance(result, list):
-        return list(result)
-    codes_attr = getattr(result, "codes", None)
-    if codes_attr is None:
-        return []
-    out: list[Code] = []
-    for c in codes_attr:
-        if isinstance(c, Code):
-            out.append(c)
-        else:
-            out.append(Code(code=str(c), description=""))
-    return out
+def _grouped_coder_codes(
+    coder_codes: dict[int, list[Code]],
+) -> list[list[Code]]:
+    """Return the per-coder code lists in coder_id order."""
+    return [codes for _cid, codes in sorted(coder_codes.items())]
 
 
 def aggregate_one(
@@ -342,8 +311,7 @@ def aggregate_one(
         factory = agent_factory or default_aggregator_factory
         agent = factory(domain_cb)
         t0 = time.monotonic()
-        assignments = _build_assignments(segment_id, text, coder_codes)
-        result = agent.aggregate(assignments)
+        result = agent.aggregate(_grouped_coder_codes(coder_codes))
 
         if db_aggregation.segment_has_aggregator_code(segment_id):
             return {

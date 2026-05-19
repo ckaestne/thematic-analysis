@@ -216,15 +216,25 @@ def reset_assignment(
 
 
 def load_segment_coder_codes(segment: Segment) -> dict[int, list[Code]]:
-    """Map coder_id → list[Code] for real coders only (id ≥ 1)."""
+    """Map coder_id → list[Code] for real coders only (id ≥ 1).
+
+    Eagerly loads each code's ``supporting_quotes`` so callers (e.g.
+    the aggregator) can read them after the session closes.
+    """
+    from sqlalchemy.orm import selectinload
+
     with session() as s:
         rows = list(
             s.exec(
                 select(Code)
                 .where(Code.segment_id == segment.segment_id, Code.coder_id >= 1)
+                .options(selectinload(Code.supporting_quotes))  # type: ignore[arg-type]
                 .order_by(Code.coder_id, Code.code_id)
             ).all()
         )
+        # Touch the relationship before expunging so it's materialised.
+        for r in rows:
+            _ = list(r.supporting_quotes)
         for r in rows:
             s.expunge(r)
         out: dict[int, list[Code]] = {}

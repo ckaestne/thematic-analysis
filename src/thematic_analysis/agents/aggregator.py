@@ -5,9 +5,9 @@ import re
 from dataclasses import dataclass
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
-from thematic_analysis.agents.coder import CodeAssignment
 from thematic_analysis.codebook import Codebook, Quote
 from thematic_analysis.iterative import NegotiationStrategy, negotiate
+from thematic_analysis_inc.db.models import Code as DBCode
 
 
 @dataclass
@@ -186,26 +186,21 @@ class CodeAggregatorAgent(BaseAgent):
         return AGGREGATOR_SYSTEM_PROMPT
 
     def _apply_negotiation_strategy(
-        self, assignments: list[CodeAssignment]
+        self, coder_codes: list[list[DBCode]]
     ) -> set[str]:
         """Apply negotiation strategy to filter codes based on coder agreement.
 
-        This integrates the NegotiationStrategy from iterative.py module.
-        Per the paper: codes should be agreed upon by coders before aggregation.
-
         Args:
-            assignments: List of code assignments from coders.
+            coder_codes: One inner list of ``Code`` rows per coder.
 
         Returns:
             Set of codes that pass the negotiation strategy filter.
         """
-        # Build code sets per coder
-        code_sets = [set(a.codes) for a in assignments]
+        code_sets = [{c.code for c in codes} for codes in coder_codes]
 
         if not code_sets:
             return set()
 
-        # Use the negotiate function from iterative module
         result = negotiate(
             code_sets=code_sets,
             strategy=self.aggregator_config.negotiation_strategy,
@@ -214,12 +209,18 @@ class CodeAggregatorAgent(BaseAgent):
         return set(result.agreed_codes)
 
     def _collect_codes_with_quotes(
-        self, assignments: list[CodeAssignment], agreed_codes: set[str] | None = None
+        self,
+        coder_codes: list[list[DBCode]],
+        agreed_codes: set[str] | None = None,
     ) -> dict[str, list[Quote]]:
         """Collect codes with their associated quotes.
 
+        Each ``Code`` carries ``supporting_quotes`` extracted by the
+        coder agent; we surface those quotes here keyed by the code
+        label. Quotes are deduplicated by their text.
+
         Args:
-            assignments: List of code assignments from coders.
+            coder_codes: One inner list of ``Code`` rows per coder.
             agreed_codes: Optional set of codes that passed negotiation.
                          If None, all codes are included.
 
@@ -228,21 +229,23 @@ class CodeAggregatorAgent(BaseAgent):
         """
         code_quotes: dict[str, list[Quote]] = {}
 
-        for assignment in assignments:
-            for code in assignment.codes:
-                # Filter by agreed codes if negotiation was applied
-                if agreed_codes is not None and code not in agreed_codes:
+        for codes in coder_codes:
+            for c in codes:
+                if agreed_codes is not None and c.code not in agreed_codes:
                     continue
-
-                if code not in code_quotes:
-                    code_quotes[code] = []
-                quote = Quote(
-                    quote_id=assignment.segment_id,
-                    text=assignment.segment_text,
-                )
-                # Avoid duplicate quotes
-                if not any(q.quote_id == quote.quote_id for q in code_quotes[code]):
-                    code_quotes[code].append(quote)
+                bucket = code_quotes.setdefault(c.code, [])
+                seen = {q.text for q in bucket}
+                for sq in (c.supporting_quotes or []):
+                    if sq.text in seen:
+                        continue
+                    seen.add(sq.text)
+                    bucket.append(
+                        Quote(quote_id=str(c.segment_id or ""), text=sq.text)
+                    )
+                # If the coder produced no supporting_quotes for this
+                # code, still surface the code so it can be aggregated.
+                if not bucket:
+                    code_quotes[c.code] = []
 
         return code_quotes
 
@@ -386,33 +389,29 @@ class CodeAggregatorAgent(BaseAgent):
 
     def aggregate(
         self,
-        assignments: list[CodeAssignment],
+        coder_codes: list[list[DBCode]],
         apply_negotiation: bool = True,
     ) -> AggregationResult:
-        """Aggregate codes from multiple coder assignments.
-
-        First applies NegotiationStrategy to filter codes by coder agreement,
-        then merges semantically similar codes using LLM.
+        """Aggregate codes from multiple coders for one segment.
 
         Args:
-            assignments: List of code assignments from coder agents.
+            coder_codes: One inner list of ``Code`` rows per coder, all
+                for the same segment. Each ``Code`` is expected to
+                carry its ``supporting_quotes``.
             apply_negotiation: Whether to apply negotiation strategy first.
-                             Set to False for backward compatibility.
 
         Returns:
             AggregationResult with merged and retained codes.
         """
         # Step 1: Apply negotiation strategy to filter codes
         agreed_codes = None
-        if apply_negotiation and len(assignments) > 1:
-            agreed_codes = self._apply_negotiation_strategy(assignments)
-            # If negotiation yields no codes (e.g., INTERSECTION with no overlap),
-            # fall back to UNION to avoid empty results
+        if apply_negotiation and len(coder_codes) > 1:
+            agreed_codes = self._apply_negotiation_strategy(coder_codes)
             if not agreed_codes:
                 agreed_codes = None  # Include all codes
 
         # Step 2: Collect codes with their quotes (filtered by negotiation)
-        code_quotes = self._collect_codes_with_quotes(assignments, agreed_codes)
+        code_quotes = self._collect_codes_with_quotes(coder_codes, agreed_codes)
 
         if not code_quotes:
             return AggregationResult(merged_codes=[], retained_codes=[])

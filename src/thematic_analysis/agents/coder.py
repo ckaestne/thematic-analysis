@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.codebook import Codebook
+from thematic_analysis.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT
 from thematic_analysis_inc.db.models import Code, Quote
 
 
@@ -39,39 +42,21 @@ class CoderConfig(AgentConfig):
     custom_prompts: CoderPrompts | None = None
 
 
-@dataclass
-class CodeAssignment:
-    """Aggregator input: codes a single coder produced for one segment.
+class _CodeItem(BaseModel):
+    """Pydantic shape mirroring the JSON-schema item the LLM returns."""
 
-    Slim transport object used by ``CodeAggregatorAgent``. The coder
-    itself returns transient ``Code`` instances; the worker layer
-    builds this shape when handing per-coder code lists to the
-    aggregator.
-    """
+    code: str
+    description: str
+    quotes: list[str]
 
-    segment_id: str
-    segment_text: str
-    codes: list[str] = field(default_factory=list)
+    model_config = {"extra": "ignore"}
 
 
-CODER_SYSTEM_PROMPT = """\
-You are a coder in thematic analysis. When given a text segment,
-write 1–3 codes for the segment. The code should capture concepts or
-ideas with the most analytical interest, relevant to the research
-focus.
+class _CoderResponse(BaseModel):
+    codes: list[_CodeItem]
 
-For each code, provide a short description (one sentence) of what
-the concept means as a general analytic category, and extract one or
-more quotes from the segment corresponding to the code. Each quote
-needs to be an extract from a sentence — copied verbatim from the
-segment, not paraphrased.
+    model_config = {"extra": "ignore"}
 
-When an existing code in the codebook fits, reuse its exact label.
-
-If the segment does not address the research focus, return an empty
-list of codes. Do not invent codes to cover off-topic material.
-
-{identity_section}"""
 
 CODER_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -103,19 +88,6 @@ CODER_RESPONSE_SCHEMA = {
         },
     },
 }
-
-
-CODER_USER_PROMPT = """\
-## Current Codebook:
-{codebook_section}
-
-## Text Segment to Code:
-ID: {segment_id}
-Text: "{segment_text}"
-
-{similar_codes_section}
-
-Output codes following the required schema."""
 
 
 class CoderAgent(BaseAgent):
@@ -208,10 +180,10 @@ analytical rigor and staying grounded in the text."""
     ) -> list[Code] | None:
         """Parse the LLM JSON into transient ``Code`` rows with quotes.
 
-        - Truncates to ``max_codes_per_segment``.
-        - Drops quotes that aren't a substring of ``segment_text``
-          (best-effort verbatim check).
-        - Drops a code if no surviving quotes remain.
+        Uses pydantic to validate the response shape. Truncates to
+        ``max_codes_per_segment``, drops quotes that aren't a substring
+        of ``segment_text`` (best-effort verbatim check), and drops a
+        code if no surviving quotes remain.
         """
         json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
         if json_match:
@@ -224,38 +196,26 @@ analytical rigor and staying grounded in the text."""
                 return None
 
         try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-
-        items = data.get("codes")
-        if not isinstance(items, list):
+            parsed = _CoderResponse.model_validate_json(json_str)
+        except (json.JSONDecodeError, ValidationError):
             return None
 
         out: list[Code] = []
-        for item in items[: self.coder_config.max_codes_per_segment]:
-            if not isinstance(item, dict):
-                continue
-            code_text = (item.get("code") or "").strip()
-            description = (item.get("description") or "").strip()
-            raw_quotes = item.get("quotes") or []
+        for item in parsed.codes[: self.coder_config.max_codes_per_segment]:
+            code_text = item.code.strip()
             if not code_text:
                 continue
             quotes: list[Quote] = []
             seen: set[str] = set()
-            for q in raw_quotes:
-                if not isinstance(q, str):
-                    continue
+            for q in item.quotes:
                 qt = q.strip()
-                if not qt or qt in seen:
-                    continue
-                if qt not in segment_text:
+                if not qt or qt in seen or qt not in segment_text:
                     continue
                 seen.add(qt)
                 quotes.append(Quote(text=qt))
             if not quotes:
                 continue
-            code = Code(code=code_text, description=description)
+            code = Code(code=code_text, description=item.description.strip())
             code.supporting_quotes = quotes
             out.append(code)
         return out

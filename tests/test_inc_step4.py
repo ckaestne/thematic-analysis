@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from thematic_analysis.agents.reviewer import ReviewDecision, ReviewResult
@@ -62,14 +61,18 @@ class _StubAggregator:
     def __init__(self, codebook):
         pass
 
-    def aggregate(self, assignments, apply_negotiation=True):
+    def aggregate(self, coder_codes, apply_negotiation=True):
         from thematic_analysis.agents.aggregator import (
             AggregationResult,
             MergedCode,
         )
 
-        seg_id = assignments[0].segment_id
-        seg_text = assignments[0].segment_text
+        seg_id = str(coder_codes[0][0].segment_id)
+        seg_text = (
+            coder_codes[0][0].supporting_quotes[0].text
+            if coder_codes[0][0].supporting_quotes
+            else ""
+        )
         return AggregationResult(
             merged_codes=[],
             retained_codes=[

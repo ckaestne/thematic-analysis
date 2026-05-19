@@ -7,7 +7,7 @@ from thematic_analysis.agents.aggregator import (
     MergedCode,
 )
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
-from thematic_analysis.agents.coder import CodeAssignment, CoderAgent, CoderConfig
+from thematic_analysis.agents.coder import CoderAgent, CoderConfig
 from thematic_analysis.agents.reviewer import (
     ReviewDecision,
     ReviewerAgent,
@@ -33,7 +33,6 @@ __all__ = [
     "AgentConfig",
     "CoderAgent",
     "CoderConfig",
-    "CodeAssignment",
     "CodeAggregatorAgent",
     "AggregatorConfig",
     "AggregationResult",
