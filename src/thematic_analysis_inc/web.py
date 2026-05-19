@@ -183,10 +183,23 @@ def create_app(db_path: str | Path) -> FastAPI:
                     "coding_queue_total": s1.coding_queue_total,
                     "coding_queue_by_status": s1.coding_queue_by_status,
                     "aggregator_codes_total": s1.aggregator_codes_total,
+                    "aggregator_segments_total": s1.aggregator_segments_total,
                     "reviewer_codes_total": s1.reviewer_codes_total,
                     "review_decisions_by_kind": s1.review_decisions_by_kind,
                     "codebook_version": s1.codebook_version,
                     "codebook_codes": s1.codebook_codes,
+                    # Legacy aliases the bundled SPA still references.
+                    "coder_runs_total": s1.coding_queue_total,
+                    "coder_runs_by_status": s1.coding_queue_by_status,
+                    "aggregations_total": s1.aggregator_segments_total,
+                    "aggregations_by_status": (
+                        {"done": s1.aggregator_segments_total}
+                        if s1.aggregator_segments_total
+                        else {}
+                    ),
+                    "review_decisions_total": sum(
+                        s1.review_decisions_by_kind.values()
+                    ),
                 },
                 "stage2": {
                     "codebook_version": s2.codebook_version,
