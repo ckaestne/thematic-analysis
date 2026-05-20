@@ -7,13 +7,42 @@ from unittest.mock import patch
 import pytest
 
 from thematic_analysis.agents import CoderAgent, CoderConfig
-from thematic_analysis.codebook import Codebook, Quote as DomainQuote
-from thematic_analysis.research_context import ResearchContext
 from thematic_analysis_inc.db.models import SENTINEL_CODE_LABEL, is_sentinel_code
 
 
 def _seg(text: str, quotes=None):
     return SimpleNamespace(segment_id=1, content=text, quotes=quotes or [])
+
+
+def _coder(coder_id: int = 1, identity: str | None = None):
+    return SimpleNamespace(coder_id=coder_id, identity=identity)
+
+
+def _codebook(version: int = 1, codes=None, research_context=None):
+    return SimpleNamespace(
+        version=version,
+        codes=codes or [],
+        research_context=research_context,
+    )
+
+
+def _rc_row(description: str = "", coder_prompt: str | None = None):
+    return SimpleNamespace(
+        description=description,
+        coder_prompt=coder_prompt,
+        coding_critic_prompt=None,
+        reviewer_prompt=None,
+        theme_coder_prompt=None,
+        theme_aggregator_prompt=None,
+    )
+
+
+def _agent(**kw) -> CoderAgent:
+    return CoderAgent(
+        coder=kw.pop("coder", _coder()),
+        codebook=kw.pop("codebook", _codebook()),
+        config=kw.pop("config", None),
+    )
 
 
 CLIMATE_DESCRIPTION = (
@@ -41,38 +70,34 @@ class TestCoderConfig:
     def test_default_config(self):
         config = CoderConfig()
         assert config.max_codes_per_segment == 5
-        assert config.similarity_threshold == 0.7
         assert config.temperature == 0.7
 
     def test_custom_config(self):
-        config = CoderConfig(
-            max_codes_per_segment=3,
-            similarity_threshold=0.8,
-            identity="researcher perspective",
-        )
+        config = CoderConfig(max_codes_per_segment=3)
         assert config.max_codes_per_segment == 3
-        assert config.identity == "researcher perspective"
 
 
 class TestCoderAgent:
     @pytest.fixture
     def agent(self) -> CoderAgent:
-        return CoderAgent()
+        return _agent()
 
     @pytest.fixture
     def agent_with_codebook(self) -> CoderAgent:
-        codebook = Codebook(use_mock_embeddings=True)
-        codebook.add_code("emotional support", [DomainQuote("q1", "felt supported")])
-        codebook.add_code("peer connection", [DomainQuote("q2", "connected with peers")])
-        return CoderAgent(codebook=codebook)
+        codes = [
+            SimpleNamespace(code="emotional support"),
+            SimpleNamespace(code="peer connection"),
+        ]
+        return _agent(codebook=_codebook(codes=codes))
 
     def test_initialization(self, agent: CoderAgent):
         assert agent.codebook is not None
-        assert len(agent.codebook) == 0
+        assert len(agent.codebook.codes) == 0
+        assert agent.coder.coder_id == 1
         assert isinstance(agent.coder_config, CoderConfig)
 
     def test_initialization_with_codebook(self, agent_with_codebook: CoderAgent):
-        assert len(agent_with_codebook.codebook) == 2
+        assert len(agent_with_codebook.codebook.codes) == 2
 
     def test_get_system_prompt_without_identity(self, agent: CoderAgent):
         prompt = agent.get_system_prompt()
@@ -81,8 +106,7 @@ class TestCoderAgent:
         assert "Your Perspective" not in prompt
 
     def test_get_system_prompt_with_identity(self):
-        config = CoderConfig(identity="feminist researcher")
-        agent = CoderAgent(config=config)
+        agent = _agent(coder=_coder(identity="feminist researcher"))
         prompt = agent.get_system_prompt()
         assert "Your Perspective" in prompt
         assert "feminist researcher" in prompt
@@ -96,9 +120,6 @@ class TestCoderAgent:
         assert "emotional support" in section
         assert "peer connection" in section
         assert "2 total" in section
-
-    def test_format_similar_codes_section_empty_codebook(self, agent: CoderAgent):
-        assert agent._format_similar_codes_section("test text") == ""
 
     def test_parse_response_valid_json(self, agent: CoderAgent):
         response = "```json\n" + _resp([
@@ -114,9 +135,11 @@ class TestCoderAgent:
             },
         ]) + "\n```"
         result = agent._parse_response(response, _seg(SEG_TEXT))
-        assert result is not None
         assert [c.code for c in result] == ["emotional support", "peer connection"]
         assert result[0].description.startswith("Receiving")
+        assert result[0].segment_id == 1
+        assert result[0].coder_id == 1
+        assert result[0].codebook_used_id == 1
         assert [q.text for q in result[0].supporting_quotes] == [
             "felt supported by my friends and family"
         ]
@@ -130,12 +153,15 @@ class TestCoderAgent:
             }
         ])
         result = agent._parse_response(response, _seg(SEG_TEXT))
-        assert result is not None and len(result) == 1
+        assert len(result) == 1
         assert result[0].code == "emotional support"
 
     def test_parse_response_invalid_json(self, agent: CoderAgent):
         result = agent._parse_response("Not JSON", _seg(SEG_TEXT))
         assert len(result) == 1 and is_sentinel_code(result[0])
+        assert result[0].segment_id == 1
+        assert result[0].coder_id == 1
+        assert result[0].codebook_used_id == 1
 
     def test_parse_response_drops_quotes_not_in_segment(self, agent: CoderAgent):
         response = _resp([
@@ -150,14 +176,12 @@ class TestCoderAgent:
         assert len(result) == 1 and is_sentinel_code(result[0])
 
     def test_parse_response_truncates_to_max_codes(self):
-        config = CoderConfig(max_codes_per_segment=2)
-        agent = CoderAgent(config=config)
+        agent = _agent(config=CoderConfig(max_codes_per_segment=2))
         response = _resp([
             {"code": f"c{i}", "description": "d", "quotes": ["felt supported"]}
             for i in range(4)
         ])
         result = agent._parse_response(response, _seg(SEG_TEXT))
-        assert result is not None
         assert len(result) == 2
 
     def test_parse_response_empty_codes(self, agent: CoderAgent):
@@ -186,7 +210,7 @@ class TestCoderAgent:
         assert len(result) == 1 and is_sentinel_code(result[0])
 
     @patch.object(CoderAgent, "_call_llm")
-    def test_code_segments_does_not_update_codebook(self, mock_llm, agent: CoderAgent):
+    def test_code_segments(self, mock_llm, agent: CoderAgent):
         mock_llm.return_value = _resp([
             {
                 "code": "emotional support",
@@ -196,34 +220,18 @@ class TestCoderAgent:
         ])
         results = agent.code_segments([_seg(SEG_TEXT)])
         assert len(results) == 1
-        # Coder doesn't touch codebook directly.
-        assert len(agent.codebook) == 0
 
 
 class TestCoderAgentResearchContext:
-    def test_initialization_with_research_context(self):
-        ctx = ResearchContext(description=CLIMATE_DESCRIPTION)
-        agent = CoderAgent(research_context=ctx)
-        assert agent.research_context is not None
-        assert "Climate" in agent.research_context.description
-
-    def test_set_research_context(self):
-        agent = CoderAgent()
-        assert agent.research_context is None
-        ctx = ResearchContext(description="Test Study. To test.")
-        agent.set_research_context(ctx)
-        assert agent.research_context is not None
-        assert "Test Study" in agent.research_context.description
-
     def test_system_prompt_includes_research_context(self):
-        ctx = ResearchContext(
+        rc = _rc_row(
             description=(
                 "Climate Study. To understand climate perceptions through "
                 "the lens of social constructionism. Research question: "
                 "How do people perceive climate change?"
             ),
         )
-        agent = CoderAgent(research_context=ctx)
+        agent = _agent(codebook=_codebook(research_context=rc))
         prompt = agent.get_system_prompt()
         assert "## Research Context" in prompt
         assert "Climate Study" in prompt
@@ -231,33 +239,32 @@ class TestCoderAgentResearchContext:
         assert "social constructionism" in prompt
 
     def test_system_prompt_uses_tailored_prompt_for_coder(self):
-        ctx = ResearchContext(
+        rc = _rc_row(
             description="raw description",
-            tailored_prompts={"coder": "## Tailored coder section\nDo X."},
+            coder_prompt="## Tailored coder section\nDo X.",
         )
-        agent = CoderAgent(research_context=ctx)
+        agent = _agent(codebook=_codebook(research_context=rc))
         prompt = agent.get_system_prompt()
         assert "Tailored coder section" in prompt
         assert "raw description" not in prompt
 
     def test_system_prompt_without_research_context(self):
-        agent = CoderAgent()
+        agent = _agent()
         prompt = agent.get_system_prompt()
         assert "## Research Context" not in prompt
         assert "coder in thematic analysis" in prompt
 
     def test_system_prompt_with_empty_research_context(self):
-        ctx = ResearchContext()
-        agent = CoderAgent(research_context=ctx)
+        agent = _agent(codebook=_codebook(research_context=_rc_row()))
         prompt = agent.get_system_prompt()
         assert "## Research Context" not in prompt
 
     def test_system_prompt_with_identity_and_research_context(self):
-        ctx = ResearchContext(
-            description="Healthcare Study. To understand patient experiences."
+        rc = _rc_row(description="Healthcare Study. To understand patient experiences.")
+        agent = _agent(
+            coder=_coder(identity="patient advocate"),
+            codebook=_codebook(research_context=rc),
         )
-        config = CoderConfig(identity="patient advocate")
-        agent = CoderAgent(config=config, research_context=ctx)
         prompt = agent.get_system_prompt()
         assert "Research Context" in prompt
         assert "Healthcare Study" in prompt
@@ -284,8 +291,8 @@ class TestCoderAgentResearchContext:
                 "quotes": ["worry about the future of our planet"],
             }
         ])
-        ctx = ResearchContext(description=CLIMATE_DESCRIPTION)
-        agent = CoderAgent(research_context=ctx)
+        rc = _rc_row(description=CLIMATE_DESCRIPTION)
+        agent = _agent(codebook=_codebook(research_context=rc))
         result = agent.code_segment(_seg(seg))
         assert len(result) == 1
         assert result[0].code == "climate anxiety"
@@ -293,3 +300,14 @@ class TestCoderAgentResearchContext:
         call_args = mock_llm.call_args
         system_prompt = call_args[0][0]
         assert "Climate" in system_prompt
+
+
+def test_sentinel_carries_assignment_keys():
+    agent = _agent(coder=_coder(coder_id=42), codebook=_codebook(version=7))
+    out = agent._parse_response("not json", _seg("anything"))
+    assert len(out) == 1
+    s = out[0]
+    assert is_sentinel_code(s)
+    assert s.segment_id == 1
+    assert s.coder_id == 42
+    assert s.codebook_used_id == 7

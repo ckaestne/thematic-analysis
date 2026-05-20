@@ -25,9 +25,7 @@ from thematic_analysis_inc.db.models import (
     Code,
     Codebook,
     Coder,
-    CodesSupportingQuotes,
     CodingQueueEntry,
-    Quote,
     Segment,
 )
 
@@ -215,11 +213,11 @@ def record_coding_result(
 ) -> list[Code]:
     """Persist the coder's transient ``Code`` rows for this assignment.
 
-    Each input ``Code`` should carry ``code`` and ``description``, plus
-    any number of transient ``Quote`` instances on
-    ``code.supporting_quotes`` (their ``text`` is read; ``segment_id``
-    is set here). Inserts ``Quote`` rows and ``codes_supporting_quotes``
-    link rows alongside each Code. Marks the queue entry done.
+    The agent has already stamped ``segment_id``, ``coder_id``, and
+    ``codebook_used_id`` on every Code (matching this assignment), so
+    persistence is a flat ``s.add(c)`` per Code. ``supporting_quotes``
+    that already have a ``quote_id`` are merged into the session;
+    transient Quotes ride along via cascade.
 
     To represent "ran and produced no codes", the coder agent emits a
     single sentinel ``Code`` with ``code = SENTINEL_CODE_LABEL`` (the
@@ -231,37 +229,21 @@ def record_coding_result(
             raise RuntimeError(
                 f"assignment {_assignment_pk(assignment)} not found"
             )
-        out: list[Code] = []
-        for src in codes:
-            src_quotes = [q for q in (src.supporting_quotes or []) if q.text]
-            c = Code(
-                segment_id=a.segment_id,
-                coder_id=a.coder_id,
-                codebook_used_id=a.codebook_used_id,
-                code=src.code,
-                description=src.description or "",
-                rationale="",
-            )
+        for c in codes:
+            c.supporting_quotes = [
+                s.merge(q) if q.quote_id is not None else q
+                for q in (c.supporting_quotes or [])
+            ]
             s.add(c)
-            s.flush()  # assign code_id
-            for sq in src_quotes:
-                if sq.quote_id is not None:
-                    quote_id = sq.quote_id
-                else:
-                    q = Quote(segment_id=a.segment_id, text=sq.text)
-                    s.add(q)
-                    s.flush()  # assign quote_id
-                    quote_id = q.quote_id
-                s.add(
-                    CodesSupportingQuotes(code_id=c.code_id, quote_id=quote_id)
-                )
-            out.append(c)
         a.finished_at = _utcnow()
         s.add(a)
         s.commit()
-        for c in out:
+        out: list[Code] = []
+        for c in codes:
             s.refresh(c)
+            _ = list(c.supporting_quotes)
             s.expunge(c)
+            out.append(c)
         return out
 
 
