@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from dataclasses import dataclass
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
@@ -153,74 +154,50 @@ class CodeAggregatorAgent(BaseAgent):
     def __init__(self, config: AggregatorConfig | None = None):
         super().__init__(config or AggregatorConfig())
         self.aggregator_config: AggregatorConfig = self.config  # type: ignore
+        # Debug fields populated by the most recent `aggregate()` call so
+        # callers (e.g. the `test-aggregate` CLI) can inspect what the
+        # agent did without re-implementing prompt building or the LLM
+        # call.
+        self.last_payload: dict | None = None
+        self.last_system_prompt: str = ""
+        self.last_user_prompt: str = ""
+        self.last_raw_response: str = ""
+        self.last_elapsed: float = 0.0
+        self.last_attempts: int = 0
 
     def get_system_prompt(self) -> str:
         return AGGREGATOR_SYSTEM_PROMPT
 
     def _build_prompt_payload(
         self, coder_codes: list[list[DBCode]]
-    ) -> tuple[dict, dict[int, DBCode], dict[int, Quote]]:
+    ) -> tuple[dict, dict[int, DBCode]]:
         """Assign sequential ids and build the JSON payload for the LLM.
 
         Returns:
             payload: dict to be json-dumped as the user message.
             code_index: assigned code id -> DBCode row.
-            quote_index: assigned quote id -> Quote.
         """
-        quote_id_by_text: dict[str, int] = {}
-        quote_index: dict[int, Quote] = {}
         code_index: dict[int, DBCode] = {}
-        coders_payload: list[dict] = []
 
-        next_code_id = 1
-        next_quote_id = 1
+        def _quote_texts(code: DBCode) -> list[str]:
+            return [sq.text for sq in (code.supporting_quotes or [])]
 
-        for codes in coder_codes:
-            if not codes:
-                continue
-            coder_id = codes[0].coder_id
-            codes_payload: list[dict] = []
-            for c in codes:
-                cid = next_code_id
-                next_code_id += 1
-                code_index[cid] = c
+        def _code_payload(code: DBCode) -> dict:
+            cid = len(code_index) + 1
+            code_index[cid] = code
+            return {"id": cid, "label": code.code, "quotes": _quote_texts(code)}
 
-                quote_texts: list[str] = []
-                seen_texts: set[str] = set()
-                for sq in (c.supporting_quotes or []):
-                    if sq.text in seen_texts:
-                        continue
-                    seen_texts.add(sq.text)
-                    quote_texts.append(sq.text)
-                    if sq.text not in quote_id_by_text:
-                        qid = next_quote_id
-                        next_quote_id += 1
-                        quote_id_by_text[sq.text] = qid
-                        quote_index[qid] = Quote(quote_id=str(qid), text=sq.text)
-
-                codes_payload.append(
-                    {"id": cid, "label": c.code, "quotes": quote_texts}
-                )
-            coders_payload.append({"coder_id": coder_id, "codes": codes_payload})
+        coders_payload = [
+            {
+                "coder_id": codes[0].coder_id,
+                "codes": [_code_payload(code) for code in codes],
+            }
+            for codes in coder_codes
+            if codes
+        ]
 
         payload = {"coders": coders_payload}
-        return payload, code_index, quote_index
-
-    def _quotes_for_code(
-        self, code: DBCode, quote_index: dict[int, Quote]
-    ) -> list[Quote]:
-        """Return assigned Quote objects (with the assigned ids) for a code."""
-        # Look up by text so we reuse the assigned id from the payload.
-        text_to_qid = {q.text: int(q.quote_id) for q in quote_index.values()}
-        seen: set[int] = set()
-        out: list[Quote] = []
-        for sq in (code.supporting_quotes or []):
-            qid = text_to_qid.get(sq.text)
-            if qid is None or qid in seen:
-                continue
-            seen.add(qid)
-            out.append(quote_index[qid])
-        return out
+        return payload, code_index
 
     def _extract_response_json(self, response: str) -> dict | None:
         """Extract the JSON object from a raw LLM response, or None."""
@@ -285,7 +262,6 @@ class CodeAggregatorAgent(BaseAgent):
         self,
         response: str,
         code_index: dict[int, DBCode],
-        quote_index: dict[int, Quote],
     ) -> AggregationResult | None:
         """Parse the LLM response into an AggregationResult."""
         data = self._extract_response_json(response)
@@ -304,18 +280,13 @@ class CodeAggregatorAgent(BaseAgent):
 
             original_codes: list[str] = []
             quotes: list[Quote] = []
-            seen_qids: set[str] = set()
             for cid in orig_ids:
                 src = code_index.get(cid)
                 if src is None:
                     continue
                 consumed_ids.add(cid)
                 original_codes.append(src.code)
-                for q in self._quotes_for_code(src, quote_index):
-                    if q.quote_id in seen_qids:
-                        continue
-                    seen_qids.add(q.quote_id)
-                    quotes.append(q)
+                quotes.extend(src.supporting_quotes or [])
 
             if not original_codes:
                 continue
@@ -334,12 +305,12 @@ class CodeAggregatorAgent(BaseAgent):
             if src is None or cid in consumed_ids:
                 continue
             consumed_ids.add(cid)
-            quotes = self._quotes_for_code(src, quote_index)
+            quotes = (src.supporting_quotes or [])[:max_quotes]
             retained_codes.append(
                 MergedCode(
                     code=src.code,
                     original_codes=[src.code],
-                    quotes=quotes[:max_quotes],
+                    quotes=quotes,
                 )
             )
 
@@ -356,17 +327,26 @@ class CodeAggregatorAgent(BaseAgent):
                 the same segment. Each ``Code`` is expected to carry its
                 ``supporting_quotes``.
         """
-        payload, code_index, quote_index = self._build_prompt_payload(coder_codes)
+        payload, code_index = self._build_prompt_payload(coder_codes)
+
+        system_prompt = self.get_system_prompt()
+        user_prompt = json.dumps(payload, indent=2) if code_index else ""
+        self.last_payload = payload
+        self.last_system_prompt = system_prompt
+        self.last_user_prompt = user_prompt
+        self.last_raw_response = ""
+        self.last_elapsed = 0.0
+        self.last_attempts = 0
 
         if not code_index:
             return AggregationResult(merged_codes=[], retained_codes=[])
 
-        user_prompt = json.dumps(payload, indent=2)
-        system_prompt = self.get_system_prompt()
         max_attempts = 3
         current_prompt = user_prompt
         response = ""
+        t0 = time.monotonic()
         for attempt in range(max_attempts):
+            self.last_attempts = attempt + 1
             response = self._call_llm(
                 system_prompt,
                 current_prompt,
@@ -393,8 +373,10 @@ class CodeAggregatorAgent(BaseAgent):
                 f"Return a corrected JSON object that fixes these issues. "
                 f"Use only the code ids from the original input."
             )
+        self.last_elapsed = time.monotonic() - t0
+        self.last_raw_response = response
 
-        result = self._parse_response(response, code_index, quote_index)
+        result = self._parse_response(response, code_index)
 
         if result is None:
             max_quotes = self.aggregator_config.max_quotes_per_code
@@ -402,7 +384,7 @@ class CodeAggregatorAgent(BaseAgent):
                 MergedCode(
                     code=c.code,
                     original_codes=[c.code],
-                    quotes=self._quotes_for_code(c, quote_index)[:max_quotes],
+                    quotes=(c.supporting_quotes or [])[:max_quotes],
                 )
                 for c in code_index.values()
             ]

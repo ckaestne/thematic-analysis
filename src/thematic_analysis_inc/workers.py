@@ -431,10 +431,11 @@ def aggregate_one(
 
 
 def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
-    """Run the aggregator on one segment with full instrumentation, but do
-    not write any results. Returns a dict with the segment, per-coder input
-    codes, the JSON prompt payload, the raw LLM response, and the parsed
-    AggregationResult."""
+    """Run the aggregator on one segment without writing anything. Returns
+    a dict with the segment, per-coder input codes, the parsed result, a
+    preview of the DB rows that would be written, and the agent itself
+    (so callers can inspect ``last_system_prompt`` / ``last_user_prompt``
+    / ``last_raw_response`` / ``last_elapsed`` / ``last_attempts``)."""
     seg = db.get_segment(segment_id)
     if seg is None:
         raise ValueError(f"unknown segment_id: {segment_id}")
@@ -450,34 +451,15 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     grouped = _grouped_coder_codes(coder_codes)
 
     agent = CodeAggregatorAgent(config=AggregatorConfig())
-    _apply_research_context(agent)
-
-    payload, code_index, quote_index = agent._build_prompt_payload(grouped)
-
-    system_prompt = agent.get_system_prompt()
-    user_prompt = ""
-    raw_response = ""
     result = None
     llm_error: str | None = None
-    elapsed = 0.0
-    if code_index:
-        from thematic_analysis.agents.aggregator import AGGREGATOR_RESPONSE_SCHEMA
+    try:
+        result = agent.aggregate(grouped)
+    except Exception as exc:
+        llm_error = f"{type(exc).__name__}: {exc}"
 
-        user_prompt = json.dumps(payload, indent=2)
-        t0 = time.monotonic()
-        try:
-            raw_response = agent._call_llm(
-                system_prompt,
-                user_prompt,
-                response_format=AGGREGATOR_RESPONSE_SCHEMA,
-            )
-            result = agent._parse_response(raw_response, code_index, quote_index)
-        except Exception as exc:
-            llm_error = f"{type(exc).__name__}: {exc}"
-        elapsed = time.monotonic() - t0
-
-    # Build the list of AggregatorMergeInputs exactly as `aggregate_one`
-    # would, so the caller can see what rows would land in the DB.
+    # Map the agent's text-only result back onto concrete `Code` rows so
+    # we can show exactly what `record_aggregation_result` would write.
     code_map: dict[tuple[int, str], Code] = {}
     for cid, codes in coder_codes.items():
         for c in codes:
@@ -507,14 +489,10 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
         "segment_text": seg.content,
         "codebook_version": latest.version,
         "coder_codes": coder_codes,
-        "prompt_payload": payload,
-        "system_prompt": system_prompt,
-        "user_prompt": user_prompt,
-        "raw_response": raw_response,
-        "llm_error": llm_error,
+        "agent": agent,
         "result": result,
+        "llm_error": llm_error,
         "db_preview": db_preview,
-        "elapsed": elapsed,
     }
 
 

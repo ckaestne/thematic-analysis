@@ -108,9 +108,7 @@ class TestCodeAggregatorAgent:
         agent: CodeAggregatorAgent,
         sample_coder_codes: list[list[DBCode]],
     ):
-        payload, code_index, quote_index = agent._build_prompt_payload(
-            sample_coder_codes
-        )
+        payload, code_index = agent._build_prompt_payload(sample_coder_codes)
 
         # Codes are numbered 1..5 (2 + 2 + 1), one per input code.
         assert sorted(code_index.keys()) == [1, 2, 3, 4, 5]
@@ -138,7 +136,7 @@ class TestCodeAggregatorAgent:
     def test_build_prompt_payload_full_quote_text(self, agent: CodeAggregatorAgent):
         long_text = "x" * 500
         coder_codes = [[_code("c", 1, [long_text])]]
-        payload, _, _ = agent._build_prompt_payload(coder_codes)
+        payload, _ = agent._build_prompt_payload(coder_codes)
         assert payload["coders"][0]["codes"][0]["quotes"][0] == long_text  # not truncated
 
     def test_parse_response_merges_by_id(
@@ -146,7 +144,7 @@ class TestCodeAggregatorAgent:
         agent: CodeAggregatorAgent,
         sample_coder_codes: list[list[DBCode]],
     ):
-        _, code_index, quote_index = agent._build_prompt_payload(sample_coder_codes)
+        _, code_index = agent._build_prompt_payload(sample_coder_codes)
         response = json.dumps(
             {
                 "merge_groups": [
@@ -159,13 +157,11 @@ class TestCodeAggregatorAgent:
                 "retain_code_ids": [2, 4, 5],
             }
         )
-        result = agent._parse_response(response, code_index, quote_index)
+        result = agent._parse_response(response, code_index)
         assert result is not None
         assert len(result.merged_codes) == 1
         assert result.merged_codes[0].code == "peer support system"
         assert set(result.merged_codes[0].original_codes) == {"peer support"}
-        # The two "peer support" rows share quote text via dedup, so the
-        # merged code has one unique quote.
         assert len(result.merged_codes[0].quotes) == 2  # one per source row
         labels = {rc.code for rc in result.retained_codes}
         assert labels == {"emotional comfort", "academic help", "time pressure"}
@@ -174,7 +170,7 @@ class TestCodeAggregatorAgent:
         self, agent: CodeAggregatorAgent
     ):
         coder_codes = [[_code("c1", 1, ["t"])]]
-        _, code_index, quote_index = agent._build_prompt_payload(coder_codes)
+        _, code_index = agent._build_prompt_payload(coder_codes)
         response = json.dumps(
             {
                 "merge_groups": [
@@ -187,7 +183,7 @@ class TestCodeAggregatorAgent:
                 "retain_code_ids": [1, 9999],
             }
         )
-        result = agent._parse_response(response, code_index, quote_index)
+        result = agent._parse_response(response, code_index)
         assert result is not None
         assert result.merged_codes == []  # all originals unknown → group dropped
         assert [rc.code for rc in result.retained_codes] == ["c1"]
@@ -196,14 +192,14 @@ class TestCodeAggregatorAgent:
         config = AggregatorConfig(max_quotes_per_code=2)
         agent = CodeAggregatorAgent(config=config)
         coder_codes = [[_code("c1", 1, [f"q{i}" for i in range(5)])]]
-        _, code_index, quote_index = agent._build_prompt_payload(coder_codes)
+        _, code_index = agent._build_prompt_payload(coder_codes)
         response = '{"merge_groups": [], "retain_code_ids": [1]}'
-        result = agent._parse_response(response, code_index, quote_index)
+        result = agent._parse_response(response, code_index)
         assert result is not None
         assert len(result.retained_codes[0].quotes) == 2
 
     def test_parse_response_invalid_json(self, agent: CodeAggregatorAgent):
-        assert agent._parse_response("Not JSON", {}, {}) is None
+        assert agent._parse_response("Not JSON", {}) is None
 
     @patch.object(CodeAggregatorAgent, "_call_llm")
     def test_aggregate(

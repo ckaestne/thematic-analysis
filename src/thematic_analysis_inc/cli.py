@@ -798,16 +798,17 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
         return 1
 
     sep = "─" * 72
+    agent = res["agent"]
     print(sep)
     print("System prompt")
     print(sep)
-    print(res["system_prompt"])
+    print(agent.last_system_prompt)
     print()
 
     print(sep)
     print("User prompt")
     print(sep)
-    print(res["user_prompt"] or "(no LLM call — empty input)")
+    print(agent.last_user_prompt or "(no LLM call — empty input)")
     print()
 
     if res["llm_error"]:
@@ -817,9 +818,12 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
         return 1
 
     print(sep)
-    print(f"Raw LLM response  ({res['elapsed']:.1f}s)")
+    print(
+        f"Raw LLM response  ({agent.last_elapsed:.1f}s, "
+        f"{agent.last_attempts} attempt(s))"
+    )
     print(sep)
-    print(res["raw_response"] or "(empty)")
+    print(agent.last_raw_response or "(empty)")
     print()
 
     print(sep)
