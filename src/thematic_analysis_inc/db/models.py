@@ -16,21 +16,26 @@ The conceptual model:
 - **Code** — one labelled annotation. The same table holds Stage-A coder
   output (`coder_id ≥ 1`), aggregator output (`coder_id = 0`), and
   reviewer output (`coder_id = -1`). Each code records *which* Codebook
-  revision and Research Context revision were "used" when it was
-  authored, so the run is fully reproducible.
+  revision was "used" when it was authored; the matching research
+  context is reachable through `code.codebook_used.research_context`,
+  so the run is fully reproducible.
 - **Quote** — a span of supporting text inside a Segment. Codes link to
   the quotes that justify them through `codes_supporting_quotes`.
 - **Codebook** — one revision of the curated codebook. There is
   conceptually a single codebook, but each curated update inserts a new
   row; the latest row is the "current" codebook. A separately-named
   link table (`codebook_code`) holds which Codes belong to which
-  revision.
+  revision. Each codebook revision pins the `ResearchContext` revision
+  it was authored against — changing the research context creates a
+  fresh codebook revision in response, so downstream consumers only
+  need to track the codebook version.
 - **Coder** — an agent (or human) that produces codes. Two ids are
   reserved system rows: `0` = aggregator, `-1` = reviewer. User-created
   coders start at id 1.
 - **ResearchContext** — one revision of the prose + per-role prompts
-  driving the LLM agents. Same pattern as Codebook: each
-  `set_research_context` inserts a new row; the latest is "current".
+  driving the LLM agents. Each `set_research_context` inserts a new row
+  and triggers a new `Codebook` revision pinned to it; the latest
+  codebook's `research_context` is the "current" context.
 - **CodingQueueEntry** — one (Segment, Coder) assignment. Status is
   derived from `claimed_at` / `finished_at` / `error` — there is no
   status column.
@@ -137,7 +142,7 @@ class ResearchContext(SQLModel, table=True):
     tailored prompt for this role — fall back to `description`".
 
     There are no back-relationships from a ResearchContext to its
-    consumers — `code.research_context_used` is the canonical accessor.
+    consumers — `codebook.research_context` is the canonical accessor.
     """
 
     __tablename__ = "research_context"
@@ -162,6 +167,11 @@ class Codebook(SQLModel, table=True):
     current codebook"; previous rows are predecessors via
     `parent_version`. Membership (which Codes belong to a revision)
     lives in the `codebook_code` link table.
+
+    Each codebook revision pins the `ResearchContext` revision it was
+    authored against. When the research context changes a new codebook
+    revision is created in response, so everywhere else in the pipeline
+    only needs to know the codebook version.
     """
 
     # The integer is a monotonically-increasing counter. The specific
@@ -169,6 +179,10 @@ class Codebook(SQLModel, table=True):
     version: Optional[int] = Field(default=None, primary_key=True)
     parent_version: Optional[int] = Field(
         default=None, foreign_key="codebook.version"
+    )
+    research_context_version: int = Field(
+        foreign_key="research_context.research_context_version",
+        index=True,
     )
     created_at: datetime = Field(default_factory=_utcnow)
 
@@ -188,6 +202,7 @@ class Codebook(SQLModel, table=True):
     codes: list["Code"] = Relationship(
         sa_relationship_kwargs={"secondary": "codebook_code"},
     )
+    research_context: ResearchContext = Relationship()
 
 
 class Coder(SQLModel, table=True):
@@ -216,9 +231,9 @@ class Code(SQLModel, table=True):
     - `coder_id = 0`  — aggregator output
     - `coder_id = -1` — reviewer output (the canonical codebook code)
 
-    Every code records which Codebook revision and which Research
-    Context revision were "used" at authoring time, so a downstream
-    consumer can reconstruct what the agent saw.
+    Every code records which Codebook revision was "used" at authoring
+    time; the matching research context is reachable as
+    `code.codebook_used.research_context`.
     """
 
     code_id: Optional[int] = Field(default=None, primary_key=True)
@@ -227,10 +242,6 @@ class Code(SQLModel, table=True):
     codebook_used_id: int = Field(
         foreign_key="codebook.version", index=True
     )
-    research_context_used_id: Optional[int] = Field(
-        default=None,
-        foreign_key="research_context.research_context_version",
-    )
     code: str
     description: str = Field(default="")
     rationale: str = Field(default="")
@@ -238,7 +249,6 @@ class Code(SQLModel, table=True):
     segment: Segment = Relationship(back_populates="codes")
     coder: Coder = Relationship()
     codebook_used: Codebook = Relationship()
-    research_context_used: ResearchContext = Relationship()
 
     supporting_quotes: list["Quote"] = Relationship(
         back_populates="codes",
@@ -285,13 +295,13 @@ class Quote(SQLModel, table=True):
 
 
 class CodingQueueEntry(SQLModel, table=True):
-    """One (Segment, Coder, Codebook revision, ResearchContext revision)
-    assignment.
+    """One (Segment, Coder, Codebook revision) assignment.
 
-    The primary key includes the codebook and research-context revisions
-    so that, when either revision moves forward, the same (segment, coder)
-    can be enqueued again as a separate work item. Re-enqueueing at the
-    same revisions is a no-op (idempotent).
+    The primary key includes the codebook revision so that, when it
+    moves forward, the same (segment, coder) can be enqueued again as a
+    separate work item. Re-enqueueing at the same revision is a no-op
+    (idempotent). The research-context revision used by this work item
+    is implied by `codebook_used.research_context`.
 
     Status is derived from `claimed_at` / `finished_at` / `error` (see
     `status` property below) — there is no status column.
@@ -308,10 +318,6 @@ class CodingQueueEntry(SQLModel, table=True):
     codebook_used_id: int = Field(
         foreign_key="codebook.version", primary_key=True
     )
-    research_context_used_id: int = Field(
-        foreign_key="research_context.research_context_version",
-        primary_key=True,
-    )
     enqueued_at: datetime = Field(default_factory=_utcnow)
     claimed_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -320,7 +326,6 @@ class CodingQueueEntry(SQLModel, table=True):
     segment: Segment = Relationship()
     coder: Coder = Relationship()
     codebook_used: Codebook = Relationship()
-    research_context_used: ResearchContext = Relationship()
 
     @property
     def status(self) -> str:
@@ -356,9 +361,6 @@ class ThemeCoderRun(SQLModel, table=True):
     codebook_used_id: int = Field(
         foreign_key="codebook.version", index=True
     )
-    research_context_used_id: int = Field(
-        foreign_key="research_context.research_context_version",
-    )
     status: str = Field(default="running", index=True)
     claimed_at: datetime = Field(default_factory=_utcnow)
     finished_at: Optional[datetime] = None
@@ -368,7 +370,6 @@ class ThemeCoderRun(SQLModel, table=True):
 
     theme_coder: ThemeCoder = Relationship()
     codebook_used: Codebook = Relationship()
-    research_context_used: ResearchContext = Relationship()
 
     contributed_to: list["ThemeAggregation"] = Relationship(
         back_populates="input_runs",
@@ -392,9 +393,6 @@ class ThemeAggregation(SQLModel, table=True):
     codebook_used_id: int = Field(
         foreign_key="codebook.version", unique=True
     )
-    research_context_used_id: int = Field(
-        foreign_key="research_context.research_context_version",
-    )
     status: str = Field(default="running", index=True)
     created_at: datetime = Field(default_factory=_utcnow)
     finished_at: Optional[datetime] = None
@@ -402,7 +400,6 @@ class ThemeAggregation(SQLModel, table=True):
     error: Optional[str] = None
 
     codebook_used: Codebook = Relationship()
-    research_context_used: ResearchContext = Relationship()
 
     input_runs: list[ThemeCoderRun] = Relationship(
         back_populates="contributed_to",
