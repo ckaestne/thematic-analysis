@@ -94,13 +94,7 @@ def _segment_summary(seg) -> dict[str, Any]:
 
 def _coder_progress() -> list[dict[str, Any]]:
     coders = store.list_coders()
-    total_segments = 0
-    with store.session() as s:
-        from sqlalchemy import func
-        from sqlmodel import select
-        total_segments = int(
-            s.exec(select(func.count()).select_from(store.Segment)).one()
-        )
+    total_segments = store.count_segments()
     out = []
     for c in coders:
         prog = db_coding.coder_progress(c)

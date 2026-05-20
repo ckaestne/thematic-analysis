@@ -88,12 +88,12 @@ class TestReviewerAgent:
     @pytest.fixture
     def agent(self) -> ReviewerAgent:
         """Create a ReviewerAgent for tests."""
-        return ReviewerAgent()
+        return ReviewerAgent(codebook=Codebook(use_mock_embeddings=True))
 
     @pytest.fixture
     def agent_with_codebook(self) -> ReviewerAgent:
         """Create a ReviewerAgent with pre-populated codebook."""
-        codebook = Codebook()
+        codebook = Codebook(use_mock_embeddings=True)
         codebook.add_code("emotional support", [Quote("q1", "felt supported")])
         codebook.add_code("academic pressure", [Quote("q2", "stressed about exams")])
         codebook.add_code("time management", [Quote("q3", "too many deadlines")])
@@ -379,8 +379,9 @@ class TestReviewerAgent:
         assert "3 quotes" in summary
 
 
+@pytest.mark.integration
 class TestReviewerIntegration:
-    """Integration tests for ReviewerAgent."""
+    """Integration tests for ReviewerAgent (real embeddings + LLM)."""
 
     def test_full_review_workflow(self):
         """Test complete review workflow with real embeddings."""
