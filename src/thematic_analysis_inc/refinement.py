@@ -302,7 +302,7 @@ class RefiningCoderAgent:
             self._initial_messages(segment)
         )
         first_response = self._coder_completion(initial_msgs)
-        first_codes = self.coder._process_response(first_response, segment)
+        first_codes = self.coder._parse_response(first_response, segment)
         if not first_codes:
             self.last_trace = {
                 "segment_text": text,
@@ -329,7 +329,7 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = self._coder_completion(refined_msgs)
-        refined_codes = self.coder._process_response(refined_response, segment)
+        refined_codes = self.coder._parse_response(refined_response, segment)
         self.last_trace = {
             "segment_text": text,
             "first": first_codes,
@@ -350,7 +350,7 @@ class RefiningCoderAgent:
             self._initial_messages(segment)
         )
         first_response = await self._coder_completion_async(initial_msgs)
-        first_codes = self.coder._process_response(first_response, segment)
+        first_codes = self.coder._parse_response(first_response, segment)
         if not first_codes:
             self.last_trace = {
                 "segment_text": text,
@@ -377,7 +377,7 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = await self._coder_completion_async(refined_msgs)
-        refined_codes = self.coder._process_response(refined_response, segment)
+        refined_codes = self.coder._parse_response(refined_response, segment)
         self.last_trace = {
             "segment_text": text,
             "first": first_codes,

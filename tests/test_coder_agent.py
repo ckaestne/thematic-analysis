@@ -133,7 +133,7 @@ class TestCoderAgent:
         assert result[0].code == "emotional support"
 
     def test_parse_response_invalid_json(self, agent: CoderAgent):
-        assert agent._parse_response("Not JSON", _seg(SEG_TEXT)) is None
+        assert agent._parse_response("Not JSON", _seg(SEG_TEXT)) == []
 
     def test_parse_response_drops_quotes_not_in_segment(self, agent: CoderAgent):
         response = _resp([
