@@ -6,7 +6,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import aliased
 from sqlmodel import select
 
-from thematic_analysis_inc.db.codebook import latest_codebook
 from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
@@ -17,15 +16,6 @@ from thematic_analysis_inc.db.models import (
     Segment,
     SENTINEL_CODE_LABEL,
 )
-
-
-def _target_codebook_version() -> int:
-    """Resolve the codebook revision a new aggregation should target.
-    Raises if no codebook exists yet."""
-    cb = latest_codebook()
-    if cb is None:
-        raise RuntimeError("no codebook revision exists")
-    return cb.version
 
 
 def next_segment_codebook_to_aggregate() -> tuple[Segment, int] | None:
@@ -169,42 +159,63 @@ def segment_has_aggregator_code(
         return s.exec(q.limit(1)).first() is not None
 
 
-def record_aggregation_result(
-    segment: Segment,
-    codes: list[Code],
-    *,
-    codebook_version: int | None = None,
-) -> list[Code]:
+def load_segment_and_codebook_for_aggregation(
+    segment_id: int, codebook_version: int
+) -> tuple[Segment, "Codebook"] | None:
+    """Load a Segment (with codes + their supporting_quotes +
+    ``code.codebook_used``) AND a specific Codebook in one session.
+
+    Returning both from the same identity map is what lets the
+    aggregator filter inputs with ``c.codebook_used is codebook``
+    (see ``.claude/skills/sqlalchemy-identity``). Returns ``None`` if
+    either row is missing.
+    """
+    from sqlalchemy.orm import selectinload
+
+    from thematic_analysis_inc.db.models import Codebook
+
+    with session() as s:
+        seg = s.exec(
+            select(Segment)
+            .where(Segment.segment_id == segment_id)
+            .options(
+                selectinload(Segment.quotes),  # type: ignore[arg-type]
+                selectinload(Segment.codes)  # type: ignore[arg-type]
+                .selectinload(Code.supporting_quotes),  # type: ignore[arg-type]
+                selectinload(Segment.codes)  # type: ignore[arg-type]
+                .selectinload(Code.codebook_used),  # type: ignore[arg-type]
+            )
+        ).first()
+        if seg is None:
+            return None
+        cb = s.get(Codebook, codebook_version)
+        if cb is None:
+            return None
+        # Touch relationships so they survive expunge.
+        _ = list(seg.codes)
+        for c in seg.codes:
+            _ = list(c.supporting_quotes)
+            _ = c.codebook_used
+        s.expunge_all()
+        return seg, cb
+
+
+def save_aggregator_codes(codes: list[Code]) -> list[Code]:
     """Persist new aggregator Codes returned by the agent.
 
     ``codes`` is the list produced by ``CodeAggregatorAgent.aggregate``.
-    Items with ``code_id`` set are retained originals (already in the
-    DB) and are skipped. New items are added; their ``supporting_quotes``
-    and ``derivation_sources`` lists are wired through to existing rows
-    and link/edge rows are inserted via cascade.
+    Each Code already carries ``segment_id`` / ``coder_id`` /
+    ``codebook_used_id``; items with ``code_id`` set are retained
+    originals (already in the DB) and are skipped. New items are added;
+    their ``supporting_quotes`` and ``derivation_sources`` lists are
+    wired through to existing rows and link/edge rows are inserted via
+    cascade.
 
-    If ``codes`` is empty, a single sentinel aggregator row is inserted
-    so the segment is marked aggregated for this version. The caller is
-    expected to pass an empty list only when the agent saw no Stage-A
-    input at all; otherwise the agent itself emits the sentinel.
+    The agent is responsible for emitting a sentinel ``Code`` when it
+    saw inputs but produced no real codes; this helper just persists
+    whatever it is handed.
     """
-    if codebook_version is None:
-        codebook_version = _target_codebook_version()
-
     with session() as s:
-        if not codes:
-            sentinel = Code(
-                segment_id=segment.segment_id,
-                coder_id=SYSTEM_AGGREGATOR_ID,
-                codebook_used_id=codebook_version,
-                code=SENTINEL_CODE_LABEL,
-            )
-            s.add(sentinel)
-            s.commit()
-            s.refresh(sentinel)
-            s.expunge(sentinel)
-            return [sentinel]
-
         written: list[Code] = []
         for c in codes:
             if c.code_id is not None:

@@ -44,7 +44,7 @@ def cmd_set(args: SimpleNamespace) -> int:
     else:
         tailored = {}
     ctx = ResearchContext(description=description, tailored_prompts=tailored)
-    rc = store.set_research_context(ctx)
+    rc = store.add_research_context_and_codebook_revision(ctx)
     print(f"research context saved (version {rc.research_context_version})")
 
     if args.regenerate_prompts:
@@ -54,7 +54,7 @@ def cmd_set(args: SimpleNamespace) -> int:
 
         print(f"generating tailored prompts for: {', '.join(AGENT_ROLES)} ...")
         prompts = generate_all_tailored_prompts(description)
-        rc = store.set_research_context(
+        rc = store.add_research_context_and_codebook_revision(
             ResearchContext(description=description, tailored_prompts=prompts),
         )
         print(

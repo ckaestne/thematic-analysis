@@ -38,7 +38,7 @@ def test_set_get_clear_research_context(tmp_path: Path) -> None:
     assert seed.description == ""
 
     ctx = _ctx()
-    rc2 = store.set_research_context(ctx)
+    rc2 = store.add_research_context_and_codebook_revision(ctx)
     assert rc2.research_context_version == 2
 
     got = store.get_research_context()
@@ -50,7 +50,7 @@ def test_set_get_clear_research_context(tmp_path: Path) -> None:
     assert store.latest_research_context_version() == 2
 
     # Setting again produces a NEW version (history preserved).
-    rc3 = store.set_research_context(ResearchContext(description="different focus"))
+    rc3 = store.add_research_context_and_codebook_revision(ResearchContext(description="different focus"))
     assert rc3.research_context_version == 3
     got3 = store.get_research_context()
     assert got3 is not None and got3.research_context_version == 3
@@ -78,7 +78,7 @@ def test_tailored_prompts_round_trip(tmp_path: Path) -> None:
             "reviewer": "reviewer section",
         },
     )
-    store.set_research_context(ctx)
+    store.add_research_context_and_codebook_revision(ctx)
     rc = store.get_research_context()
     assert rc is not None
     got = store.research_context_to_domain(rc)
@@ -96,7 +96,7 @@ def test_codes_and_queue_capture_codebook_version(tmp_path: Path) -> None:
     store.add_coder("x")
 
     # Set initial RC → also creates a codebook revision.
-    store.set_research_context(ResearchContext(description="first RC"))
+    store.add_research_context_and_codebook_revision(ResearchContext(description="first RC"))
     cb_v1 = store.latest_codebook().version
 
     # Seed a segment and enqueue.
@@ -111,7 +111,7 @@ def test_codes_and_queue_capture_codebook_version(tmp_path: Path) -> None:
 
     # New RC bumps the codebook to v2. Adding another segment and
     # re-enqueueing creates fresh queue rows pinned to cb_v2.
-    store.set_research_context(ResearchContext(description="second RC"))
+    store.add_research_context_and_codebook_revision(ResearchContext(description="second RC"))
     cb_v2 = store.latest_codebook().version
     assert cb_v2 > cb_v1
     store.enqueue_segments(doc, [(None, "seg two", 0, 0, 1)])
@@ -167,7 +167,7 @@ class _CapturingThemeAggregator:
 def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "tc.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(_ctx())
+    store.add_research_context_and_codebook_revision(_ctx())
     cb_version = store.latest_codebook().version
 
     _CapturingThemeCoder.last_seen = None
@@ -198,7 +198,7 @@ def test_theme_code_one_injects_research_context(tmp_path: Path) -> None:
 def test_theme_aggregate_one_injects_research_context(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "ta.sqlite")
     store.add_theme_coder(conn, "tc1", "analyst")
-    store.set_research_context(_ctx())
+    store.add_research_context_and_codebook_revision(_ctx())
     cb_version = store.latest_codebook().version
 
     workers.theme_code_one(

@@ -351,7 +351,7 @@ def create_app(db_path: str | Path) -> FastAPI:
                 if k in AGENT_ROLES and v
             },
         )
-        rc = store.set_research_context(ctx)
+        rc = store.add_research_context_and_codebook_revision(ctx)
         return {
             "status": "ok",
             "research_context_version": rc.research_context_version,
@@ -384,7 +384,7 @@ def create_app(db_path: str | Path) -> FastAPI:
         new_ctx = ResearchContext(
             description=ctx.description, tailored_prompts=prompts
         )
-        new_rc = store.set_research_context(new_ctx)
+        new_rc = store.add_research_context_and_codebook_revision(new_ctx)
         return {
             "research_context_version": new_rc.research_context_version,
             "description": new_ctx.description,

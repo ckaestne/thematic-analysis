@@ -90,6 +90,29 @@ def get_segment(segment_id: int) -> Segment | None:
         return seg
 
 
+def get_segment_with_codes(segment_id: int) -> Segment | None:
+    """Like :func:`get_segment`, but also eager-loads
+    ``segment.codes`` and each code's ``supporting_quotes`` so the
+    aggregator/reviewer paths can traverse the whole graph after the
+    session closes."""
+    from sqlalchemy.orm import selectinload
+
+    with session() as s:
+        seg = s.exec(
+            select(Segment)
+            .where(Segment.segment_id == segment_id)
+            .options(
+                selectinload(Segment.quotes),  # type: ignore[arg-type]
+                selectinload(Segment.codes).selectinload(  # type: ignore[arg-type]
+                    Code.supporting_quotes  # type: ignore[arg-type]
+                ),
+            )
+        ).first()
+        if seg is not None:
+            s.expunge_all()
+        return seg
+
+
 def list_segments(
     q: str | None = None, limit: int = 100, offset: int = 0
 ) -> tuple[int, list[Segment]]:
