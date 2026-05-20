@@ -1,10 +1,11 @@
 """Versioned research-context CRUD, backed by SQLModel.
 
-Each call to :func:`set_research_context` inserts a new row keyed by
-an autoincrementing ``research_context_version`` *and* creates a new
-``Codebook`` revision pinned to it. The rest of the pipeline tracks
-only the codebook version — the research context active for any
-codebook is reachable via ``codebook.research_context``.
+Each call to :func:`add_research_context_and_codebook_revision`
+inserts a new row keyed by an autoincrementing
+``research_context_version`` *and* creates a new ``Codebook`` revision
+pinned to it. The rest of the pipeline tracks only the codebook
+version — the research context active for any codebook is reachable
+via ``codebook.research_context``.
 
 Callers receive SQLModel objects and use ``rc.description``,
 ``rc.research_context_version`` etc. as attributes. For places that
@@ -77,13 +78,14 @@ def _from_domain(ctx: DomainResearchContext) -> ResearchContext:
 # ---------------------------------------------------------------------------
 
 
-def set_research_context(ctx: DomainResearchContext) -> ResearchContext:
-    """Insert a new research-context revision and a fresh ``Codebook``
-    revision pinned to it. Returns the persisted research-context row.
+def add_research_context_and_codebook_revision(
+    ctx: DomainResearchContext,
+) -> ResearchContext:
+    """Insert a new research-context revision AND a fresh ``Codebook``
+    revision pinned to it — both in one logical write.
 
-    The new codebook inherits its membership from the previous latest
-    codebook (if any) — callers that want to materialise membership
-    should use :func:`db.codebook.copy_codebook_membership` afterwards.
+    Returns the persisted research-context row. The new codebook
+    inherits its membership from the previous latest codebook (if any).
     History is preserved: previous revisions stay in the table so codes
     / queue rows / theme runs that reference earlier codebook versions
     remain valid.

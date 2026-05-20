@@ -20,11 +20,15 @@ from thematic_analysis_inc.db import (
     status,
     theme,
 )
+from thematic_analysis_inc.db.aggregation import (
+    load_segment_and_codebook_for_aggregation,
+)
 from thematic_analysis_inc.db.codebook import (
     add_code_to_codebook,
     codebook_to_json_for_version,
     copy_codebook_membership,
     get_codebook,
+    get_codebook_with_codes_and_research_context,
     insert_codebook_version,
     latest_codebook,
     list_codebooks,
@@ -38,10 +42,8 @@ from thematic_analysis_inc.db.coders import (
 )
 from thematic_analysis_inc.db.connection import (
     connect,
-    get_engine,
     init_db,
     now,
-    session,
 )
 from thematic_analysis_inc.db.documents import (
     add_document,
@@ -49,6 +51,7 @@ from thematic_analysis_inc.db.documents import (
     enqueue_segments,
     find_document_by_filename,
     get_segment,
+    get_segment_with_codes,
     link_code_quote,
     list_documents,
     list_segments,
@@ -68,11 +71,11 @@ from thematic_analysis_inc.db.models import (
 )
 from thematic_analysis_inc.db.research_context import (
     RC_AGENT_ROLES,
+    add_research_context_and_codebook_revision,
     clear_research_context,
     get_research_context,
     latest_research_context_version,
     list_research_context_versions,
-    set_research_context,
     to_domain as research_context_to_domain,
 )
 from thematic_analysis_inc.db.schema import create_schema
@@ -114,12 +117,10 @@ __all__ = [
     "schema",
     "status",
     "theme",
-    # connection / engine
+    # connection
     "connect",
-    "get_engine",
     "init_db",
     "now",
-    "session",
     # models
     "Code",
     "Codebook",
@@ -134,15 +135,18 @@ __all__ = [
     "Segment",
     # research context
     "RC_AGENT_ROLES",
-    "set_research_context",
+    "add_research_context_and_codebook_revision",
     "get_research_context",
     "latest_research_context_version",
     "list_research_context_versions",
     "clear_research_context",
     "research_context_to_domain",
+    # aggregation
+    "load_segment_and_codebook_for_aggregation",
     # codebook
     "latest_codebook",
     "get_codebook",
+    "get_codebook_with_codes_and_research_context",
     "list_codebooks",
     "insert_codebook_version",
     "codebook_to_json_for_version",
@@ -160,6 +164,7 @@ __all__ = [
     "list_documents",
     "enqueue_segments",
     "get_segment",
+    "get_segment_with_codes",
     "list_segments",
     "add_quote",
     "link_code_quote",

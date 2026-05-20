@@ -33,7 +33,7 @@ The conceptual model:
   reserved system rows: `0` = aggregator, `-1` = reviewer. User-created
   coders start at id 1.
 - **ResearchContext** — one revision of the prose + per-role prompts
-  driving the LLM agents. Each `set_research_context` inserts a new row
+  driving the LLM agents. Each `add_research_context_and_codebook_revision` inserts a new row
   and triggers a new `Codebook` revision pinned to it; the latest
   codebook's `research_context` is the "current" context.
 - **CodingQueueEntry** — one (Segment, Coder) assignment. Status is
@@ -136,7 +136,7 @@ class Segment(SQLModel, table=True):
 class ResearchContext(SQLModel, table=True):
     """One revision of the research context.
 
-    Each `set_research_context` inserts a new row; the latest is the
+    Each `add_research_context_and_codebook_revision` inserts a new row; the latest is the
     "current" context. The five `*_prompt` columns map to
     `thematic_analysis.research_context.AGENT_ROLES`; `NULL` means "no
     tailored prompt for this role — fall back to `description`".

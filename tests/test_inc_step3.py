@@ -363,7 +363,7 @@ def _seed_segment_coded_at_version(conn, seg_id: int, coders: list, cb_version: 
     for coder in coders:
         assignment = store.coding.claim_next_assignment(coder)
         if assignment is not None:
-            store.coding.record_coding_result(
+            store.coding.save_codes_and_finish_assignment(
                 assignment,
                 [
                     _stub_code(
@@ -421,7 +421,7 @@ def test_next_segment_codebook_skips_version_with_unfinished_queue(tmp_path: Pat
         codebook_version=v1,
     )
     a_assign = store.coding.claim_next_assignment(coder_a)
-    store.coding.record_coding_result(
+    store.coding.save_codes_and_finish_assignment(
         a_assign,
         [
             _stub_code(

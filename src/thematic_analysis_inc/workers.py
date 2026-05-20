@@ -92,32 +92,6 @@ def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
     return cb
 
 
-def _load_db_codebook(version: int) -> DBCodebook:
-    """Load the DB ``Codebook`` row with ``.codes`` and ``.research_context``
-    eager-loaded so the (expunged) instance is safe for the agent to
-    traverse without an active session."""
-    from sqlalchemy.orm import selectinload
-    from sqlmodel import select
-
-    from thematic_analysis_inc.db.connection import session
-
-    with session() as s:
-        cb = s.exec(
-            select(DBCodebook)
-            .options(
-                selectinload(DBCodebook.codes),  # type: ignore[arg-type]
-                selectinload(DBCodebook.research_context),  # type: ignore[arg-type]
-            )
-            .where(DBCodebook.version == version)
-        ).first()
-        if cb is None:
-            raise ValueError(f"unknown codebook version: {version}")
-        _ = list(cb.codes)
-        _ = cb.research_context
-        s.expunge_all()
-        return cb
-
-
 # ── Stage-A coder worker ─────────────────────────────────────────────────────
 
 AgentFactory = Callable[[DBCodebook, Coder], Any]
@@ -140,7 +114,9 @@ async def _run_coder_for_segment(
     if seg is None:
         raise ValueError(f"unknown segment_id: {segment_id}")
 
-    codebook = _load_db_codebook(version)
+    codebook = db_codebook.get_codebook_with_codes_and_research_context(version)
+    if codebook is None:
+        raise ValueError(f"unknown codebook version: {version}")
     factory = agent_factory or default_coder_factory
     agent = factory(codebook, coder)
 
@@ -278,7 +254,7 @@ async def code_one_async(
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=factory,
         )
-        db_coding.record_coding_result(assignment, res["codes"])
+        db_coding.save_codes_and_finish_assignment(assignment, res["codes"])
         res.pop("codes", None)
         return res
     except Exception as exc:
@@ -349,82 +325,58 @@ def _do_aggregate(
     agent_factory: AggregatorFactory | None = None,
 ) -> dict:
     """Core aggregation logic for one (segment, codebook_version) pair."""
-    from sqlalchemy.orm import selectinload
-
-    from thematic_analysis_inc.db.connection import session as _session
-    from thematic_analysis_inc.db.models import (
-        Codebook as CodebookModel,
-        Segment as SegmentModel,
-        SENTINEL_CODE_LABEL,
-    )
-    from sqlmodel import select
+    from thematic_analysis_inc.db.models import SENTINEL_CODE_LABEL
 
     segment_id = seg.segment_id
     t0 = time.monotonic()
     try:
-        with _session() as s:
-            attached = s.exec(
-                select(SegmentModel)
-                .options(
-                    selectinload(SegmentModel.codes)  # type: ignore[arg-type]
-                    .selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
-                )
-                .where(SegmentModel.segment_id == segment_id)
-            ).one()
-            codebook = s.get(CodebookModel, codebook_version)
-            if codebook is None:
-                return {
-                    "ok": False,
-                    "segment_id": segment_id,
-                    "codebook_version": codebook_version,
-                    "error": f"codebook version {codebook_version} not found",
-                }
+        pair = db_aggregation.load_segment_and_codebook_for_aggregation(
+            segment_id, codebook_version
+        )
+        if pair is None:
+            return {
+                "ok": False,
+                "segment_id": segment_id,
+                "codebook_version": codebook_version,
+                "error": f"codebook version {codebook_version} not found",
+            }
+        attached, codebook = pair
 
-            already = s.exec(
-                select(Code.code_id).where(
-                    Code.segment_id == segment_id,
-                    Code.coder_id == 0,
-                    Code.codebook_used_id == codebook_version,
-                ).limit(1)
-            ).first()
-            if already is not None:
-                return {
-                    "ok": False,
-                    "segment_id": segment_id,
-                    "codebook_version": codebook_version,
-                    "error": "aggregator code already exists (race)",
-                    "skipped": True,
-                }
+        if db_aggregation.segment_has_aggregator_code(
+            segment_id, codebook_version
+        ):
+            return {
+                "ok": False,
+                "segment_id": segment_id,
+                "codebook_version": codebook_version,
+                "error": "aggregator code already exists (race)",
+                "skipped": True,
+            }
 
-            n_in = sum(
-                1
-                for c in attached.codes
-                if c.coder_id >= 1
-                and c.codebook_used_id == codebook_version
-                and not is_sentinel_code(c)
-            )
+        n_in = sum(
+            1
+            for c in attached.codes
+            if c.coder_id >= 1
+            and c.codebook_used_id == codebook_version
+            and not is_sentinel_code(c)
+        )
 
-            factory = agent_factory or default_aggregator_factory
-            agent = factory()
-            result_codes = agent.aggregate(attached, codebook)
+        factory = agent_factory or default_aggregator_factory
+        agent = factory()
+        result_codes = agent.aggregate(attached, codebook)
 
-            n_new = 0
-            for c in result_codes:
-                if c.code_id is None:
-                    s.add(c)
-                    n_new += 1
-            s.commit()
-            empty = (
-                len(result_codes) == 1
-                and result_codes[0].code == SENTINEL_CODE_LABEL
-            )
+        written = db_aggregation.save_aggregator_codes(result_codes)
+        empty = (
+            len(result_codes) == 1
+            and result_codes[0].code == SENTINEL_CODE_LABEL
+        )
         return {
             "ok": True,
             "segment_id": segment_id,
             "codebook_version": codebook_version,
             "n_in": n_in,
             "n_out": len(result_codes),
-            "n_new": n_new,
+            "n_new": len(written),
             "elapsed": time.monotonic() - t0,
             "empty": empty,
         }
@@ -466,15 +418,9 @@ def aggregate_segment(
     aggregator code yet for ``segment_id``, then calls the core aggregation
     logic for each in ascending version order.
     """
-    from thematic_analysis_inc.db.connection import session as _session
-    from thematic_analysis_inc.db.models import Segment as SegmentModel
-
-    with _session() as s:
-        seg = s.get(SegmentModel, segment_id)
-        if seg is None:
-            raise ValueError(f"unknown segment_id: {segment_id}")
-        _ = seg.content
-        s.expunge(seg)
+    seg = db.get_segment(segment_id)
+    if seg is None:
+        raise ValueError(f"unknown segment_id: {segment_id}")
 
     versions = db_aggregation.unaggregated_codebook_versions_for_segment(
         segment_id
@@ -489,58 +435,36 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     a dict with the segment, the result Code list, and the agent itself
     (so callers can inspect ``last_system_prompt`` / ``last_user_prompt``
     / ``last_raw_response`` / ``last_elapsed`` / ``last_attempts``)."""
-    from sqlalchemy.orm import selectinload
-    from sqlmodel import select
-
-    from thematic_analysis_inc.db.connection import session as _session
-    from thematic_analysis_inc.db.models import (
-        Codebook as CodebookModel,
-        Segment as SegmentModel,
-    )
-
     latest = db_codebook.latest_codebook()
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
+    pair = db_aggregation.load_segment_and_codebook_for_aggregation(
+        segment_id, latest.version
+    )
+    if pair is None:
+        raise ValueError(f"unknown segment_id: {segment_id}")
+    attached, codebook = pair
+
+    coder_codes = [
+        c
+        for c in attached.codes
+        if c.coder_id >= 1
+        and c.codebook_used_id == latest.version
+        and not is_sentinel_code(c)
+    ]
+
     agent = CodeAggregatorAgent(config=AggregatorConfig())
     result: list[Code] = []
-    coder_codes: list[Code] = []
-    segment_text = ""
     llm_error: str | None = None
-    with _session() as s:
-        attached = s.exec(
-            select(SegmentModel)
-            .options(
-                selectinload(SegmentModel.codes)  # type: ignore[arg-type]
-                .selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
-            )
-            .where(SegmentModel.segment_id == segment_id)
-        ).first()
-        if attached is None:
-            raise ValueError(f"unknown segment_id: {segment_id}")
-        codebook = s.get(CodebookModel, latest.version)
-        segment_text = attached.content
-        coder_codes = [
-            c
-            for c in attached.codes
-            if c.coder_id >= 1
-            and c.codebook_used_id == latest.version
-            and not is_sentinel_code(c)
-        ]
-        try:
-            result = agent.aggregate(attached, codebook)
-        except Exception as exc:
-            llm_error = f"{type(exc).__name__}: {exc}"
-        # Materialise relationship state before the session closes so
-        # the CLI can render quotes/sources after we return.
-        for c in result:
-            _ = list(c.supporting_quotes or [])
-            for edge in c.derivation_sources or []:
-                _ = edge.source_code
+    try:
+        result = agent.aggregate(attached, codebook)
+    except Exception as exc:
+        llm_error = f"{type(exc).__name__}: {exc}"
 
     return {
         "segment_id": segment_id,
-        "segment_text": segment_text,
+        "segment_text": attached.content,
         "codebook_version": latest.version,
         "coder_codes": coder_codes,
         "agent": agent,
@@ -656,7 +580,7 @@ def review_one(
             )
 
     new_text = result.code
-    new_cb = db_review.record_review(
+    new_cb = db_review.apply_review_and_create_codebook_revision(
         source_agg_code=target,
         decision=decision_char,
         new_code_text=new_text,

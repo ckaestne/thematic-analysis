@@ -70,6 +70,31 @@ def get_codebook(version: int) -> Codebook | None:
         return cb
 
 
+def get_codebook_with_codes_and_research_context(
+    version: int,
+) -> Codebook | None:
+    """Like :func:`get_codebook`, but also eager-loads ``codebook.codes``
+    and ``codebook.research_context`` so agents bound to the returned
+    (detached) instance can traverse them without a live session."""
+    from sqlalchemy.orm import selectinload
+
+    with session() as s:
+        cb = s.exec(
+            select(Codebook)
+            .where(Codebook.version == version)
+            .options(
+                selectinload(Codebook.codes),  # type: ignore[arg-type]
+                selectinload(Codebook.research_context),  # type: ignore[arg-type]
+            )
+        ).first()
+        if cb is None:
+            return None
+        _ = list(cb.codes)
+        _ = cb.research_context
+        s.expunge_all()
+        return cb
+
+
 def list_codebooks() -> list[Codebook]:
     with session() as s:
         rows = list(

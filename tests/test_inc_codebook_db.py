@@ -2,7 +2,7 @@
 
 These tests exercise the data-access layer in `thematic_analysis_inc.db`
 end-to-end: they build codes / quotes / codebook versions through the
-public API (`record_aggregation_result`, `record_review`, `add_quote`,
+public API (`save_aggregator_codes`, `apply_review_and_create_codebook_revision`, `add_quote`,
 `link_code_quote`, …) and verify what `get_codebook_codes` and
 `codebook_to_json_for_version` return for each version.
 
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from thematic_analysis_inc import db
-from thematic_analysis_inc.db.aggregation import record_aggregation_result
+from thematic_analysis_inc.db.aggregation import save_aggregator_codes
 from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
 from thematic_analysis_inc.db.models import Code, Quote
 from thematic_analysis_inc.db.review import (
@@ -27,7 +27,7 @@ from thematic_analysis_inc.db.review import (
     DECISION_MERGE,
     DECISION_UPDATE,
     next_aggregated_code_to_review,
-    record_review,
+    apply_review_and_create_codebook_revision,
     resolve_target_code,
 )
 
@@ -143,9 +143,7 @@ def _add_agg_code(
         rationale=rationale,
     )
     new_code.supporting_quotes = list(quotes)
-    new_codes = record_aggregation_result(
-        seg, [new_code], codebook_version=version
-    )
+    new_codes = save_aggregator_codes([new_code])
     assert len(new_codes) == 1
     return new_codes[0].code_id
 
@@ -166,7 +164,7 @@ def _review_add(
     """
     parent_cb = db.get_codebook(parent_version)
     agg_code = _code_obj(agg_code_id)
-    new_cb = record_review(
+    new_cb = apply_review_and_create_codebook_revision(
         source_agg_code=agg_code,
         decision=DECISION_ADD,
         new_code_text=code_text,
@@ -343,7 +341,7 @@ def test_update_replaces_code_in_new_version_only(tmp_path: Path) -> None:
     target = resolve_target_code(db.get_codebook(v2), "raw")
     assert target is not None
 
-    new_cb = record_review(
+    new_cb = apply_review_and_create_codebook_revision(
         source_agg_code=_code_obj(a2),
         decision=DECISION_UPDATE,
         new_code_text="refined",
@@ -391,7 +389,7 @@ def test_merge_keeps_target_and_records_derivation_edge(
     target = resolve_target_code(db.get_codebook(v2), "orig")
     assert target is not None and target.code_id == orig_id
 
-    new_cb = record_review(
+    new_cb = apply_review_and_create_codebook_revision(
         source_agg_code=_code_obj(a2),
         decision=DECISION_MERGE,
         new_code_text="orig",
@@ -582,7 +580,7 @@ def test_aggregator_emits_multiple_codes_with_distinct_quotes(
         rationale="r2",
     )
     beta.supporting_quotes = [qb1]
-    new_codes = record_aggregation_result(seg_obj, [alpha, beta])
+    new_codes = save_aggregator_codes([alpha, beta])
     new_ids = [c.code_id for c in new_codes]
     assert len(new_ids) == 2
 
