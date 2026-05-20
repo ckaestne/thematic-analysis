@@ -44,10 +44,12 @@ from thematic_analysis_inc.db.connection import (
     connect,
     init_db,
     now,
+    session,
 )
 from thematic_analysis_inc.db.documents import (
     add_document,
     add_quote,
+    count_segments,
     enqueue_segments,
     find_document_by_filename,
     get_segment,
@@ -121,6 +123,7 @@ __all__ = [
     "connect",
     "init_db",
     "now",
+    "session",
     # models
     "Code",
     "Codebook",
@@ -162,6 +165,7 @@ __all__ = [
     "add_document",
     "find_document_by_filename",
     "list_documents",
+    "count_segments",
     "enqueue_segments",
     "get_segment",
     "get_segment_with_codes",

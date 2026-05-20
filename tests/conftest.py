@@ -36,6 +36,22 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_integration)
 
 
+@pytest.fixture(autouse=True)
+def _clear_worker_codebook_cache():
+    """Worker module caches DomainCodebook objects keyed by version. Without
+    clearing between tests, an earlier test's real-embedding codebook can be
+    handed to a later test that expected mock embeddings, triggering a
+    HuggingFace download."""
+    try:
+        from thematic_analysis_inc import workers
+    except ImportError:
+        yield
+        return
+    workers.clear_codebook_cache()
+    yield
+    workers.clear_codebook_cache()
+
+
 @pytest.fixture
 def mock_embedding_service() -> EmbeddingService:
     """Create a mock embedding service for fast testing."""
