@@ -19,7 +19,6 @@ from thematic_analysis.agents.aggregator import (
 )
 from thematic_analysis.agents.coder import CoderAgent
 from thematic_analysis.agents.reviewer import (
-    ReviewDecision,
     ReviewerAgent,
     ReviewerConfig,
 )
@@ -44,6 +43,7 @@ from thematic_analysis_inc.db import (
     codebook as db_codebook,
     coders as db_coders,
     coding as db_coding,
+    embeddings as db_embeddings,
     review as db_review,
     theme as db_theme,
 )
@@ -59,8 +59,8 @@ from thematic_analysis_inc.db.models import (
 from thematic_analysis_inc.refinement import wrap_with_refinement
 
 
-# ── Codebook cache ───────────────────────────────────────────────────────────
-
+# In-memory codebook cache (Stage-2 only — Stage-1 reviewer now reads
+# codebook membership directly from the DB).
 _codebook_cache: dict[int, DomainCodebook] = {}
 
 
@@ -81,6 +81,7 @@ def _apply_research_context(agent: Any) -> None:
 
 
 def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
+    """In-memory snapshot of a codebook revision (Stage-2 only)."""
     cb = _codebook_cache.get(version)
     if cb is not None:
         return cb
@@ -88,12 +89,6 @@ def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
     cb = DomainCodebook.from_json(
         snapshot, use_mock_embeddings=use_mock_embeddings
     )
-    # Pin the research context to the codebook revision so agents bound
-    # to this codebook can read it off `codebook.research_context`
-    # instead of taking a separate constructor argument.
-    db_cb = db_codebook.get_codebook_with_codes_and_research_context(version)
-    if db_cb is not None and db_cb.research_context is not None:
-        cb.research_context = db.research_context_to_domain(db_cb.research_context)
     _codebook_cache[version] = cb
     return cb
 
@@ -511,18 +506,65 @@ def drain_aggregate(
 
 # ── Reviewer worker ──────────────────────────────────────────────────────────
 
-ReviewerFactory = Callable[[DomainCodebook], Any]
+ReviewerFactory = Callable[
+    [DBCodebook, list[Code], db_embeddings.EmbeddingService], Any
+]
 
 
-def default_reviewer_factory(codebook: DomainCodebook) -> ReviewerAgent:
-    return ReviewerAgent(config=ReviewerConfig(), codebook=codebook)
+def default_reviewer_factory(
+    codebook: DBCodebook,
+    live_codes: list[Code],
+    embedding_service: db_embeddings.EmbeddingService,
+) -> ReviewerAgent:
+    return ReviewerAgent(
+        codebook=codebook,
+        live_codes=live_codes,
+        embedding_service=embedding_service,
+        config=ReviewerConfig(),
+    )
 
 
-_DECISION_TO_CHAR = {
-    ReviewDecision.ADD_NEW: DECISION_ADD,
-    ReviewDecision.MERGE: DECISION_MERGE,
-    ReviewDecision.UPDATE: DECISION_UPDATE,
-}
+def _make_embedding_service(
+    use_mock_embeddings: bool,
+) -> db_embeddings.EmbeddingService:
+    return db_embeddings.EmbeddingService(use_mock=use_mock_embeddings)
+
+
+def _load_review_inputs(
+    code_id: int, parent_version: int
+) -> tuple[Code, DBCodebook, list[Code]]:
+    """Eager-load everything the reviewer needs (detached): the aggregator
+    code with its quotes, the parent codebook with codes+quotes+context,
+    and the live codes for the in-progress batch."""
+    target = db_aggregation.get_aggregator_code(code_id)
+    if target is None:
+        raise ValueError(f"unknown aggregator code_id: {code_id}")
+    # supporting_quotes weren't included in get_aggregator_code's load;
+    # re-fetch with eager-load. (Keep both helpers; this is one extra hop
+    # for a debug path and the review_one path that's fine.)
+    parent = db_codebook.get_codebook_with_codes_and_research_context(
+        parent_version
+    )
+    if parent is None:
+        raise RuntimeError(
+            f"codebook version {parent_version} disappeared mid-call"
+        )
+    # Ensure quotes are loaded for parent codes.
+    for c in parent.codes:
+        _ = list(c.supporting_quotes)
+    live = db_codebook.live_codes_for_batch(parent)
+    for c in live:
+        _ = list(c.supporting_quotes)
+    # Re-fetch target with quotes eagerly loaded.
+    target_with_quotes = db_review.next_aggregated_code_to_review()
+    # If next_aggregated picked something else (target already had its
+    # 'R' edge), fall back to a manual fetch.
+    if target_with_quotes is None or target_with_quotes.code_id != code_id:
+        target_with_quotes = target
+        target_with_quotes.supporting_quotes = list(
+            target_with_quotes.supporting_quotes or []
+        )
+    return target_with_quotes, parent, live
 
 
 def test_review_aggregated_code(
@@ -531,31 +573,27 @@ def test_review_aggregated_code(
     use_mock_embeddings: bool = False,
 ) -> dict[str, Any]:
     """Run the reviewer on one aggregator code without writing anything.
-    Returns a dict with the input code, the result, and the agent itself
-    so callers can inspect ``last_payload`` / ``last_system_prompt`` /
-    ``last_user_prompt`` / ``last_raw_response`` / ``last_elapsed`` /
-    ``last_shortcut`` / ``last_similar_codes``."""
+    Returns a dict with the input code, the result Code (or None on
+    error), and the agent itself so callers can inspect ``last_payload``
+    / ``last_system_prompt`` / ``last_user_prompt`` / ``last_raw_response``
+    / ``last_elapsed`` / ``last_shortcut`` / ``last_similar``."""
     target = db_aggregation.get_aggregator_code(code_id)
     if target is None:
         raise ValueError(f"unknown aggregator code_id: {code_id}")
-
-    quotes_data = db_aggregation.load_aggregated_code_quotes(code_id)
-    quotes = [
-        DomainQuote(quote_id=str(q["quote_id"]), text=q["text"])
-        for q in quotes_data
-    ]
-
     latest = db_codebook.latest_codebook()
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    codebook = _get_codebook(latest.version, use_mock_embeddings)
-    agent = default_reviewer_factory(codebook)
+    target_with_quotes, parent, live = _load_review_inputs(
+        code_id, latest.version
+    )
+    service = _make_embedding_service(use_mock_embeddings)
+    agent = default_reviewer_factory(parent, live, service)
 
     llm_error: str | None = None
-    result = None
+    result_code: Code | None = None
     try:
-        result = agent.review_code(target.code, quotes)
+        result_code = agent.review_code(target_with_quotes)
     except Exception as exc:
         llm_error = f"{type(exc).__name__}: {exc}"
 
@@ -564,9 +602,9 @@ def test_review_aggregated_code(
         "code": target.code,
         "segment_id": target.segment_id,
         "codebook_version": latest.version,
-        "quotes": quotes,
+        "target": target_with_quotes,
         "agent": agent,
-        "result": result,
+        "result": result_code,
         "llm_error": llm_error,
     }
 
@@ -577,93 +615,56 @@ def review_one(
     use_mock_embeddings: bool = False,
     agent_factory: ReviewerFactory | None = None,
 ) -> dict | None:
+    """Process one aggregator code: build a fresh reviewer Code (with
+    provenance) and persist it. **Does not** create a new Codebook
+    revision — that happens once at the end via :func:`finalize_codebook`.
+    """
     target = db_review.next_aggregated_code_to_review()
     if target is None:
         return None
 
-    quotes_data = db_aggregation.load_aggregated_code_quotes(target.code_id)
-    quotes = [
-        DomainQuote(quote_id=str(q["quote_id"]), text=q["text"])
-        for q in quotes_data
-    ]
-
     latest = db_codebook.latest_codebook()
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
-    parent_cb = latest
+    parent = db_codebook.get_codebook_with_codes_and_research_context(
+        latest.version
+    )
+    if parent is None:
+        raise RuntimeError(
+            f"codebook version {latest.version} disappeared mid-call"
+        )
+    for c in parent.codes:
+        _ = list(c.supporting_quotes)
+    live = db_codebook.live_codes_for_batch(parent)
+    for c in live:
+        _ = list(c.supporting_quotes)
 
-    codebook = _get_codebook(parent_cb.version, use_mock_embeddings)
+    service = _make_embedding_service(use_mock_embeddings)
     factory = agent_factory or default_reviewer_factory
-    agent = factory(codebook)
+    agent = factory(parent, live, service)
 
     t0 = time.monotonic()
-    result = agent.review_code(target.code, quotes)
+    result_code = agent.review_code(target)
+    persisted = db_review.save_reviewer_decision(result_code)
+    elapsed = time.monotonic() - t0
 
-    if result.decision == ReviewDecision.SKIP:
-        return {
-            "ok": True,
-            "aggregated_code_id": target.code_id,
-            "segment_id": target.segment_id,
-            "code": target.code,
-            "decision": result.decision.value,
-            "target_code": result.target_code,
-            "new_version": None,
-            "elapsed": time.monotonic() - t0,
-        }
-
-    decision_char = _DECISION_TO_CHAR[result.decision]
-    target_code: Code | None = None
-    if result.decision in (ReviewDecision.MERGE, ReviewDecision.UPDATE):
-        if result.target_code is None:
-            raise RuntimeError(
-                f"reviewer decision {result.decision.value} requires "
-                "target_code"
-            )
-        target_code = db_review.resolve_target_code(
-            parent_cb, result.target_code
-        )
-        if target_code is None:
-            raise RuntimeError(
-                f"target code {result.target_code!r} not found in codebook "
-                f"v{parent_cb.version}"
-            )
-
-    new_text = result.code
-    new_cb = db_review.apply_review_and_create_codebook_revision(
-        source_agg_code=target,
-        decision=decision_char,
-        new_code_text=new_text,
-        new_description="",
-        rationale=result.rationale or "",
-        parent_codebook=parent_cb,
-        target_code=target_code,
-    )
-
-    # Quote handling: copy quotes onto the right code in DB so the
-    # codebook revision picks them up via codebook_code membership.
-    seg = db.get_segment(target.segment_id)
-    if result.decision == ReviewDecision.MERGE and target_code is not None:
-        for q in quotes:
-            qrow = db.add_quote(seg, q.text)
-            db.link_code_quote(target_code, qrow)
-    else:
-        new_reviewer_code = db_review.find_reviewer_code_by_text(new_text)
-        if new_reviewer_code is not None:
-            for q in quotes:
-                qrow = db.add_quote(seg, q.text)
-                db.link_code_quote(new_reviewer_code, qrow)
-
-    _codebook_cache.pop(new_cb.version, None)
+    edges = list(persisted.derivation_sources or [])
+    decision_char = edges[0].decision if edges else None
+    decision_name = {
+        DECISION_ADD: "add_new",
+        DECISION_MERGE: "merge",
+        DECISION_UPDATE: "update",
+    }.get(decision_char or "", "add_new")
 
     return {
         "ok": True,
         "aggregated_code_id": target.code_id,
         "segment_id": target.segment_id,
         "code": target.code,
-        "decision": result.decision.value,
-        "target_code": result.target_code,
-        "new_version": new_cb.version,
-        "elapsed": time.monotonic() - t0,
+        "decision": decision_name,
+        "new_code": persisted.code,
+        "new_code_id": persisted.code_id,
+        "elapsed": elapsed,
     }
 
 
@@ -676,14 +677,8 @@ def drain_review(
     on_event: Callable[[dict, dict], None] | None = None,
 ) -> dict:
     counters = {"done": 0, "failed": 0}
-    skipped: set[int] = set()
     while True:
         if limit is not None and counters["done"] + counters["failed"] >= limit:
-            break
-        target = db_review.next_aggregated_code_to_review()
-        if target is None:
-            break
-        if target.code_id in skipped:
             break
         res = review_one(
             None,
@@ -693,11 +688,27 @@ def drain_review(
         if res is None:
             break
         counters["done"] += 1
-        if res.get("decision") == ReviewDecision.SKIP.value:
-            skipped.add(int(res["aggregated_code_id"]))
         if on_event is not None:
             on_event(res, counters)
     return counters
+
+
+def finalize_codebook() -> int | None:
+    """Materialize one new ``Codebook`` revision capturing every reviewer
+    decision written against the current latest codebook. Returns the new
+    version, or ``None`` if no membership changed (caller can print
+    ``codebook unchanged``)."""
+    parent = db_codebook.latest_codebook()
+    if parent is None:
+        return None
+    # Re-fetch with codes eager-loaded so live_codes_for_batch / diff work.
+    parent_full = db_codebook.get_codebook_with_codes_and_research_context(
+        parent.version
+    )
+    if parent_full is None:
+        return None
+    new_cb = db_codebook.materialize_codebook_revision(parent_full)
+    return new_cb.version if new_cb is not None else None
 
 
 # ── Stage 2 helpers (raw-SQL theme tables) ───────────────────────────────────

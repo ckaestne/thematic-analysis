@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from sqlalchemy import func
+from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
-from thematic_analysis_inc.db.codebook import (
-    copy_codebook_membership,
-    insert_codebook_version,
-)
 from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
@@ -16,15 +13,14 @@ from thematic_analysis_inc.db.models import (
     Codebook,
     CodebookCode,
     CodesDerived,
-    DECISION_ADD,
-    DECISION_MERGE,
-    DECISION_UPDATE,
     DERIVATION_REVIEW,
 )
 
 
 def next_aggregated_code_to_review() -> Code | None:
-    """An aggregator Code (coder_id=0) with no outgoing 'R' edge."""
+    """An aggregator Code (coder_id=0) with no outgoing 'R' edge,
+    with ``supporting_quotes`` eager-loaded so the reviewer can read them
+    without a session."""
     with session() as s:
         outgoing_r = (
             select(CodesDerived.source_code_id)
@@ -37,11 +33,13 @@ def next_aggregated_code_to_review() -> Code | None:
         row = s.exec(
             select(Code)
             .where(Code.coder_id == 0, ~outgoing_r)
+            .options(selectinload(Code.supporting_quotes))
             .order_by(Code.code_id)
             .limit(1)
         ).first()
         if row is not None:
-            s.expunge(row)
+            _ = list(row.supporting_quotes)
+            s.expunge_all()
         return row
 
 
@@ -63,84 +61,37 @@ def resolve_target_code(codebook: Codebook, code_text: str) -> Code | None:
         return c
 
 
-def apply_review_and_create_codebook_revision(
-    *,
-    source_agg_code: Code,
-    decision: str,
-    new_code_text: str,
-    new_description: str,
-    rationale: str,
-    parent_codebook: Codebook,
-    target_code: Code | None = None,
-) -> Codebook:
-    """Apply a non-SKIP review decision: writes the new reviewer Code
-    AND the ``CodesDerived`` provenance edge AND a fresh Codebook
-    revision (with membership copied from ``parent_codebook`` and the
-    add/drop applied) — all as one logical update.
+def save_reviewer_decision(code: Code) -> Code:
+    """Persist a reviewer ``Code`` returned by ``ReviewerAgent.review_code``.
 
-    Returns the new Codebook revision."""
-    if decision not in {DECISION_ADD, DECISION_MERGE, DECISION_UPDATE}:
-        raise ValueError(f"invalid decision: {decision!r}")
-    if decision in (DECISION_MERGE, DECISION_UPDATE) and target_code is None:
-        raise ValueError(f"decision {decision!r} requires target_code")
+    The code is a fresh row (``code_id is None``); its ``supporting_quotes``
+    are existing ``Quote`` rows that must be merged in, and its
+    ``derivation_sources`` carry one or two ``CodesDerived`` edges whose
+    ``source_code`` is an existing Code (aggregator code, or the previous
+    reviewer target). Cascade writes the edge rows after ``s.add``.
 
+    Returns a fresh detached ``Code`` with ``code_id`` populated and its
+    ``derivation_sources`` / ``supporting_quotes`` re-hydrated.
+    """
+    if code.code_id is not None:
+        raise ValueError(
+            "save_reviewer_decision expects a fresh Code with code_id=None"
+        )
     with session() as s:
-        new_code = Code(
-            segment_id=source_agg_code.segment_id,
-            coder_id=SYSTEM_REVIEWER_ID,
-            codebook_used_id=parent_codebook.version,
-            code=new_code_text,
-            description=new_description or "",
-            rationale=rationale or "",
-        )
-        s.add(new_code)
+        code.supporting_quotes = [
+            s.merge(q) if q.quote_id is not None else q
+            for q in (code.supporting_quotes or [])
+        ]
+        for edge in code.derivation_sources or []:
+            if edge.source_code is not None and edge.source_code.code_id is not None:
+                edge.source_code = s.merge(edge.source_code)
+        s.add(code)
         s.commit()
-        s.refresh(new_code)
-        new_code_id = new_code.code_id
-
-        s.add(
-            CodesDerived(
-                new_code_id=new_code_id,
-                source_code_id=source_agg_code.code_id,
-                derivation_type=DERIVATION_REVIEW,
-                decision=decision,
-                rationale=rationale,
-            )
-        )
-        s.commit()
+        s.refresh(code)
+        _ = list(code.supporting_quotes)
+        _ = list(code.derivation_sources)
         s.expunge_all()
-        # Re-read new_code as a fresh detached instance for the caller.
-        new_code = Code(
-            code_id=new_code_id,
-            segment_id=source_agg_code.segment_id,
-            coder_id=SYSTEM_REVIEWER_ID,
-            codebook_used_id=parent_codebook.version,
-            code=new_code_text,
-            description=new_description or "",
-            rationale=rationale or "",
-        )
-
-    # New codebook revision (in a fresh session via the helper).
-    new_cb = insert_codebook_version(parent=parent_codebook)
-
-    if decision == DECISION_ADD:
-        copy_codebook_membership(
-            from_codebook=parent_codebook,
-            to_codebook=new_cb,
-            add_code=new_code,
-        )
-    elif decision == DECISION_MERGE:
-        copy_codebook_membership(
-            from_codebook=parent_codebook, to_codebook=new_cb
-        )
-    else:  # UPDATE
-        copy_codebook_membership(
-            from_codebook=parent_codebook,
-            to_codebook=new_cb,
-            drop_code=target_code,
-            add_code=new_code,
-        )
-    return new_cb
+        return code
 
 
 def find_reviewer_code_by_text(code_text: str) -> Code | None:

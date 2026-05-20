@@ -245,6 +245,10 @@ class Code(SQLModel, table=True):
     code: str
     description: str = Field(default="")
     rationale: str = Field(default="")
+    # Raw float32 bytes (np.ndarray.tobytes()). Populated only on
+    # reviewer Codes (coder_id == -1) so similarity search can run
+    # against the codebook without re-embedding every load.
+    embedding: Optional[bytes] = Field(default=None)
 
     segment: Segment = Relationship(back_populates="codes")
     coder: Coder = Relationship()

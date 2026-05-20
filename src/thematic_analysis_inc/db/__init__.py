@@ -32,6 +32,8 @@ from thematic_analysis_inc.db.codebook import (
     insert_codebook_version,
     latest_codebook,
     list_codebooks,
+    live_codes_for_batch,
+    materialize_codebook_revision,
 )
 from thematic_analysis_inc.db.coders import (
     SYSTEM_AGGREGATOR_ID,
@@ -155,6 +157,8 @@ __all__ = [
     "codebook_to_json_for_version",
     "add_code_to_codebook",
     "copy_codebook_membership",
+    "live_codes_for_batch",
+    "materialize_codebook_revision",
     # coders
     "SYSTEM_AGGREGATOR_ID",
     "SYSTEM_REVIEWER_ID",

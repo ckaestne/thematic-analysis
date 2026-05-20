@@ -109,12 +109,19 @@ def _create_sqlmodel_tables(engine: Engine) -> None:
 
 def _migrate_sqlmodel_tables(engine: Engine) -> None:
     with engine.begin() as conn:
-        cols = {
+        seg_cols = {
             row[1]
             for row in conn.exec_driver_sql("PRAGMA table_info('segment')")
         }
-        if "title" not in cols:
+        if "title" not in seg_cols:
             conn.exec_driver_sql("ALTER TABLE segment ADD COLUMN title TEXT")
+
+        code_cols = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info('code')")
+        }
+        if "embedding" not in code_cols:
+            conn.exec_driver_sql("ALTER TABLE code ADD COLUMN embedding BLOB")
 
 
 def connect(path: str | Path) -> sqlite3.Connection:

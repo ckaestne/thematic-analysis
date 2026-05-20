@@ -7,10 +7,8 @@ from thematic_analysis.agents.aggregator import (
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.coder import CoderAgent, CoderConfig
 from thematic_analysis.agents.reviewer import (
-    ReviewDecision,
     ReviewerAgent,
     ReviewerConfig,
-    ReviewResult,
 )
 from thematic_analysis.agents.theme_aggregator import (
     MergedTheme,
@@ -35,8 +33,6 @@ __all__ = [
     "AggregatorConfig",
     "ReviewerAgent",
     "ReviewerConfig",
-    "ReviewResult",
-    "ReviewDecision",
     "ThemeCoderAgent",
     "ThemeCoderConfig",
     "Theme",
