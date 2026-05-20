@@ -112,7 +112,6 @@ export type CoderRun = {
   segment_id: string;
   coder_id: string;
   codebook_version: number;
-  research_context_version: number;
   status: string;
   claimed_at: string | null;
   finished_at: string | null;
@@ -172,7 +171,6 @@ export type ApiSegmentPayload = {
     coder_id: number;
     status: string;
     codebook_version: number;
-    research_context_version: number;
     finished_at: string | null;
     no_codes: boolean;
     codes: Array<{
@@ -204,7 +202,6 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
     segment_id: segIdStr,
     coder_id: String(cc.coder_id),
     codebook_version: cc.codebook_version,
-    research_context_version: cc.research_context_version,
     status: cc.status,
     claimed_at: null,
     finished_at: cc.finished_at,
@@ -451,7 +448,6 @@ export const api = {
         segment_id: string;
         coder_id: string;
         codebook_version: number;
-        research_context_version: number;
         status: string;
         claimed_at: string | null;
         finished_at: string | null;

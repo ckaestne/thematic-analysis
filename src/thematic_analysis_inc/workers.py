@@ -342,9 +342,9 @@ def aggregate_one(
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    target_cb, target_rc = db_aggregation._target_versions()
+    target_cb = db_aggregation._target_codebook_version()
     coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=target_cb, rc_version=target_rc
+        seg, codebook_version=target_cb
     )
     # Drop coder sentinel rows — they mean "this coder produced nothing"
     # and must not be treated as real input codes for the aggregator. A
@@ -364,7 +364,7 @@ def aggregate_one(
     n_in = sum(len(v) for v in coder_codes.values())
     try:
         if db_aggregation.segment_has_aggregator_code(
-            segment_id, codebook_version=target_cb, rc_version=target_rc
+            segment_id, codebook_version=target_cb
         ):
             return {
                 "ok": False,
@@ -378,7 +378,7 @@ def aggregate_one(
             # No coder codes at this version: mark the segment aggregated
             # with the empty-aggregation sentinel so we don't re-pick it.
             db_aggregation.record_aggregation_result(
-                seg, [], codebook_version=target_cb, rc_version=target_rc
+                seg, [], codebook_version=target_cb
             )
             return {
                 "ok": True,
@@ -414,7 +414,7 @@ def aggregate_one(
             )
 
         db_aggregation.record_aggregation_result(
-            seg, merged, codebook_version=target_cb, rc_version=target_rc
+            seg, merged, codebook_version=target_cb
         )
         return {
             "ok": True,
@@ -443,9 +443,9 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    target_cb, target_rc = db_aggregation._target_versions()
+    target_cb = db_aggregation._target_codebook_version()
     coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=target_cb, rc_version=target_rc
+        seg, codebook_version=target_cb
     )
     grouped = _grouped_coder_codes(coder_codes)
 

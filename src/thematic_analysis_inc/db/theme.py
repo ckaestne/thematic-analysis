@@ -6,9 +6,6 @@ import sqlite3
 from dataclasses import dataclass
 
 from thematic_analysis_inc.db.connection import now
-from thematic_analysis_inc.db.research_context import (
-    latest_research_context_version,
-)
 
 
 @dataclass
@@ -106,14 +103,12 @@ def start_theme_coder_run(
     theme_coder_id: str,
     codebook_version: int,
 ) -> int | None:
-    rc_version = latest_research_context_version()
     try:
         cur = conn.execute(
             "INSERT INTO theme_coder_runs "
-            "(theme_coder_id, codebook_version, research_context_version, "
-            " status, claimed_at) "
-            "VALUES (?, ?, ?, 'running', ?)",
-            (theme_coder_id, codebook_version, rc_version, now()),
+            "(theme_coder_id, codebook_version, status, claimed_at) "
+            "VALUES (?, ?, 'running', ?)",
+            (theme_coder_id, codebook_version, now()),
         )
     except sqlite3.IntegrityError:
         return None
@@ -215,13 +210,12 @@ def load_done_theme_coder_runs(
 def start_theme_aggregation(
     conn: sqlite3.Connection, codebook_version: int
 ) -> int | None:
-    rc_version = latest_research_context_version()
     try:
         cur = conn.execute(
             "INSERT INTO theme_aggregations "
-            "(codebook_version, research_context_version, status, created_at) "
-            "VALUES (?, ?, 'running', ?)",
-            (codebook_version, rc_version, now()),
+            "(codebook_version, status, created_at) "
+            "VALUES (?, 'running', ?)",
+            (codebook_version, now()),
         )
     except sqlite3.IntegrityError:
         return None
