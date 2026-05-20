@@ -39,7 +39,7 @@ class ReviewerConfig(AgentConfig):
     """Configuration for the Reviewer agent."""
 
     similarity_threshold: float = 0.75  # Threshold for considering codes similar
-    top_k_similar: int = 5  # Number of similar codes to retrieve
+    top_k_similar: int = 10  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging
 
 
@@ -163,16 +163,23 @@ class ReviewerAgent(BaseAgent):
     def _format_similar_codes_section(
         self, similar_codes: list[tuple[CodeEntry, float]]
     ) -> str:
-        """Format similar codes for the prompt."""
+        """Format similar codes (with their quotes) for the prompt.
+
+        Per the paper, the reviewer compares new codes *and quotes* with
+        existing codes *and quotes* — so each similar code is shown with
+        a handful of its supporting quotes, not just its label.
+        """
         if not similar_codes:
             return "No similar codes found in the codebook."
 
         lines = []
         for entry, score in similar_codes:
-            quote_sample = ""
-            if entry.quotes:
-                quote_sample = f' (e.g., "{entry.quotes[0].text[:100]}...")'
-            lines.append(f"- **{entry.code}** (similarity: {score:.2f}){quote_sample}")
+            lines.append(f"- **{entry.code}** (similarity: {score:.2f})")
+            for q in entry.quotes[:5]:
+                text = q.text[:200] + "..." if len(q.text) > 200 else q.text
+                lines.append(f'    - [{q.quote_id}] "{text}"')
+            if not entry.quotes:
+                lines.append("    - (no quotes recorded)")
         return "\n".join(lines)
 
     def _parse_response(self, response: str) -> tuple[ReviewDecision, str | None, str]:

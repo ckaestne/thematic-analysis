@@ -23,7 +23,7 @@ class TestReviewerConfig:
         config = ReviewerConfig()
 
         assert config.similarity_threshold == 0.75
-        assert config.top_k_similar == 5
+        assert config.top_k_similar == 10
         assert config.merge_threshold == 0.90
 
     def test_custom_config(self):
