@@ -476,6 +476,32 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
             llm_error = f"{type(exc).__name__}: {exc}"
         elapsed = time.monotonic() - t0
 
+    # Build the list of AggregatorMergeInputs exactly as `aggregate_one`
+    # would, so the caller can see what rows would land in the DB.
+    code_map: dict[tuple[int, str], Code] = {}
+    for cid, codes in coder_codes.items():
+        for c in codes:
+            code_map[(cid, c.code)] = c
+    db_preview: list[db_aggregation.AggregatorMergeInput] = []
+    if result is not None:
+        for mc in result.all_codes():
+            sources: list[Code] = []
+            seen: set[int] = set()
+            for orig in mc.original_codes:
+                for (cid, ctext), c in code_map.items():
+                    if ctext == orig and c.code_id not in seen:
+                        sources.append(c)
+                        seen.add(c.code_id)
+            db_preview.append(
+                db_aggregation.AggregatorMergeInput(
+                    code=mc.code,
+                    description="",
+                    rationale=mc.merge_rationale or "",
+                    quote_texts=[q.text for q in mc.quotes],
+                    source_codes=sources,
+                )
+            )
+
     return {
         "segment_id": segment_id,
         "segment_text": seg.content,
@@ -487,6 +513,7 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
         "raw_response": raw_response,
         "llm_error": llm_error,
         "result": result,
+        "db_preview": db_preview,
         "elapsed": elapsed,
     }
 

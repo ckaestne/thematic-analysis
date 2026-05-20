@@ -799,32 +799,6 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
 
     sep = "─" * 72
     print(sep)
-    print(f"Segment {res['segment_id']}  (codebook v{res['codebook_version']})")
-    print(sep)
-    text = res["segment_text"]
-    print(text if len(text) <= 2000 else text[:2000] + "\n...[truncated]")
-    print()
-
-    print(sep)
-    print("Per-coder input codes")
-    print(sep)
-    coder_codes = res["coder_codes"]
-    if not coder_codes:
-        print("(no coder codes yet for this segment)")
-    for cid in sorted(coder_codes):
-        codes = coder_codes[cid]
-        print(f"coder {cid}: {len(codes)} code(s)")
-        for c in codes:
-            quotes = c.supporting_quotes or []
-            print(f"  - {c.code}  ({len(quotes)} quote(s))")
-            for q in quotes[:3]:
-                qt = q.text.replace("\n", " ").strip()
-                if len(qt) > 160:
-                    qt = qt[:157] + "..."
-                print(f"      \"{qt}\"")
-    print()
-
-    print(sep)
     print("System prompt")
     print(sep)
     print(res["system_prompt"])
@@ -865,6 +839,30 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
         print(f"retained_codes: {len(result.retained_codes)}")
         for rc in result.retained_codes:
             print(f"  - {rc.code}  ({len(rc.quotes)} quote(s))")
+
+    print()
+    print(sep)
+    print("DB preview — aggregator rows that would be written")
+    print(sep)
+    db_preview = res.get("db_preview") or []
+    if not db_preview:
+        print("(nothing would be written — empty input or parse failure)")
+    else:
+        for inp in db_preview:
+            src_labels = [c.code for c in inp.source_codes]
+            print(f"  - code: {inp.code}")
+            if inp.rationale:
+                print(f"      rationale: {inp.rationale}")
+            print(
+                f"      source codes: {src_labels} "
+                f"(ids={[c.code_id for c in inp.source_codes]})"
+            )
+            print(f"      quotes ({len(inp.quote_texts)}):")
+            for qt in inp.quote_texts:
+                qts = qt.replace("\n", " ").strip()
+                if len(qts) > 200:
+                    qts = qts[:197] + "..."
+                print(f"          \"{qts}\"")
 
     print()
     print(f"[test-aggregate] segment={res['segment_id']} no DB writes")

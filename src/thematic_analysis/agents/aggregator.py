@@ -75,23 +75,19 @@ independent coders, merge codes from different coders that capture the same \
 underlying concept, and retain codes that capture different concepts.
 
 ## Input
-The user message is a JSON object with two fields:
-- `coders`: a list of coders. Each coder has a `coder_id` and a list of
-  `codes`. Each code has an integer `id`, a `label`, and a list of
-  `quote_ids` (the quotes that support it).
-- `quotes`: a list of quotes. Each quote has an integer `id` and a `text`.
+The user message is a JSON object with coders and their codes.
+Each code has an `id`, a `label`, and a list of
+  `quotes` (the verbatim quote texts that support it).
 
 ## Rules
-1. Each code is attributed to exactly one coder. Codes produced by the
-   **same coder** already represent distinct concepts in that coder's view
-   and do not need to be merged with each other. Only consider merging
-   codes that come from *different* coders.
-2. Merge codes when they describe the same phenomenon and cover all the
+1. Merge codes when they describe the same phenomenon and cover all the
    quotes from the original codes, even if from different angles or at
    different levels of specificity. Give the merged code a clear,
    representative label.
-3. Keep codes separate when merging them would lose an analytical
+2. Keep codes separate when merging them would lose an analytical
    distinction.
+3. Codes from the same coder already describe distinct concepts and
+   do not need to be merged.
 4. Every input code id must appear in exactly one of `merge_groups`
    (inside `original_code_ids`) or `retain_code_ids`.
 5. Refer to codes by their integer `id` from the input. Do not echo
@@ -189,27 +185,25 @@ class CodeAggregatorAgent(BaseAgent):
                 next_code_id += 1
                 code_index[cid] = c
 
-                quote_ids: list[int] = []
+                quote_texts: list[str] = []
+                seen_texts: set[str] = set()
                 for sq in (c.supporting_quotes or []):
-                    qid = quote_id_by_text.get(sq.text)
-                    if qid is None:
+                    if sq.text in seen_texts:
+                        continue
+                    seen_texts.add(sq.text)
+                    quote_texts.append(sq.text)
+                    if sq.text not in quote_id_by_text:
                         qid = next_quote_id
                         next_quote_id += 1
                         quote_id_by_text[sq.text] = qid
                         quote_index[qid] = Quote(quote_id=str(qid), text=sq.text)
-                    if qid not in quote_ids:
-                        quote_ids.append(qid)
 
                 codes_payload.append(
-                    {"id": cid, "label": c.code, "quote_ids": quote_ids}
+                    {"id": cid, "label": c.code, "quotes": quote_texts}
                 )
             coders_payload.append({"coder_id": coder_id, "codes": codes_payload})
 
-        quotes_payload = [
-            {"id": qid, "text": quote_index[qid].text}
-            for qid in sorted(quote_index)
-        ]
-        payload = {"coders": coders_payload, "quotes": quotes_payload}
+        payload = {"coders": coders_payload}
         return payload, code_index, quote_index
 
     def _quotes_for_code(
@@ -228,13 +222,8 @@ class CodeAggregatorAgent(BaseAgent):
             out.append(quote_index[qid])
         return out
 
-    def _parse_response(
-        self,
-        response: str,
-        code_index: dict[int, DBCode],
-        quote_index: dict[int, Quote],
-    ) -> AggregationResult | None:
-        """Parse the LLM response into an AggregationResult."""
+    def _extract_response_json(self, response: str) -> dict | None:
+        """Extract the JSON object from a raw LLM response, or None."""
         json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
         if json_match:
             json_str = json_match.group(1).strip()
@@ -243,10 +232,64 @@ class CodeAggregatorAgent(BaseAgent):
             if not json_match:
                 return None
             json_str = json_match.group(0)
-
         try:
-            data = json.loads(json_str)
+            return json.loads(json_str)
         except json.JSONDecodeError:
+            return None
+
+    def _coverage_errors(
+        self, data: dict, code_index: dict[int, DBCode]
+    ) -> list[str]:
+        """Check that every input code id appears in exactly one of
+        ``merge_groups[*].original_code_ids`` or ``retain_code_ids``.
+        Returns a list of human-readable error strings; empty if valid."""
+        seen_counts: dict[int, int] = {}
+        unknown: list[int] = []
+
+        def _bump(raw):
+            try:
+                cid = int(raw)
+            except (TypeError, ValueError):
+                unknown.append(raw)
+                return
+            if cid not in code_index:
+                unknown.append(cid)
+                return
+            seen_counts[cid] = seen_counts.get(cid, 0) + 1
+
+        for group in data.get("merge_groups", []) or []:
+            for raw in group.get("original_code_ids", []) or []:
+                _bump(raw)
+        for raw in data.get("retain_code_ids", []) or []:
+            _bump(raw)
+
+        missing = sorted(cid for cid in code_index if cid not in seen_counts)
+        duplicates = sorted(cid for cid, n in seen_counts.items() if n > 1)
+
+        errors: list[str] = []
+        if missing:
+            errors.append(
+                f"missing code ids (not assigned to any merge or retain): {missing}"
+            )
+        if duplicates:
+            errors.append(
+                f"code ids assigned more than once: {duplicates}"
+            )
+        if unknown:
+            errors.append(
+                f"unknown code ids (not in the input): {unknown}"
+            )
+        return errors
+
+    def _parse_response(
+        self,
+        response: str,
+        code_index: dict[int, DBCode],
+        quote_index: dict[int, Quote],
+    ) -> AggregationResult | None:
+        """Parse the LLM response into an AggregationResult."""
+        data = self._extract_response_json(response)
+        if data is None:
             return None
 
         max_quotes = self.aggregator_config.max_quotes_per_code
@@ -319,11 +362,38 @@ class CodeAggregatorAgent(BaseAgent):
             return AggregationResult(merged_codes=[], retained_codes=[])
 
         user_prompt = json.dumps(payload, indent=2)
-        response = self._call_llm(
-            self.get_system_prompt(),
-            user_prompt,
-            response_format=AGGREGATOR_RESPONSE_SCHEMA,
-        )
+        system_prompt = self.get_system_prompt()
+        max_attempts = 3
+        current_prompt = user_prompt
+        response = ""
+        for attempt in range(max_attempts):
+            response = self._call_llm(
+                system_prompt,
+                current_prompt,
+                response_format=AGGREGATOR_RESPONSE_SCHEMA,
+            )
+            data = self._extract_response_json(response)
+            if data is None:
+                # parse failure is handled by _parse_response below; no
+                # point asking for a coverage fix when we can't even parse.
+                break
+            errors = self._coverage_errors(data, code_index)
+            if not errors:
+                break
+            if attempt == max_attempts - 1:
+                break
+            err_text = "\n".join(f"- {e}" for e in errors)
+            current_prompt = (
+                f"{user_prompt}\n\n"
+                f"Your previous response was:\n{response}\n\n"
+                f"That response violated this rule: every input code id "
+                f"must appear in exactly one of `merge_groups` "
+                f"(inside `original_code_ids`) or `retain_code_ids`. "
+                f"Problems found:\n{err_text}\n\n"
+                f"Return a corrected JSON object that fixes these issues. "
+                f"Use only the code ids from the original input."
+            )
+
         result = self._parse_response(response, code_index, quote_index)
 
         if result is None:

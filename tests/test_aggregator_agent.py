@@ -121,22 +121,25 @@ class TestCodeAggregatorAgent:
             "peer support",
             "emotional comfort",
         ]
-        # Quotes are deduped by text and listed under a unique id.
-        quote_texts = {q["text"] for q in payload["quotes"]}
-        assert quote_texts == {
+        # Quote texts are inlined per code; collect across all codes.
+        all_quote_texts: set[str] = set()
+        for c in coders:
+            for code in c["codes"]:
+                all_quote_texts.update(code["quotes"])
+        assert all_quote_texts == {
             "I felt really supported by my friends",
             "My classmates helped me through it",
             "Time pressure was overwhelming",
         }
-        # The two codes from coder 1 share the same quote text → same id.
-        ids_coder1 = {tuple(c["quote_ids"]) for c in coders[0]["codes"]}
-        assert ids_coder1 == {tuple(coders[0]["codes"][0]["quote_ids"])}
+        # Both codes from coder 1 carry the same supporting quote text.
+        quotes_coder1 = {tuple(c["quotes"]) for c in coders[0]["codes"]}
+        assert quotes_coder1 == {tuple(coders[0]["codes"][0]["quotes"])}
 
     def test_build_prompt_payload_full_quote_text(self, agent: CodeAggregatorAgent):
         long_text = "x" * 500
         coder_codes = [[_code("c", 1, [long_text])]]
         payload, _, _ = agent._build_prompt_payload(coder_codes)
-        assert payload["quotes"][0]["text"] == long_text  # not truncated
+        assert payload["coders"][0]["codes"][0]["quotes"][0] == long_text  # not truncated
 
     def test_parse_response_merges_by_id(
         self,
@@ -229,7 +232,8 @@ class TestCodeAggregatorAgent:
         # The user prompt is a JSON dump of the payload.
         user_prompt = mock_llm.call_args[0][1]
         payload = json.loads(user_prompt)
-        assert "coders" in payload and "quotes" in payload
+        assert "coders" in payload
+        assert "quotes" in payload["coders"][0]["codes"][0]
 
     @patch.object(CodeAggregatorAgent, "_call_llm")
     def test_aggregate_empty_input(self, mock_llm, agent: CodeAggregatorAgent):

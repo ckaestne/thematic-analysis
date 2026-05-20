@@ -82,3 +82,14 @@ Thumbs.db
 # Project specific
 *.log
 codebook_*.json
+
+
+*.db
+*.db-*
+*.db.bak*
+.playwright*/
+debug/
+*.md
+themes.*
+tmp/
+analysis_results.json
