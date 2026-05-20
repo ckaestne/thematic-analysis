@@ -201,7 +201,9 @@ class _StubAgent:
         self.coder = coder
         self.raise_on = raise_on
 
-    def code_segment(self, segment_id, text):
+    def code_segment(self, segment):
+        segment_id = segment.segment_id
+        text = segment.content
         if self.raise_on is not None and str(segment_id) == self.raise_on:
             raise RuntimeError("boom")
         return [
@@ -209,8 +211,8 @@ class _StubAgent:
             _stub_code("shared", text[:10] or "q"),
         ]
 
-    async def code_segment_async(self, segment_id, text):
-        return self.code_segment(segment_id, text)
+    async def code_segment_async(self, segment):
+        return self.code_segment(segment)
 
 
 def _stub_factory(raise_on: str | None = None):
@@ -225,7 +227,9 @@ class _TraceStubAgent:
         self.coder = coder
         self.last_trace = None
 
-    def code_segment(self, segment_id, text):
+    def code_segment(self, segment):
+        segment_id = segment.segment_id
+        text = segment.content
         codes = [_stub_code(f"{self.coder.coder_id}::{segment_id}::trace", text)]
         self.last_trace = {
             "segment_text": text,

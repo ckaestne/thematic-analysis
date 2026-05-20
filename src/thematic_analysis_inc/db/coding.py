@@ -235,9 +235,7 @@ def record_coding_result(
             )
         out: list[Code] = []
         for src in codes:
-            quote_texts = [
-                q.text for q in (src.supporting_quotes or []) if q.text
-            ]
+            src_quotes = [q for q in (src.supporting_quotes or []) if q.text]
             c = Code(
                 segment_id=a.segment_id,
                 coder_id=a.coder_id,
@@ -248,12 +246,16 @@ def record_coding_result(
             )
             s.add(c)
             s.flush()  # assign code_id
-            for qt in quote_texts:
-                q = Quote(segment_id=a.segment_id, text=qt)
-                s.add(q)
-                s.flush()  # assign quote_id
+            for sq in src_quotes:
+                if sq.quote_id is not None:
+                    quote_id = sq.quote_id
+                else:
+                    q = Quote(segment_id=a.segment_id, text=sq.text)
+                    s.add(q)
+                    s.flush()  # assign quote_id
+                    quote_id = q.quote_id
                 s.add(
-                    CodesSupportingQuotes(code_id=c.code_id, quote_id=q.quote_id)
+                    CodesSupportingQuotes(code_id=c.code_id, quote_id=quote_id)
                 )
             out.append(c)
         if not out:

@@ -1,6 +1,7 @@
 """Tests for CoderAgent."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,10 @@ import pytest
 from thematic_analysis.agents import CoderAgent, CoderConfig
 from thematic_analysis.codebook import Codebook, Quote as DomainQuote
 from thematic_analysis.research_context import ResearchContext
+
+
+def _seg(text: str, quotes=None):
+    return SimpleNamespace(segment_id=1, content=text, quotes=quotes or [])
 
 
 CLIMATE_DESCRIPTION = (
@@ -107,7 +112,7 @@ class TestCoderAgent:
                 "quotes": ["connected with peers really helped"],
             },
         ]) + "\n```"
-        result = agent._parse_response(response, SEG_TEXT)
+        result = agent._parse_response(response, _seg(SEG_TEXT))
         assert result is not None
         assert [c.code for c in result] == ["emotional support", "peer connection"]
         assert result[0].description.startswith("Receiving")
@@ -123,12 +128,12 @@ class TestCoderAgent:
                 "quotes": ["felt supported"],
             }
         ])
-        result = agent._parse_response(response, SEG_TEXT)
+        result = agent._parse_response(response, _seg(SEG_TEXT))
         assert result is not None and len(result) == 1
         assert result[0].code == "emotional support"
 
     def test_parse_response_invalid_json(self, agent: CoderAgent):
-        assert agent._parse_response("Not JSON", SEG_TEXT) is None
+        assert agent._parse_response("Not JSON", _seg(SEG_TEXT)) is None
 
     def test_parse_response_drops_quotes_not_in_segment(self, agent: CoderAgent):
         response = _resp([
@@ -139,7 +144,7 @@ class TestCoderAgent:
             }
         ])
         # Quote isn't a substring; code is dropped.
-        result = agent._parse_response(response, SEG_TEXT)
+        result = agent._parse_response(response, _seg(SEG_TEXT))
         assert result == []
 
     def test_parse_response_truncates_to_max_codes(self):
@@ -149,12 +154,12 @@ class TestCoderAgent:
             {"code": f"c{i}", "description": "d", "quotes": ["felt supported"]}
             for i in range(4)
         ])
-        result = agent._parse_response(response, SEG_TEXT)
+        result = agent._parse_response(response, _seg(SEG_TEXT))
         assert result is not None
         assert len(result) == 2
 
     def test_parse_response_empty_codes(self, agent: CoderAgent):
-        result = agent._parse_response(_resp([]), SEG_TEXT)
+        result = agent._parse_response(_resp([]), _seg(SEG_TEXT))
         assert result == []
 
     @patch.object(CoderAgent, "_call_llm")
@@ -166,7 +171,7 @@ class TestCoderAgent:
                 "quotes": ["felt supported by my friends"],
             }
         ])
-        result = agent.code_segment("seg1", SEG_TEXT)
+        result = agent.code_segment(_seg(SEG_TEXT))
         assert len(result) == 1
         assert result[0].code == "emotional support"
         assert result[0].supporting_quotes[0].text == "felt supported by my friends"
@@ -175,7 +180,7 @@ class TestCoderAgent:
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segment_fallback_on_parse_error(self, mock_llm, agent: CoderAgent):
         mock_llm.return_value = "Invalid response"
-        result = agent.code_segment("seg1", SEG_TEXT)
+        result = agent.code_segment(_seg(SEG_TEXT))
         assert result == []
 
     @patch.object(CoderAgent, "_call_llm")
@@ -187,7 +192,7 @@ class TestCoderAgent:
                 "quotes": ["felt supported"],
             }
         ])
-        results = agent.code_segments([("seg1", SEG_TEXT)])
+        results = agent.code_segments([_seg(SEG_TEXT)])
         assert len(results) == 1
         # Coder doesn't touch codebook directly.
         assert len(agent.codebook) == 0
@@ -279,7 +284,7 @@ class TestCoderAgentResearchContext:
         ])
         ctx = ResearchContext(description=CLIMATE_DESCRIPTION)
         agent = CoderAgent(research_context=ctx)
-        result = agent.code_segment("seg1", seg)
+        result = agent.code_segment(_seg(seg))
         assert len(result) == 1
         assert result[0].code == "climate anxiety"
         mock_llm.assert_called_once()

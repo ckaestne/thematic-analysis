@@ -44,6 +44,11 @@ from thematic_analysis_inc.refinement import (
 SEG_TEXT = "the actual segment text we feed the coder"
 
 
+def _seg(text: str, sid: int = 1):
+    from types import SimpleNamespace
+    return SimpleNamespace(segment_id=sid, content=text, quotes=[])
+
+
 def _make_response(text: str) -> Any:
     resp = MagicMock()
     msg = MagicMock()
@@ -200,7 +205,7 @@ class TestRefiningCoderAgent:
         coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
 
-        result = agent.code_segment("seg_0001", SEG_TEXT)
+        result = agent.code_segment(_seg(SEG_TEXT))
 
         assert [c.code for c in result] == ["analytic-concept"]
         assert len(calls) == 3
@@ -236,7 +241,7 @@ class TestRefiningCoderAgent:
         coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
 
-        result = agent.code_segment("seg_x", "off-topic chatter")
+        result = agent.code_segment(_seg("off-topic chatter"))
 
         assert result == []
         assert len(calls) == 1
@@ -258,7 +263,7 @@ class TestRefiningCoderAgent:
             ]
         )
         agent = RefiningCoderAgent(_coder_with_llm(llm))
-        result = agent.code_segment("seg_1", SEG_TEXT)
+        result = agent.code_segment(_seg(SEG_TEXT))
         assert [c.code for c in result] == ["merged-AB", "C"]
         assert len(calls) == 3
 
@@ -285,7 +290,7 @@ class TestRefiningCoderAgent:
         coder._llm = llm
 
         agent = RefiningCoderAgent(coder)
-        agent.code_segment("seg_1", SEG_TEXT)
+        agent.code_segment(_seg(SEG_TEXT))
 
         critic_sys = calls[1].messages[0].content[0].text
         critic_user = calls[1].messages[1].content[0].text
@@ -311,7 +316,7 @@ class TestRefiningCoderAgent:
         agent.research_context = ctx
         assert agent.critic.research_context is ctx
 
-        agent.code_segment("seg", SEG_TEXT)
+        agent.code_segment(_seg(SEG_TEXT))
         critic_sys = calls[1].messages[0].content[0].text
         assert "Late context" in critic_sys
 
@@ -325,7 +330,7 @@ class TestRefiningCoderAgent:
         agent.research_context = ctx
         assert agent._critic is None
 
-        agent.code_segment("seg", SEG_TEXT)
+        agent.code_segment(_seg(SEG_TEXT))
         critic_sys = calls[1].messages[0].content[0].text
         assert "Early context" in critic_sys
 
@@ -349,7 +354,7 @@ class TestRefiningCoderAgent:
             ]
         )
         agent = RefiningCoderAgent(_coder_with_llm(llm))
-        result = await agent.code_segment_async("seg_1", SEG_TEXT)
+        result = await agent.code_segment_async(_seg(SEG_TEXT))
 
         assert [c.code for c in result] == ["deeper"]
         assert len(calls) == 3
@@ -367,7 +372,7 @@ class TestRefiningCoderAgent:
         critic_llm, critic_calls = _fake_llm(["explicit critic spoke"])
         coder = _coder_with_llm(coder_llm)
         agent = RefiningCoderAgent(coder, critic=Critic(critic_llm))
-        agent.code_segment("s", SEG_TEXT)
+        agent.code_segment(_seg(SEG_TEXT))
 
         assert len(coder_calls) == 2
         assert len(critic_calls) == 1

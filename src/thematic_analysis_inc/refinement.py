@@ -41,7 +41,7 @@ from thematic_analysis.agents.coder import (
     CoderAgent,
 )
 from thematic_analysis.prompts import join_system_prompt_sections
-from thematic_analysis_inc.db.models import Code
+from thematic_analysis_inc.db.models import Code, Segment
 
 
 if TYPE_CHECKING:
@@ -263,10 +263,10 @@ class RefiningCoderAgent:
     # ── coder-chat helpers ───────────────────────────────────────────────
 
     def _initial_messages(
-        self, segment_id: str, text: str
+        self, segment: Segment
     ) -> tuple[str, str, list[Message]]:
         system_prompt = self.coder.get_system_prompt()
-        user_prompt = self.coder._build_user_prompt(segment_id, text)
+        user_prompt = self.coder._build_user_prompt(segment)
         messages = [
             Message(role="system", content=[TextContent(text=system_prompt)]),
             Message(role="user", content=[TextContent(text=user_prompt)]),
@@ -295,13 +295,14 @@ class RefiningCoderAgent:
 
     # ── public API matching CoderAgent ───────────────────────────────────
 
-    def code_segment(self, segment_id: str, text: str) -> list[Code]:
+    def code_segment(self, segment: Segment) -> list[Code]:
         self.last_trace = None
+        text = segment.content
         coder_system_prompt, coder_user_prompt, initial_msgs = (
-            self._initial_messages(segment_id, text)
+            self._initial_messages(segment)
         )
         first_response = self._coder_completion(initial_msgs)
-        first_codes = self.coder._process_response(first_response, text)
+        first_codes = self.coder._process_response(first_response, segment)
         if not first_codes:
             self.last_trace = {
                 "segment_text": text,
@@ -328,7 +329,7 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = self._coder_completion(refined_msgs)
-        refined_codes = self.coder._process_response(refined_response, text)
+        refined_codes = self.coder._process_response(refined_response, segment)
         self.last_trace = {
             "segment_text": text,
             "first": first_codes,
@@ -342,15 +343,14 @@ class RefiningCoderAgent:
         }
         return refined_codes
 
-    async def code_segment_async(
-        self, segment_id: str, text: str
-    ) -> list[Code]:
+    async def code_segment_async(self, segment: Segment) -> list[Code]:
         self.last_trace = None
+        text = segment.content
         coder_system_prompt, coder_user_prompt, initial_msgs = (
-            self._initial_messages(segment_id, text)
+            self._initial_messages(segment)
         )
         first_response = await self._coder_completion_async(initial_msgs)
-        first_codes = self.coder._process_response(first_response, text)
+        first_codes = self.coder._process_response(first_response, segment)
         if not first_codes:
             self.last_trace = {
                 "segment_text": text,
@@ -377,7 +377,7 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = await self._coder_completion_async(refined_msgs)
-        refined_codes = self.coder._process_response(refined_response, text)
+        refined_codes = self.coder._process_response(refined_response, segment)
         self.last_trace = {
             "segment_text": text,
             "first": first_codes,

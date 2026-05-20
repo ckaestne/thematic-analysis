@@ -27,7 +27,7 @@ from thematic_analysis.prompts import (
     CODER_USER_PROMPT,
     join_system_prompt_sections,
 )
-from thematic_analysis_inc.db.models import Code, Quote
+from thematic_analysis_inc.db.models import Code, Quote, Segment
 
 
 if TYPE_CHECKING:
@@ -176,14 +176,16 @@ analytical rigor and staying grounded in the text."""
         )
 
     def _parse_response(
-        self, response: str, segment_text: str
+        self, response: str, segment: Segment
     ) -> list[Code] | None:
         """Parse the LLM JSON into transient ``Code`` rows with quotes.
 
         Uses pydantic to validate the response shape. Truncates to
         ``max_codes_per_segment``, drops quotes that aren't a substring
-        of ``segment_text`` (best-effort verbatim check), and drops a
-        code if no surviving quotes remain.
+        of the segment text (best-effort verbatim check), and drops a
+        code if no surviving quotes remain. Reuses any existing
+        ``Quote`` on ``segment.quotes`` with matching text so we don't
+        create duplicate quote rows for the same segment.
         """
         json_str = extract_json_str(response)
         if json_str is None:
@@ -193,6 +195,9 @@ analytical rigor and staying grounded in the text."""
             parsed = _CoderResponse.model_validate_json(json_str)
         except (json.JSONDecodeError, ValidationError):
             return None
+
+        segment_text = segment.content
+        existing_by_text = {q.text: q for q in (segment.quotes or [])}
 
         out: list[Code] = []
         for item in parsed.codes[: self.coder_config.max_codes_per_segment]:
@@ -206,7 +211,7 @@ analytical rigor and staying grounded in the text."""
                 if not qt or qt in seen or qt not in segment_text:
                     continue
                 seen.add(qt)
-                quotes.append(Quote(text=qt))
+                quotes.append(existing_by_text.get(qt) or Quote(text=qt, segment_id=segment.segment_id))
             if not quotes:
                 continue
             code = Code(code=code_text, description=item.description.strip())
@@ -214,44 +219,46 @@ analytical rigor and staying grounded in the text."""
             out.append(code)
         return out
 
-    def _build_user_prompt(self, segment_id: str, text: str) -> str:
+    def _build_user_prompt(self, segment: Segment) -> str:
         template = self._get_user_prompt_template()
         return template.format(
             codebook_section=self._format_codebook_section(),
-            segment_id=segment_id,
-            segment_text=text,
-            similar_codes_section=self._format_similar_codes_section(text),
+            segment_id=str(segment.segment_id),
+            segment_text=segment.content,
+            similar_codes_section=self._format_similar_codes_section(
+                segment.content
+            ),
         )
 
-    def _process_response(self, response: str, text: str) -> list[Code]:
-        parsed = self._parse_response(response, text)
+    def _process_response(self, response: str, segment: Segment) -> list[Code]:
+        parsed = self._parse_response(response, segment)
         return parsed if parsed is not None else []
 
-    def code_segment(self, segment_id: str, text: str) -> list[Code]:
-        user_prompt = self._build_user_prompt(segment_id, text)
+    def code_segment(self, segment: Segment) -> list[Code]:
+        user_prompt = self._build_user_prompt(segment)
         response = self._call_llm(
             self.get_system_prompt(),
             user_prompt,
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, text)
+        return self._process_response(response, segment)
 
-    async def code_segment_async(self, segment_id: str, text: str) -> list[Code]:
-        user_prompt = self._build_user_prompt(segment_id, text)
+    async def code_segment_async(self, segment: Segment) -> list[Code]:
+        user_prompt = self._build_user_prompt(segment)
         response = await self._call_llm_async(
             self.get_system_prompt(),
             user_prompt,
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, text)
+        return self._process_response(response, segment)
 
-    def code_segments(self, segments: list[tuple[str, str]]) -> list[list[Code]]:
-        return [self.code_segment(seg_id, text) for seg_id, text in segments]
+    def code_segments(self, segments: list[Segment]) -> list[list[Code]]:
+        return [self.code_segment(seg) for seg in segments]
 
     async def code_segments_async(
-        self, segments: list[tuple[str, str]]
+        self, segments: list[Segment]
     ) -> list[list[Code]]:
         import asyncio
 
-        tasks = [self.code_segment_async(seg_id, text) for seg_id, text in segments]
+        tasks = [self.code_segment_async(seg) for seg in segments]
         return list(await asyncio.gather(*tasks))

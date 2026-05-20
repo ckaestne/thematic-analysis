@@ -77,10 +77,16 @@ def enqueue_segments(
 
 
 def get_segment(segment_id: int) -> Segment | None:
+    from sqlalchemy.orm import selectinload
+
     with session() as s:
-        seg = s.get(Segment, segment_id)
+        seg = s.exec(
+            select(Segment)
+            .where(Segment.segment_id == segment_id)
+            .options(selectinload(Segment.quotes))  # type: ignore[arg-type]
+        ).first()
         if seg is not None:
-            s.expunge(seg)
+            s.expunge_all()
         return seg
 
 
