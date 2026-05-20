@@ -5,11 +5,11 @@ segment is created. Callers (CLI ``ta enqueue``, web ``/api/.../enqueue``)
 must invoke :func:`enqueue_document`, :func:`enqueue_segment`, or
 :func:`enqueue_pairs` to schedule work.
 
-Each queue entry is keyed by ``(segment_id, coder_id, codebook_version,
-research_context_version)``. Enqueueing at the *same* revisions for an
-existing entry is a no-op; if either revision has moved forward, a fresh
-entry is created so the worker re-codes the segment against the new
-revision.
+Each queue entry is keyed by ``(segment_id, coder_id, codebook_version)``.
+Enqueueing at the *same* codebook version is a no-op; if the codebook
+has moved forward (either via a review or via a research-context
+change, which also creates a new codebook revision), a fresh entry is
+inserted so the worker re-codes the segment against the new revision.
 """
 
 from __future__ import annotations
@@ -30,9 +30,6 @@ from thematic_analysis_inc.db.models import (
     Quote,
     Segment,
     SENTINEL_CODE_LABEL,
-)
-from thematic_analysis_inc.db.research_context import (
-    latest_research_context_version,
 )
 
 
@@ -61,29 +58,22 @@ def enqueue_pairs(
     pairs: Iterable[tuple[int, int]],
     *,
     codebook_version: int | None = None,
-    research_context_version: int | None = None,
 ) -> int:
-    """Insert a queue entry for each ``(segment_id, coder_id)`` pair at the
-    given (or latest) codebook + research-context revisions. Returns the
-    number of rows newly inserted; existing entries at the same revisions
-    are silently skipped (idempotent)."""
+    """Insert a queue entry for each ``(segment_id, coder_id)`` pair at
+    the given (or latest) codebook revision. Returns the number of rows
+    newly inserted; existing entries at the same revision are silently
+    skipped (idempotent)."""
     if codebook_version is None:
         codebook_version = _latest_codebook_version()
     if codebook_version is None:
         raise RuntimeError("no codebook revision exists; run init first")
-    if research_context_version is None:
-        research_context_version = latest_research_context_version()
-    if research_context_version is None:
-        raise RuntimeError(
-            "no research-context revision exists; run init first"
-        )
     inserted = 0
     now = _utcnow()
     with session() as s:
         for segment_id, coder_id in pairs:
             existing = s.get(
                 CodingQueueEntry,
-                (segment_id, coder_id, codebook_version, research_context_version),
+                (segment_id, coder_id, codebook_version),
             )
             if existing is not None:
                 continue
@@ -92,7 +82,6 @@ def enqueue_pairs(
                     segment_id=segment_id,
                     coder_id=coder_id,
                     codebook_used_id=codebook_version,
-                    research_context_used_id=research_context_version,
                     enqueued_at=now,
                 )
             )
@@ -107,8 +96,8 @@ def enqueue_document(
     coder_ids: Iterable[int] | None = None,
 ) -> int:
     """Schedule every segment in ``document_id`` for the given coders
-    (default: all registered real coders) at the latest codebook and
-    research-context revisions. Returns rows inserted."""
+    (default: all registered real coders) at the latest codebook
+    revision. Returns rows inserted."""
     coders = list(coder_ids) if coder_ids is not None else _all_real_coder_ids()
     if not coders:
         return 0
@@ -131,8 +120,8 @@ def enqueue_segment(
     segment_id: int,
     coder_ids: Iterable[int] | None = None,
 ) -> int:
-    """Schedule a single segment for the given coders (default: all real
-    coders) at the latest codebook + research-context revisions."""
+    """Schedule a single segment for the given coders (default: all
+    real coders) at the latest codebook revision."""
     coders = list(coder_ids) if coder_ids is not None else _all_real_coder_ids()
     if not coders:
         return 0
@@ -157,7 +146,7 @@ def pending_count(coder: Coder | None = None) -> int:
 
 def assignment_has_codes(assignment: CodingQueueEntry) -> bool:
     """True iff Code rows already exist for this assignment's
-    (segment_id, coder_id, codebook_used_id, research_context_used_id)."""
+    (segment_id, coder_id, codebook_used_id)."""
     with session() as s:
         n = s.exec(
             select(func.count())
@@ -166,8 +155,6 @@ def assignment_has_codes(assignment: CodingQueueEntry) -> bool:
                 Code.segment_id == assignment.segment_id,
                 Code.coder_id == assignment.coder_id,
                 Code.codebook_used_id == assignment.codebook_used_id,
-                Code.research_context_used_id
-                == assignment.research_context_used_id,
             )
         ).one()
         return int(n) > 0
@@ -220,13 +207,8 @@ def claim_next_assignment(coder: Coder | None = None) -> CodingQueueEntry | None
             return row
 
 
-def _assignment_pk(a: CodingQueueEntry) -> tuple[int, int, int, int | None]:
-    return (
-        a.segment_id,
-        a.coder_id,
-        a.codebook_used_id,
-        a.research_context_used_id,
-    )
+def _assignment_pk(a: CodingQueueEntry) -> tuple[int, int, int]:
+    return (a.segment_id, a.coder_id, a.codebook_used_id)
 
 
 def record_coding_result(
@@ -260,7 +242,6 @@ def record_coding_result(
                 segment_id=a.segment_id,
                 coder_id=a.coder_id,
                 codebook_used_id=a.codebook_used_id,
-                research_context_used_id=a.research_context_used_id,
                 code=src.code,
                 description=src.description or "",
                 rationale="",
@@ -280,7 +261,6 @@ def record_coding_result(
                 segment_id=a.segment_id,
                 coder_id=a.coder_id,
                 codebook_used_id=a.codebook_used_id,
-                research_context_used_id=a.research_context_used_id,
                 code=SENTINEL_CODE_LABEL,
                 description="",
                 rationale="",
@@ -342,14 +322,13 @@ def load_segment_coder_codes(
     segment: Segment,
     *,
     codebook_version: int | None = None,
-    rc_version: int | None = None,
 ) -> dict[int, list[Code]]:
     """Map coder_id → list[Code] for real coders only (id ≥ 1).
 
     When ``codebook_version`` is given, only codes produced under that
-    codebook revision **and** ``rc_version`` are returned (aggregation
-    must not mix codes from different codebook / research-context
-    versions). Eagerly loads each code's ``supporting_quotes`` so
+    codebook revision are returned (aggregation must not mix codes from
+    different codebook versions; the research context is implicit in
+    the codebook). Eagerly loads each code's ``supporting_quotes`` so
     callers (e.g. the aggregator) can read them after the session
     closes.
     """
@@ -363,10 +342,7 @@ def load_segment_coder_codes(
             .order_by(Code.coder_id, Code.code_id)
         )
         if codebook_version is not None:
-            q = q.where(
-                Code.codebook_used_id == codebook_version,
-                Code.research_context_used_id == rc_version,
-            )
+            q = q.where(Code.codebook_used_id == codebook_version)
         rows = list(s.exec(q).all())
         # Touch the relationship before expunging so it's materialised.
         for r in rows:
@@ -421,8 +397,8 @@ def get_queue_entry(
     segment_id: int, coder_id: int
 ) -> CodingQueueEntry | None:
     """Return the most recent queue entry for ``(segment_id, coder_id)``
-    (across all codebook + research-context revisions), or ``None`` if no
-    entry exists. Used by the web UI to show a per-coder status badge."""
+    (across all codebook revisions), or ``None`` if no entry exists.
+    Used by the web UI to show a per-coder status badge."""
     with session() as s:
         q = s.exec(
             select(CodingQueueEntry)

@@ -75,13 +75,14 @@ def _seed_world(session: Session) -> dict:
     the key objects for assertions."""
     session.add(Coder(coder_id=0, identity="aggregator"))
     session.add(Coder(coder_id=-1, identity="reviewer"))
-    cb1 = Codebook()
-    session.add(cb1)
     rc1 = ResearchContext(description="initial", coder_prompt="careful")
     session.add(rc1)
     session.commit()
-    session.refresh(cb1)
     session.refresh(rc1)
+    cb1 = Codebook(research_context_version=rc1.research_context_version)
+    session.add(cb1)
+    session.commit()
+    session.refresh(cb1)
 
     alice = Coder(coder_id=1, identity="alice")
     session.add(alice)
@@ -100,7 +101,7 @@ def _seed_world(session: Session) -> dict:
 
     coder_code = Code(
         segment=seg, coder=alice, codebook_used=cb1,
-        research_context_used=rc1, code="resistance", rationale="why",
+        code="resistance", rationale="why",
     )
     session.add(coder_code)
     session.commit()
@@ -109,7 +110,7 @@ def _seed_world(session: Session) -> dict:
     q = Quote(segment=seg, text="I refuse")
     agg = Code(
         segment=seg, coder_id=0, codebook_used=cb1,
-        research_context_used=rc1, code="resistance",
+        code="resistance",
     )
     agg.supporting_quotes.append(q)
     session.add(agg)
@@ -125,7 +126,7 @@ def _seed_world(session: Session) -> dict:
 
     rev = Code(
         segment=seg, coder_id=-1, codebook_used=cb1,
-        research_context_used=rc1, code="resistance",
+        code="resistance",
         description="opposing change",
     )
     session.add(rev)
@@ -147,7 +148,6 @@ def _seed_world(session: Session) -> dict:
         CodingQueueEntry(
             segment_id=seg.segment_id, coder_id=alice.coder_id,
             codebook_used_id=cb1.version,
-            research_context_used_id=rc1.research_context_version,
         )
     )
     session.commit()
@@ -158,14 +158,10 @@ def _seed_world(session: Session) -> dict:
     tcr = ThemeCoderRun(
         theme_coder_id="t1",
         codebook_used_id=cb1.version,
-        research_context_used_id=rc1.research_context_version,
     )
     session.add(tcr)
     session.commit()
-    ta = ThemeAggregation(
-        codebook_used_id=cb1.version,
-        research_context_used_id=rc1.research_context_version,
-    )
+    ta = ThemeAggregation(codebook_used_id=cb1.version)
     session.add(ta)
     session.commit()
     ta.input_runs.append(tcr)
@@ -199,10 +195,12 @@ def test_coder_has_no_name_column(engine) -> None:
     assert cols == {"coder_id", "identity", "created_at"}
 
 
-def test_codebook_is_minimal(engine) -> None:
-    """Codebook keeps only id, parent, created_at — no created_by."""
+def test_codebook_pins_research_context(engine) -> None:
+    """Codebook stores the research-context version it was authored against."""
     cols = {c["name"] for c in inspect(engine).get_columns("codebook")}
-    assert cols == {"version", "parent_version", "created_at"}
+    assert cols == {
+        "version", "parent_version", "research_context_version", "created_at",
+    }
 
 
 def test_coder_id_is_not_autoincrement(session: Session) -> None:
@@ -228,7 +226,8 @@ def test_code_navigates_to_segment_coder_codebook_and_research_context(
     assert code.segment.content == "seg one"
     assert code.coder.identity == "alice"
     assert code.codebook_used.version == world["cb1"].version
-    assert code.research_context_used.description == "initial"
+    # Research context is reached via the codebook revision.
+    assert code.codebook_used.research_context.description == "initial"
 
 
 def test_document_segments_back_ref(session: Session) -> None:
@@ -281,11 +280,18 @@ def test_coding_queue_status_property(session: Session) -> None:
 
 
 def test_codebook_parent_chain(session: Session) -> None:
-    cb1 = Codebook()
+    rc = ResearchContext(description="x")
+    session.add(rc)
+    session.commit()
+    session.refresh(rc)
+    cb1 = Codebook(research_context_version=rc.research_context_version)
     session.add(cb1)
     session.commit()
     session.refresh(cb1)
-    cb2 = Codebook(parent_version=cb1.version)
+    cb2 = Codebook(
+        parent_version=cb1.version,
+        research_context_version=rc.research_context_version,
+    )
     session.add(cb2)
     session.commit()
     session.refresh(cb2)
@@ -302,7 +308,7 @@ def test_theme_aggregation_navigates(session: Session) -> None:
     assert len(ta.input_runs) == 1
     assert ta.input_runs[0].theme_coder.identity == "critic"
     assert ta.codebook_used.version == world["cb1"].version
-    assert ta.research_context_used.description == "initial"
+    assert ta.codebook_used.research_context.description == "initial"
 
 
 def test_quote_back_ref_to_codes(session: Session) -> None:

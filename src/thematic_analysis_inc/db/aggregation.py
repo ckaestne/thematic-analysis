@@ -22,9 +22,6 @@ from thematic_analysis_inc.db.models import (
     Segment,
     SENTINEL_CODE_LABEL,
 )
-from thematic_analysis_inc.db.research_context import (
-    latest_research_context_version,
-)
 
 
 @dataclass
@@ -38,21 +35,21 @@ class AggregatorMergeInput:
     source_codes: list[Code] = field(default_factory=list)
 
 
-def _target_versions() -> tuple[int, int | None]:
-    """Resolve (codebook_version, research_context_version) for a new
-    aggregation. Raises if no codebook exists yet."""
+def _target_codebook_version() -> int:
+    """Resolve the codebook revision a new aggregation should target.
+    Raises if no codebook exists yet."""
     cb = latest_codebook()
     if cb is None:
         raise RuntimeError("no codebook revision exists")
-    return cb.version, latest_research_context_version()
+    return cb.version
 
 
 def next_segment_to_aggregate() -> Segment | None:
     """Next Segment whose every queue row is finished without error,
-    that has at least one coder code at the current (codebook,
-    research_context) version, and that has not yet been aggregated
-    *at that version*. Returns None if none is ready."""
-    cb_version, rc_version = _target_versions()
+    that has at least one coder code at the current codebook version,
+    and that has not yet been aggregated *at that version*. Returns
+    None if none is ready."""
+    cb_version = _target_codebook_version()
     with session() as s:
         # Need at least one real coder.
         from thematic_analysis_inc.db.models import Coder
@@ -86,7 +83,6 @@ def next_segment_to_aggregate() -> Segment | None:
                 Code.segment_id == Segment.segment_id,
                 Code.coder_id == SYSTEM_AGGREGATOR_ID,
                 Code.codebook_used_id == cb_version,
-                Code.research_context_used_id == rc_version,
             )
             .exists()
         )
@@ -96,7 +92,6 @@ def next_segment_to_aggregate() -> Segment | None:
                 Code.segment_id == Segment.segment_id,
                 Code.coder_id >= 1,
                 Code.codebook_used_id == cb_version,
-                Code.research_context_used_id == rc_version,
             )
             .exists()
         )
@@ -120,21 +115,16 @@ def next_segment_to_aggregate() -> Segment | None:
 def segment_has_aggregator_code(
     segment_id: int,
     codebook_version: int | None = None,
-    rc_version: int | None = None,
 ) -> bool:
     """Whether the segment already has any aggregator row. When
-    ``codebook_version`` is given, only rows at that version (and
-    ``rc_version``) count."""
+    ``codebook_version`` is given, only rows at that version count."""
     with session() as s:
         q = select(Code.code_id).where(
             Code.segment_id == segment_id,
             Code.coder_id == SYSTEM_AGGREGATOR_ID,
         )
         if codebook_version is not None:
-            q = q.where(
-                Code.codebook_used_id == codebook_version,
-                Code.research_context_used_id == rc_version,
-            )
+            q = q.where(Code.codebook_used_id == codebook_version)
         return s.exec(q.limit(1)).first() is not None
 
 
@@ -143,7 +133,6 @@ def record_aggregation_result(
     merged: list[AggregatorMergeInput],
     *,
     codebook_version: int | None = None,
-    rc_version: int | None = None,
 ) -> list[Code]:
     """For each merged code: insert Quote rows, an aggregator Code row,
     quote links, and ``CodesDerived('A', ...)`` edges per source. Returns
@@ -153,10 +142,10 @@ def record_aggregation_result(
     (see :data:`SENTINEL_CODE_LABEL`) so the segment is marked as
     aggregated for this version even though no codes were produced.
 
-    ``codebook_version`` / ``rc_version`` default to the latest of each.
+    ``codebook_version`` defaults to the latest revision.
     """
     if codebook_version is None:
-        codebook_version, rc_version = _target_versions()
+        codebook_version = _target_codebook_version()
 
     if not merged:
         merged = [AggregatorMergeInput(code=SENTINEL_CODE_LABEL)]
@@ -169,7 +158,6 @@ def record_aggregation_result(
                 segment_id=segment.segment_id,
                 coder_id=SYSTEM_AGGREGATOR_ID,
                 codebook_used_id=codebook_version,
-                research_context_used_id=rc_version,
                 code=inp.code,
                 description=inp.description or "",
                 rationale=inp.rationale or "",
@@ -207,7 +195,6 @@ def record_aggregation_result(
             segment_id=segment.segment_id,
             coder_id=SYSTEM_AGGREGATOR_ID,
             codebook_used_id=codebook_version,
-            research_context_used_id=rc_version,
             code=code,
             description=desc,
             rationale=rat,

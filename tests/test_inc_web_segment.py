@@ -1,8 +1,8 @@
 """Tests for the /api/segments/{id} payload's coder_codes section.
 
 Covers the "no coders yet" vs "coder finished with zero codes"
-distinction and the inclusion of codebook + research-context versions on
-each coder block.
+distinction and the inclusion of the codebook version on each coder
+block.
 """
 
 from __future__ import annotations
@@ -54,7 +54,6 @@ def test_segment_payload_includes_finished_coder_with_zero_codes(
         s.add(q)
         s.commit()
         codebook_v = q.codebook_used_id
-        rc_v = q.research_context_used_id
 
     r = client.get(f"/api/segments/{sid}")
     assert r.status_code == 200
@@ -65,7 +64,6 @@ def test_segment_payload_includes_finished_coder_with_zero_codes(
     assert block["status"] == "done"
     assert block["codes"] == []
     assert block["codebook_version"] == codebook_v
-    assert block["research_context_version"] == rc_v
     assert block["finished_at"] is not None
 
 
@@ -79,4 +77,3 @@ def test_segment_payload_pending_coder_listed(tmp_path: Path) -> None:
     assert blocks[0]["status"] == "pending"
     assert blocks[0]["codes"] == []
     assert blocks[0]["codebook_version"] >= 1
-    assert blocks[0]["research_context_version"] is not None or True
