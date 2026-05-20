@@ -136,24 +136,8 @@ def _make_reviewer_factory(decision: ReviewDecision, target_code: str | None = N
         def review_code(self, code, quotes):
             return ReviewResult(
                 code=code, decision=decision, target_code=target_code,
-                rationale=f"stub-{decision.value}", quotes=quotes,
+                rationale=f"stub-{decision.value}",
             )
-
-        def apply_review(self, result):
-            quotes = result.quotes or []
-            if result.decision == ReviewDecision.ADD_NEW:
-                self.codebook.add_code(result.code, quotes)
-            elif result.decision == ReviewDecision.MERGE and result.target_code:
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        self.codebook.add_quotes_to_code(i, quotes)
-                        break
-            elif result.decision == ReviewDecision.UPDATE and result.target_code:
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        self.codebook.update_code(i, result.code)
-                        self.codebook.add_quotes_to_code(i, quotes)
-                        break
 
     return lambda cb: _StubReviewer(cb)
 

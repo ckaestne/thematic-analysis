@@ -547,8 +547,6 @@ def review_one(
 
     t0 = time.monotonic()
     result = agent.review_code(target.code, quotes)
-    agent.apply_review(result)
-    _codebook_cache.pop(parent_cb.version, None)
 
     if result.decision == ReviewDecision.SKIP:
         return {

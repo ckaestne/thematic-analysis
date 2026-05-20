@@ -13,7 +13,6 @@ from thematic_analysis.agents import (
 )
 from thematic_analysis.codebook import Codebook, Quote
 from thematic_analysis.research_context import ResearchContext
-from thematic_analysis_inc.db.models import Code as DBCode, Quote as DBQuote
 
 
 class TestReviewerConfig:
@@ -45,18 +44,15 @@ class TestReviewResult:
 
     def test_review_result_creation(self):
         """Test creating a ReviewResult."""
-        quotes = [Quote("q1", "text1")]
         result = ReviewResult(
             code="test code",
             decision=ReviewDecision.ADD_NEW,
             rationale="New concept",
-            quotes=quotes,
         )
 
         assert result.code == "test code"
         assert result.decision == ReviewDecision.ADD_NEW
         assert result.target_code is None
-        assert result.quotes is not None and len(result.quotes) == 1
 
     def test_review_result_with_target(self):
         """Test ReviewResult with target code."""
@@ -259,169 +255,13 @@ class TestReviewerAgent:
             ReviewDecision.ADD_NEW,
         ]
 
-    def test_apply_review_add_new(self, agent: ReviewerAgent):
-        """Test applying ADD_NEW decision."""
-        result = ReviewResult(
-            code="new concept",
-            decision=ReviewDecision.ADD_NEW,
-            quotes=[Quote("q1", "text")],
-        )
-
-        agent.apply_review(result)
-
-        assert len(agent.codebook) == 1
-        assert agent.codebook.codes[0] == "new concept"
-
-    def test_apply_review_merge(self, agent_with_codebook: ReviewerAgent):
-        """Test applying MERGE decision."""
-        initial_count = len(agent_with_codebook.codebook)
-
-        result = ReviewResult(
-            code="peer comfort",
-            decision=ReviewDecision.MERGE,
-            target_code="emotional support",
-            quotes=[Quote("q4", "new quote")],
-        )
-
-        agent_with_codebook.apply_review(result)
-
-        # Should not add new code, just quotes
-        assert len(agent_with_codebook.codebook) == initial_count
-        # Target code should have new quote
-        entry = agent_with_codebook.codebook.entries[0]
-        assert len(entry.quotes) == 2
-
-    def test_apply_review_merge_target_not_found(
-        self, agent_with_codebook: ReviewerAgent
-    ):
-        """Test applying MERGE when target doesn't exist."""
-        result = ReviewResult(
-            code="new code",
-            decision=ReviewDecision.MERGE,
-            target_code="nonexistent code",
-            quotes=[Quote("q1", "text")],
-        )
-
-        agent_with_codebook.apply_review(result)
-
-        # Should add as new since target not found
-        assert "new code" in agent_with_codebook.codebook.codes
-
-    def test_apply_review_update(self, agent_with_codebook: ReviewerAgent):
-        """Test applying UPDATE decision."""
-        result = ReviewResult(
-            code="emotional assistance",  # New name
-            decision=ReviewDecision.UPDATE,
-            target_code="emotional support",  # Existing code
-            quotes=[Quote("q4", "new quote")],
-        )
-
-        agent_with_codebook.apply_review(result)
-
-        # Code name should be updated
-        assert "emotional assistance" in agent_with_codebook.codebook.codes
-        assert "emotional support" not in agent_with_codebook.codebook.codes
-
-    def test_apply_review_skip(self, agent_with_codebook: ReviewerAgent):
-        """Test applying SKIP decision."""
-        initial_count = len(agent_with_codebook.codebook)
-
-        result = ReviewResult(
-            code="duplicate code",
-            decision=ReviewDecision.SKIP,
-            quotes=[Quote("q1", "text")],
-        )
-
-        agent_with_codebook.apply_review(result)
-
-        # Should not change codebook
-        assert len(agent_with_codebook.codebook) == initial_count
-
-    def test_process_aggregation_result(self, agent: ReviewerAgent):
-        """Test processing a list of aggregator Codes."""
-        merged = DBCode(
-            segment_id=1,
-            coder_id=0,
-            codebook_used_id=1,
-            code="merged code",
-            description="",
-            rationale="",
-        )
-        merged.supporting_quotes = [DBQuote(quote_id=1, segment_id=1, text="text1")]
-        retained = DBCode(
-            segment_id=1,
-            coder_id=0,
-            codebook_used_id=1,
-            code="retained code",
-            description="",
-            rationale="",
-        )
-        retained.supporting_quotes = [DBQuote(quote_id=2, segment_id=1, text="text2")]
-
-        results = agent.process_aggregation_result([merged, retained])
-
-        assert len(results) == 2
-        assert len(agent.codebook) == 2
-
-    def test_get_codebook_json(self, agent_with_codebook: ReviewerAgent):
-        """Test getting codebook as JSON."""
-        json_str = agent_with_codebook.get_codebook_json()
-        data = json.loads(json_str)
-
-        assert "codes" in data
-        assert len(data["codes"]) == 3
-
-    def test_get_codebook_summary(self, agent_with_codebook: ReviewerAgent):
-        """Test getting codebook summary."""
-        summary = agent_with_codebook.get_codebook_summary()
-
-        assert "3 codes" in summary
-        assert "3 quotes" in summary
-
-
-class TestReviewerIntegration:
-    """Integration tests for ReviewerAgent."""
-
-    def test_full_review_workflow(self):
-        """Test complete review workflow with real embeddings."""
-        # Start with empty codebook
+    def test_review_empty_codebook_adds_new(self):
+        """A code reviewed against an empty codebook is added as new."""
         agent = ReviewerAgent()
-
-        # Add first code
-        result1 = agent.review_code(
+        result = agent.review_code(
             "academic stress",
             [Quote("q1", "I was stressed about my exams")],
         )
-        agent.apply_review(result1)
 
-        assert result1.decision == ReviewDecision.ADD_NEW
-        assert len(agent.codebook) == 1
-
-        # Add similar code - should trigger LLM or auto-merge
-        result2 = agent.review_code(
-            "exam anxiety",
-            [Quote("q2", "Anxious about upcoming tests")],
-        )
-
-        # Even if not auto-merged, we apply and check behavior
-        agent.apply_review(result2)
-
-        # Verify codebook state is reasonable
-        assert len(agent.codebook) >= 1
-
-    def test_review_preserves_quotes(self):
-        """Test that quotes are preserved through review process."""
-        agent = ReviewerAgent()
-
-        # Add code with quotes
-        quotes = [
-            Quote("q1", "First quote"),
-            Quote("q2", "Second quote"),
-        ]
-        result = agent.review_code("test concept", quotes)
-        agent.apply_review(result)
-
-        # Verify quotes are in codebook
-        entry = agent.codebook.entries[0]
-        assert len(entry.quotes) == 2
-        assert entry.quotes[0].quote_id == "q1"
+        assert result.decision == ReviewDecision.ADD_NEW
+        assert "No similar codes" in result.rationale

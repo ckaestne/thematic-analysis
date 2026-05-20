@@ -13,7 +13,6 @@ from thematic_analysis.prompts import join_system_prompt_sections
 
 if TYPE_CHECKING:
     from thematic_analysis.research_context import ResearchContext
-    from thematic_analysis_inc.db.models import Code as DBCode
 
 
 class ReviewDecision(Enum):
@@ -33,7 +32,6 @@ class ReviewResult:
     decision: ReviewDecision
     target_code: str | None = None  # Code to merge with or update
     rationale: str = ""
-    quotes: list[Quote] | None = None
 
 
 @dataclass
@@ -209,17 +207,16 @@ class ReviewerAgent(BaseAgent):
 
         Args:
             code: The code label to review.
-            quotes: Associated quotes for the code.
+            quotes: Associated quotes for the code (shown to the LLM as
+                context; persistence is the worker's job).
 
         Returns:
             ReviewResult with the decision.
         """
-        # Find similar existing codes
         similar_codes = self.codebook.find_similar_codes(
             code, top_k=self.reviewer_config.top_k_similar
         )
 
-        # Check for automatic merge (very high similarity)
         if similar_codes:
             top_entry, top_score = similar_codes[0]
             if top_score >= self.reviewer_config.merge_threshold:
@@ -228,26 +225,21 @@ class ReviewerAgent(BaseAgent):
                     decision=ReviewDecision.MERGE,
                     target_code=top_entry.code,
                     rationale=f"Automatic merge: {top_score:.2f} similarity",
-                    quotes=quotes,
                 )
 
-        # Filter to codes above similarity threshold
         similar_above_threshold = [
             (entry, score)
             for entry, score in similar_codes
             if score >= self.reviewer_config.similarity_threshold
         ]
 
-        # If no similar codes, add as new
         if not similar_above_threshold:
             return ReviewResult(
                 code=code,
                 decision=ReviewDecision.ADD_NEW,
                 rationale="No similar codes found",
-                quotes=quotes,
             )
 
-        # Ask LLM to decide
         user_prompt = REVIEWER_USER_PROMPT.format(
             new_code=code,
             quotes_section=self._format_quotes_section(quotes),
@@ -268,80 +260,4 @@ class ReviewerAgent(BaseAgent):
             decision=decision,
             target_code=target_code,
             rationale=rationale,
-            quotes=quotes,
         )
-
-    def apply_review(self, result: ReviewResult) -> None:
-        """Apply a review decision to the codebook.
-
-        Args:
-            result: The review result to apply.
-        """
-        quotes = result.quotes or []
-
-        if result.decision == ReviewDecision.ADD_NEW:
-            self.codebook.add_code(result.code, quotes)
-
-        elif result.decision == ReviewDecision.MERGE:
-            if result.target_code:
-                # Find the target code index
-                target_idx = None
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        target_idx = i
-                        break
-
-                if target_idx is not None:
-                    self.codebook.add_quotes_to_code(target_idx, quotes)
-                else:
-                    # Target not found, add as new
-                    self.codebook.add_code(result.code, quotes)
-
-        elif result.decision == ReviewDecision.UPDATE:
-            if result.target_code:
-                # Find and update the target code
-                target_idx = None
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        target_idx = i
-                        break
-
-                if target_idx is not None:
-                    # Update the code name and add quotes
-                    self.codebook.update_code(target_idx, result.code)
-                    self.codebook.add_quotes_to_code(target_idx, quotes)
-                else:
-                    self.codebook.add_code(result.code, quotes)
-
-        # SKIP decision: do nothing
-
-    def process_aggregation_result(
-        self, codes: list["DBCode"]
-    ) -> list[ReviewResult]:
-        """Review each aggregator code against the codebook."""
-        review_results = []
-        for code in codes:
-            review_result = self.review_code(
-                code.code, list(code.supporting_quotes or [])
-            )
-            self.apply_review(review_result)
-            review_results.append(review_result)
-        return review_results
-
-    def get_codebook_json(self) -> str:
-        """Get the current codebook as JSON.
-
-        Returns:
-            JSON string representation of the codebook.
-        """
-        return self.codebook.to_json()
-
-    def get_codebook_summary(self) -> str:
-        """Get a summary of the codebook state.
-
-        Returns:
-            Summary string.
-        """
-        total_codes = len(self.codebook)
-        total_quotes = sum(len(e.quotes) for e in self.codebook.entries)
-        return f"Codebook: {total_codes} codes, {total_quotes} quotes"

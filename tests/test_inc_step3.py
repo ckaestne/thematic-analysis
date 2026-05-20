@@ -549,11 +549,8 @@ def test_cli_aggregate_runs_against_stub(
         def __init__(self, cb): self.codebook = cb
         def review_code(self, code, quotes):
             return ReviewResult(
-                code=code, decision=ReviewDecision.ADD_NEW,
-                rationale="ok", quotes=quotes,
+                code=code, decision=ReviewDecision.ADD_NEW, rationale="ok",
             )
-        def apply_review(self, result):
-            self.codebook.add_code(result.code, result.quotes or [])
 
     monkeypatch.setattr(workers, "default_reviewer_factory", lambda cb: _Reviewer(cb))
 
