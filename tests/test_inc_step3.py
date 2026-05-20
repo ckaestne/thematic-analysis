@@ -289,6 +289,159 @@ def test_drain_aggregate_processes_all_segments(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Codebook version handling
+# ---------------------------------------------------------------------------
+
+
+def _advance_codebook(conn) -> int:
+    """Insert a new codebook version and return its version number."""
+    current = store.latest_codebook()
+    new_cb = store.insert_codebook_version(parent=current)
+    return new_cb.version
+
+
+def _seed_segment_coded_at_version(conn, seg_id: int, coders: list, cb_version: int) -> None:
+    """Enqueue and complete coding for a segment at a specific codebook version."""
+    store.coding.enqueue_pairs(
+        ((seg_id, c.coder_id) for c in coders),
+        codebook_version=cb_version,
+    )
+    for coder in coders:
+        assignment = store.coding.claim_next_assignment(coder)
+        if assignment is not None:
+            store.coding.record_coding_result(
+                assignment,
+                [_stub_code(f"code-v{cb_version}-c{coder.coder_id}", "quote")],
+            )
+
+
+def test_next_segment_codebook_finds_old_version(tmp_path: Path) -> None:
+    """next_segment_codebook_to_aggregate must find work at older codebook versions."""
+    conn = store.init_db(tmp_path / "x.sqlite")
+    coder_a = store.add_coder("a")
+    coder_b = store.add_coder("b")
+
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    sid = sids[0]
+
+    v1 = store.latest_codebook().version
+
+    # Code the segment at v1 with both coders.
+    _seed_segment_coded_at_version(conn, sid, [coder_a, coder_b], v1)
+
+    # Advance the codebook — the segment has NOT been coded at v2.
+    _advance_codebook(conn)
+
+    # Should still find (segment, v1) even though v2 is the latest.
+    result = store.aggregation.next_segment_codebook_to_aggregate()
+    assert result is not None
+    found_seg, found_version = result
+    assert found_seg.segment_id == sid
+    assert found_version == v1
+
+
+def test_next_segment_codebook_skips_version_with_unfinished_queue(tmp_path: Path) -> None:
+    """A (segment, version) pair with pending queue entries must not be returned."""
+    conn = store.init_db(tmp_path / "x.sqlite")
+    coder_a = store.add_coder("a")
+    coder_b = store.add_coder("b")
+
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    sid = sids[0]
+
+    v1 = store.latest_codebook().version
+
+    # Only coder_a finishes; coder_b's entry stays pending.
+    store.coding.enqueue_pairs(
+        ((sid, coder_a.coder_id), (sid, coder_b.coder_id)),
+        codebook_version=v1,
+    )
+    a_assign = store.coding.claim_next_assignment(coder_a)
+    store.coding.record_coding_result(a_assign, [_stub_code("x", "q")])
+
+    assert store.aggregation.next_segment_codebook_to_aggregate() is None
+
+
+def test_aggregate_one_uses_codebook_version_from_db(tmp_path: Path) -> None:
+    """aggregate_one must aggregate at the discovered codebook version, not latest."""
+    conn = store.init_db(tmp_path / "x.sqlite")
+    coder_a = store.add_coder("a")
+    coder_b = store.add_coder("b")
+
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    sid = sids[0]
+
+    v1 = store.latest_codebook().version
+    _seed_segment_coded_at_version(conn, sid, [coder_a, coder_b], v1)
+
+    # Advance codebook — aggregate_one must still process the v1 work.
+    _advance_codebook(conn)
+
+    res = workers.aggregate_one(conn, agent_factory=_agg_factory())
+    assert res is not None and res["ok"] is True
+    assert res["codebook_version"] == v1
+
+    # Aggregator code should be at v1, not v2.
+    rows = conn.execute(
+        "SELECT codebook_used_id FROM code WHERE coder_id = 0 AND segment_id = ?",
+        (sid,),
+    ).fetchall()
+    assert all(r["codebook_used_id"] == v1 for r in rows)
+
+
+def test_unaggregated_codebook_versions_for_segment(tmp_path: Path) -> None:
+    """unaggregated_codebook_versions_for_segment returns all pending versions."""
+    conn = store.init_db(tmp_path / "x.sqlite")
+    coder_a = store.add_coder("a")
+
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    sid = sids[0]
+
+    v1 = store.latest_codebook().version
+    _seed_segment_coded_at_version(conn, sid, [coder_a], v1)
+
+    v2 = _advance_codebook(conn)
+    _seed_segment_coded_at_version(conn, sid, [coder_a], v2)
+
+    versions = store.aggregation.unaggregated_codebook_versions_for_segment(sid)
+    assert versions == [v1, v2]
+
+    # After aggregating v1, only v2 should remain.
+    workers.aggregate_one(conn, agent_factory=_agg_factory())
+    versions = store.aggregation.unaggregated_codebook_versions_for_segment(sid)
+    assert versions == [v2]
+
+
+def test_aggregate_segment_processes_all_versions(tmp_path: Path) -> None:
+    """aggregate_segment must aggregate every codebook version for the segment."""
+    conn = store.init_db(tmp_path / "x.sqlite")
+    coder_a = store.add_coder("a")
+
+    doc = _seed_document(conn)
+    sids = _add_segments(conn, doc, 1)
+    sid = sids[0]
+
+    v1 = store.latest_codebook().version
+    _seed_segment_coded_at_version(conn, sid, [coder_a], v1)
+
+    v2 = _advance_codebook(conn)
+    _seed_segment_coded_at_version(conn, sid, [coder_a], v2)
+
+    results = workers.aggregate_segment(conn, sid, agent_factory=_agg_factory())
+    assert len(results) == 2
+    assert all(r["ok"] for r in results)
+    processed_versions = {r["codebook_version"] for r in results}
+    assert processed_versions == {v1, v2}
+
+    # No more versions to aggregate.
+    assert store.aggregation.unaggregated_codebook_versions_for_segment(sid) == []
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 

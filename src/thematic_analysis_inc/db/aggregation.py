@@ -44,72 +44,129 @@ def _target_codebook_version() -> int:
     return cb.version
 
 
-def next_segment_to_aggregate() -> Segment | None:
-    """Next Segment whose every queue row is finished without error,
-    that has at least one coder code at the current codebook version,
-    and that has not yet been aggregated *at that version*. Returns
-    None if none is ready."""
-    cb_version = _target_codebook_version()
-    with session() as s:
-        # Need at least one real coder.
-        from thematic_analysis_inc.db.models import Coder
+def next_segment_codebook_to_aggregate() -> tuple[Segment, int] | None:
+    """Find the next (Segment, codebook_version) pair that needs aggregation.
 
-        n_coders = int(
-            s.exec(
-                select(func.count())
-                .select_from(Coder)
-                .where(Coder.coder_id >= 1)
-            ).one()
-        )
-        if n_coders == 0:
-            return None
+    A pair qualifies when every queue entry for that (segment, codebook_version)
+    is finished without error, at least one coder code exists at that version,
+    and no aggregator code exists yet at that version.
+
+    Codebook version is discovered from the database across all versions —
+    the latest codebook is NOT assumed.
+    """
+    with session() as s:
+        Q = aliased(CodingQueueEntry)
+        QInner = aliased(CodingQueueEntry)
+
         has_unfinished = (
-            select(CodingQueueEntry.segment_id)
+            select(QInner.segment_id)  # type: ignore[union-attr]
             .where(
-                CodingQueueEntry.segment_id == Segment.segment_id,
-                (CodingQueueEntry.finished_at.is_(None))  # type: ignore[union-attr]
-                | (CodingQueueEntry.error.is_not(None)),  # type: ignore[union-attr]
+                QInner.segment_id == Q.segment_id,
+                QInner.codebook_used_id == Q.codebook_used_id,
+                (QInner.finished_at.is_(None))  # type: ignore[union-attr]
+                | (QInner.error.is_not(None)),  # type: ignore[union-attr]
             )
             .exists()
         )
-        has_any_queue = (
-            select(CodingQueueEntry.segment_id)
-            .where(CodingQueueEntry.segment_id == Segment.segment_id)
-            .exists()
-        )
-        has_agg_at_version = (
+        has_agg = (
             select(Code.code_id)
             .where(
-                Code.segment_id == Segment.segment_id,
+                Code.segment_id == Q.segment_id,
                 Code.coder_id == SYSTEM_AGGREGATOR_ID,
-                Code.codebook_used_id == cb_version,
+                Code.codebook_used_id == Q.codebook_used_id,
             )
             .exists()
         )
-        has_coder_code_at_version = (
+        has_coder_code = (
             select(Code.code_id)
             .where(
-                Code.segment_id == Segment.segment_id,
+                Code.segment_id == Q.segment_id,
                 Code.coder_id >= 1,
-                Code.codebook_used_id == cb_version,
+                Code.codebook_used_id == Q.codebook_used_id,
             )
             .exists()
         )
-        seg = s.exec(
-            select(Segment)
-            .where(
-                has_any_queue,
-                ~has_unfinished,
-                ~has_agg_at_version,
-                has_coder_code_at_version,
-            )
-            .order_by(Segment.segment_id)
+        row = s.exec(
+            select(Q.segment_id, Q.codebook_used_id)  # type: ignore[union-attr]
+            .where(~has_unfinished, ~has_agg, has_coder_code)
+            .distinct()
+            .order_by(Q.segment_id, Q.codebook_used_id)
             .limit(1)
         ).first()
-        if seg is not None:
-            _ = seg.content  # eager-load
-            s.expunge(seg)
-        return seg
+
+        if row is None:
+            return None
+        segment_id, codebook_version = row
+
+        seg = s.get(Segment, segment_id)
+        if seg is None:
+            return None
+        _ = seg.content
+        s.expunge(seg)
+        return seg, codebook_version
+
+
+def next_segment_to_aggregate() -> Segment | None:
+    """Return the next Segment that needs aggregation, or None.
+
+    Delegates to :func:`next_segment_codebook_to_aggregate` and discards
+    the codebook version. Prefer the paired version in new code.
+    """
+    result = next_segment_codebook_to_aggregate()
+    return result[0] if result is not None else None
+
+
+def unaggregated_codebook_versions_for_segment(segment_id: int) -> list[int]:
+    """Return codebook versions where the segment has coder codes but no
+    aggregator code yet and all queue entries are finished without error.
+
+    Results are ordered oldest-first so aggregation proceeds in
+    chronological order.
+    """
+    with session() as s:
+        Q = aliased(CodingQueueEntry)
+        QInner = aliased(CodingQueueEntry)
+
+        has_unfinished = (
+            select(QInner.segment_id)  # type: ignore[union-attr]
+            .where(
+                QInner.segment_id == segment_id,
+                QInner.codebook_used_id == Q.codebook_used_id,
+                (QInner.finished_at.is_(None))  # type: ignore[union-attr]
+                | (QInner.error.is_not(None)),  # type: ignore[union-attr]
+            )
+            .exists()
+        )
+        has_agg = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == segment_id,
+                Code.coder_id == SYSTEM_AGGREGATOR_ID,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        has_coder_code = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == segment_id,
+                Code.coder_id >= 1,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        rows = s.exec(
+            select(Q.codebook_used_id)  # type: ignore[union-attr]
+            .where(
+                Q.segment_id == segment_id,
+                ~has_unfinished,
+                ~has_agg,
+                has_coder_code,
+            )
+            .distinct()
+            .order_by(Q.codebook_used_id)
+        ).all()
+        return list(rows)
 
 
 def segment_has_aggregator_code(
