@@ -422,10 +422,10 @@ export const api = {
     ),
 
   coders: () => jsonFetch<Coder[]>("/api/coders"),
-  addCoder: (coder_id: string, identity: string) =>
+  addCoder: (identity: string) =>
     jsonFetch("/api/coders", {
       method: "POST",
-      body: JSON.stringify({ coder_id, identity }),
+      body: JSON.stringify({ identity }),
     }),
   deleteCoder: (id: string, force: boolean) =>
     jsonFetch(`/api/coders/${id}?force=${force}`, { method: "DELETE" }),
