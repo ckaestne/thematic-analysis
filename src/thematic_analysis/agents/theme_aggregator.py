@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
+from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.agents.theme_coder import Theme, ThemeResult
 from thematic_analysis.codebook import EmbeddingService, Quote
 from thematic_analysis.prompts import join_system_prompt_sections
@@ -320,78 +320,66 @@ class ThemeAggregatorAgent(BaseAgent):
         Returns:
             ThemeAggregationResult with merged and retained themes.
         """
-        # Extract JSON from response
-        json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                # Fallback: return all themes as retained
-                return self._fallback_result(themes)
+        data = extract_response_json(response)
+        if data is None:
+            # Fallback: return all themes as retained
+            return self._fallback_result(themes)
 
-        try:
-            data = json.loads(json_str)
-            merged_themes = []
+        merged_themes = []
 
-            # Process merge groups
-            for group in data.get("merge_groups", []):
-                merged_name = group.get("merged_name", "")
-                merged_description = group.get("merged_description", "")
-                original_themes = group.get("original_themes", [])
-                rationale = group.get("rationale", "")
+        # Process merge groups
+        for group in data.get("merge_groups", []):
+            merged_name = group.get("merged_name", "")
+            merged_description = group.get("merged_description", "")
+            original_themes = group.get("original_themes", [])
+            rationale = group.get("rationale", "")
 
-                # Collect codes and quotes from all original themes
-                all_codes: list[str] = []
-                all_quotes: list[Quote] = []
-                seen_codes: set[str] = set()
-                seen_quote_ids: set[str] = set()
+            # Collect codes and quotes from all original themes
+            all_codes: list[str] = []
+            all_quotes: list[Quote] = []
+            seen_codes: set[str] = set()
+            seen_quote_ids: set[str] = set()
 
-                for orig_name in original_themes:
-                    if orig_name in themes:
-                        orig_theme = themes[orig_name]
-                        for code in orig_theme.codes:
-                            if code not in seen_codes:
-                                all_codes.append(code)
-                                seen_codes.add(code)
-                        for quote in orig_theme.quotes:
-                            if quote.quote_id not in seen_quote_ids:
-                                all_quotes.append(quote)
-                                seen_quote_ids.add(quote.quote_id)
+            for orig_name in original_themes:
+                if orig_name in themes:
+                    orig_theme = themes[orig_name]
+                    for code in orig_theme.codes:
+                        if code not in seen_codes:
+                            all_codes.append(code)
+                            seen_codes.add(code)
+                    for quote in orig_theme.quotes:
+                        if quote.quote_id not in seen_quote_ids:
+                            all_quotes.append(quote)
+                            seen_quote_ids.add(quote.quote_id)
 
+            max_quotes = self.aggregator_config.max_quotes_per_theme
+            merged_themes.append(
+                MergedTheme(
+                    name=merged_name,
+                    description=merged_description,
+                    original_themes=original_themes,
+                    codes=all_codes,
+                    quotes=all_quotes[:max_quotes],
+                    merge_rationale=rationale,
+                )
+            )
+
+        # Process retained themes
+        for theme_name in data.get("retain_themes", []):
+            if theme_name in themes:
+                theme = themes[theme_name]
                 max_quotes = self.aggregator_config.max_quotes_per_theme
                 merged_themes.append(
                     MergedTheme(
-                        name=merged_name,
-                        description=merged_description,
-                        original_themes=original_themes,
-                        codes=all_codes,
-                        quotes=all_quotes[:max_quotes],
-                        merge_rationale=rationale,
+                        name=theme.name,
+                        description=theme.description,
+                        original_themes=[theme.name],
+                        codes=theme.codes,
+                        quotes=theme.quotes[:max_quotes],
                     )
                 )
 
-            # Process retained themes
-            for theme_name in data.get("retain_themes", []):
-                if theme_name in themes:
-                    theme = themes[theme_name]
-                    max_quotes = self.aggregator_config.max_quotes_per_theme
-                    merged_themes.append(
-                        MergedTheme(
-                            name=theme.name,
-                            description=theme.description,
-                            original_themes=[theme.name],
-                            codes=theme.codes,
-                            quotes=theme.quotes[:max_quotes],
-                        )
-                    )
-
-            return ThemeAggregationResult(themes=merged_themes)
-
-        except json.JSONDecodeError:
-            return self._fallback_result(themes)
+        return ThemeAggregationResult(themes=merged_themes)
 
     def _fallback_result(self, themes: dict[str, Theme]) -> ThemeAggregationResult:
         """Create fallback result when parsing fails.

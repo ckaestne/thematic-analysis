@@ -14,13 +14,13 @@ responsibility.
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
+from thematic_analysis.agents.json_utils import extract_json_str
 from thematic_analysis.codebook import Codebook
 from thematic_analysis.prompts import (
     CODER_SYSTEM_PROMPT,
@@ -185,15 +185,9 @@ analytical rigor and staying grounded in the text."""
         of ``segment_text`` (best-effort verbatim check), and drops a
         code if no surviving quotes remain.
         """
-        json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                return None
+        json_str = extract_json_str(response)
+        if json_str is None:
+            return None
 
         try:
             parsed = _CoderResponse.model_validate_json(json_str)

@@ -1,11 +1,11 @@
 """Code Aggregator agent for merging codes from multiple coders."""
 
 import json
-import re
 import time
 from dataclasses import dataclass
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
+from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.codebook import Quote
 from thematic_analysis_inc.db.models import Code as DBCode
 
@@ -199,21 +199,6 @@ class CodeAggregatorAgent(BaseAgent):
         payload = {"coders": coders_payload}
         return payload, code_index
 
-    def _extract_response_json(self, response: str) -> dict | None:
-        """Extract the JSON object from a raw LLM response, or None."""
-        json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if not json_match:
-                return None
-            json_str = json_match.group(0)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-
     def _coverage_errors(
         self, data: dict, code_index: dict[int, DBCode]
     ) -> list[str]:
@@ -264,7 +249,7 @@ class CodeAggregatorAgent(BaseAgent):
         code_index: dict[int, DBCode],
     ) -> AggregationResult | None:
         """Parse the LLM response into an AggregationResult."""
-        data = self._extract_response_json(response)
+        data = extract_response_json(response)
         if data is None:
             return None
 
@@ -352,7 +337,7 @@ class CodeAggregatorAgent(BaseAgent):
                 current_prompt,
                 response_format=AGGREGATOR_RESPONSE_SCHEMA,
             )
-            data = self._extract_response_json(response)
+            data = extract_response_json(response)
             if data is None:
                 # parse failure is handled by _parse_response below; no
                 # point asking for a coverage fix when we can't even parse.

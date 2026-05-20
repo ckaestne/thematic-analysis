@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.aggregator import AggregationResult
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
+from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.codebook import Codebook, CodeEntry, Quote
 from thematic_analysis.prompts import join_system_prompt_sections
 
@@ -187,35 +186,23 @@ class ReviewerAgent(BaseAgent):
         Returns:
             Tuple of (decision, target_code, rationale).
         """
-        # Extract JSON from response
-        json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                return ReviewDecision.ADD_NEW, None, "Could not parse response"
+        data = extract_response_json(response)
+        if data is None:
+            return ReviewDecision.ADD_NEW, None, "Could not parse response"
 
-        try:
-            data = json.loads(json_str)
-            decision_str = data.get("decision", "add_new").lower()
-            target_code = data.get("target_code")
-            rationale = data.get("rationale", "")
+        decision_str = data.get("decision", "add_new").lower()
+        target_code = data.get("target_code")
+        rationale = data.get("rationale", "")
 
-            decision_map = {
-                "merge": ReviewDecision.MERGE,
-                "update": ReviewDecision.UPDATE,
-                "add_new": ReviewDecision.ADD_NEW,
-                "skip": ReviewDecision.SKIP,
-            }
-            decision = decision_map.get(decision_str, ReviewDecision.ADD_NEW)
+        decision_map = {
+            "merge": ReviewDecision.MERGE,
+            "update": ReviewDecision.UPDATE,
+            "add_new": ReviewDecision.ADD_NEW,
+            "skip": ReviewDecision.SKIP,
+        }
+        decision = decision_map.get(decision_str, ReviewDecision.ADD_NEW)
 
-            return decision, target_code, rationale
-
-        except json.JSONDecodeError:
-            return ReviewDecision.ADD_NEW, None, "JSON parse error"
+        return decision, target_code, rationale
 
     def review_code(self, code: str, quotes: list[Quote]) -> ReviewResult:
         """Review a single code against the codebook.

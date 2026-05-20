@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
+from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.codebook import Codebook, Quote
 from thematic_analysis.prompts import join_system_prompt_sections
 
@@ -238,46 +238,34 @@ while staying grounded in the data."""
         Returns:
             List of Theme objects.
         """
-        # Extract JSON from response
-        json_match = re.search(r"```(?:json)?\s*(.*?)```", response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            json_match = re.search(r"\{.*\}", response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                return []
-
-        try:
-            data = json.loads(json_str)
-            themes = []
-
-            for theme_data in data.get("themes", [])[: self.theme_config.max_themes]:
-                name = theme_data.get("name", "")
-                description = theme_data.get("description", "")
-                codes = theme_data.get("codes", [])
-
-                # Skip themes with too few codes
-                if len(codes) < self.theme_config.min_codes_per_theme:
-                    continue
-
-                # Collect quotes from the specified codes
-                quotes = self._collect_quotes_for_codes(codes)
-
-                themes.append(
-                    Theme(
-                        name=name,
-                        description=description,
-                        codes=codes,
-                        quotes=quotes[: self.theme_config.max_quotes_per_theme],
-                    )
-                )
-
-            return themes
-
-        except json.JSONDecodeError:
+        data = extract_response_json(response)
+        if data is None:
             return []
+
+        themes = []
+
+        for theme_data in data.get("themes", [])[: self.theme_config.max_themes]:
+            name = theme_data.get("name", "")
+            description = theme_data.get("description", "")
+            codes = theme_data.get("codes", [])
+
+            # Skip themes with too few codes
+            if len(codes) < self.theme_config.min_codes_per_theme:
+                continue
+
+            # Collect quotes from the specified codes
+            quotes = self._collect_quotes_for_codes(codes)
+
+            themes.append(
+                Theme(
+                    name=name,
+                    description=description,
+                    codes=codes,
+                    quotes=quotes[: self.theme_config.max_quotes_per_theme],
+                )
+            )
+
+        return themes
 
     def _collect_quotes_for_codes(self, codes: list[str]) -> list[Quote]:
         """Collect quotes from the codebook for specified codes.
