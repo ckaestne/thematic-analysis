@@ -28,6 +28,7 @@ from openhands.sdk import Message, TextContent
 
 from thematic_analysis.agents.coder import CoderAgent
 from thematic_analysis.codebook import Codebook
+from thematic_analysis_inc.db.models import is_sentinel_code
 from thematic_analysis.research_context import ResearchContext
 from thematic_analysis_inc import workers
 from thematic_analysis_inc import db as store
@@ -243,7 +244,7 @@ class TestRefiningCoderAgent:
 
         result = agent.code_segment(_seg("off-topic chatter"))
 
-        assert result == []
+        assert len(result) == 1 and is_sentinel_code(result[0])
         assert len(calls) == 1
 
     def test_refined_response_replaces_first(self):

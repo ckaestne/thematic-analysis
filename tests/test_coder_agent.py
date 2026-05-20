@@ -9,6 +9,7 @@ import pytest
 from thematic_analysis.agents import CoderAgent, CoderConfig
 from thematic_analysis.codebook import Codebook, Quote as DomainQuote
 from thematic_analysis.research_context import ResearchContext
+from thematic_analysis_inc.db.models import SENTINEL_CODE_LABEL, is_sentinel_code
 
 
 def _seg(text: str, quotes=None):
@@ -133,7 +134,8 @@ class TestCoderAgent:
         assert result[0].code == "emotional support"
 
     def test_parse_response_invalid_json(self, agent: CoderAgent):
-        assert agent._parse_response("Not JSON", _seg(SEG_TEXT)) == []
+        result = agent._parse_response("Not JSON", _seg(SEG_TEXT))
+        assert len(result) == 1 and is_sentinel_code(result[0])
 
     def test_parse_response_drops_quotes_not_in_segment(self, agent: CoderAgent):
         response = _resp([
@@ -143,9 +145,9 @@ class TestCoderAgent:
                 "quotes": ["text not present in segment"],
             }
         ])
-        # Quote isn't a substring; code is dropped.
+        # Quote isn't a substring; code is dropped, sentinel emitted.
         result = agent._parse_response(response, _seg(SEG_TEXT))
-        assert result == []
+        assert len(result) == 1 and is_sentinel_code(result[0])
 
     def test_parse_response_truncates_to_max_codes(self):
         config = CoderConfig(max_codes_per_segment=2)
@@ -160,7 +162,7 @@ class TestCoderAgent:
 
     def test_parse_response_empty_codes(self, agent: CoderAgent):
         result = agent._parse_response(_resp([]), _seg(SEG_TEXT))
-        assert result == []
+        assert len(result) == 1 and is_sentinel_code(result[0])
 
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segment(self, mock_llm, agent: CoderAgent):
@@ -181,7 +183,7 @@ class TestCoderAgent:
     def test_code_segment_fallback_on_parse_error(self, mock_llm, agent: CoderAgent):
         mock_llm.return_value = "Invalid response"
         result = agent.code_segment(_seg(SEG_TEXT))
-        assert result == []
+        assert len(result) == 1 and is_sentinel_code(result[0])
 
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segments_does_not_update_codebook(self, mock_llm, agent: CoderAgent):
