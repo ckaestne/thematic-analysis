@@ -41,7 +41,6 @@ class CoderConfig(AgentConfig):
 
     max_codes_per_segment: int = 5
     similarity_threshold: float = 0.7
-    include_rationale: bool = True  # kept for backwards-compatible config
     include_6rs_guidance: bool = True
     custom_prompts: CoderPrompts | None = None
 
@@ -139,11 +138,6 @@ analytical rigor and staying grounded in the text."""
             identity_instructions=identity_section,
         )
 
-    def _get_user_prompt_template(self) -> str:
-        if self.coder_config.custom_prompts is not None:
-            return self.coder_config.custom_prompts.user_prompt
-        return CODER_USER_PROMPT
-
     def _format_codebook_section(self) -> str:
         if len(self.codebook) == 0:
             return "The codebook is currently empty. Create new codes as needed."
@@ -175,28 +169,24 @@ analytical rigor and staying grounded in the text."""
             f"Consider using these relevant codes:\n{similar_list}"
         )
 
-    def _parse_response(
-        self, response: str, segment: Segment
-    ) -> list[Code] | None:
+    def _parse_response(self, response: str, segment: Segment) -> list[Code]:
         """Parse the LLM JSON into transient ``Code`` rows with quotes.
 
-        Uses pydantic to validate the response shape. Truncates to
-        ``max_codes_per_segment``, drops quotes that aren't a substring
-        of the segment text (best-effort verbatim check), and drops a
-        code if no surviving quotes remain. Reuses any existing
+        Truncates to ``max_codes_per_segment``, drops quotes that aren't a
+        substring of the segment text (best-effort verbatim check), and
+        drops a code if no surviving quotes remain. Reuses any existing
         ``Quote`` on ``segment.quotes`` with matching text so we don't
-        create duplicate quote rows for the same segment.
+        create duplicate quote rows for the same segment. Returns ``[]``
+        on missing or malformed JSON.
         """
         json_str = extract_json_str(response)
         if json_str is None:
-            return None
-
+            return []
         try:
             parsed = _CoderResponse.model_validate_json(json_str)
         except (json.JSONDecodeError, ValidationError):
-            return None
+            return []
 
-        segment_text = segment.content
         existing_by_text = {q.text: q for q in (segment.quotes or [])}
 
         out: list[Code] = []
@@ -208,10 +198,13 @@ analytical rigor and staying grounded in the text."""
             seen: set[str] = set()
             for q in item.quotes:
                 qt = q.strip()
-                if not qt or qt in seen or qt not in segment_text:
+                if not qt or qt in seen or qt not in segment.content:
                     continue
                 seen.add(qt)
-                quotes.append(existing_by_text.get(qt) or Quote(text=qt, segment_id=segment.segment_id))
+                quotes.append(
+                    existing_by_text.get(qt)
+                    or Quote(text=qt, segment_id=segment.segment_id)
+                )
             if not quotes:
                 continue
             code = Code(code=code_text, description=item.description.strip())
@@ -220,7 +213,11 @@ analytical rigor and staying grounded in the text."""
         return out
 
     def _build_user_prompt(self, segment: Segment) -> str:
-        template = self._get_user_prompt_template()
+        template = (
+            self.coder_config.custom_prompts.user_prompt
+            if self.coder_config.custom_prompts is not None
+            else CODER_USER_PROMPT
+        )
         return template.format(
             codebook_section=self._format_codebook_section(),
             segment_id=str(segment.segment_id),
@@ -230,27 +227,21 @@ analytical rigor and staying grounded in the text."""
             ),
         )
 
-    def _process_response(self, response: str, segment: Segment) -> list[Code]:
-        parsed = self._parse_response(response, segment)
-        return parsed if parsed is not None else []
-
     def code_segment(self, segment: Segment) -> list[Code]:
-        user_prompt = self._build_user_prompt(segment)
         response = self._call_llm(
             self.get_system_prompt(),
-            user_prompt,
+            self._build_user_prompt(segment),
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, segment)
+        return self._parse_response(response, segment)
 
     async def code_segment_async(self, segment: Segment) -> list[Code]:
-        user_prompt = self._build_user_prompt(segment)
         response = await self._call_llm_async(
             self.get_system_prompt(),
-            user_prompt,
+            self._build_user_prompt(segment),
             response_format=CODER_RESPONSE_SCHEMA,
         )
-        return self._process_response(response, segment)
+        return self._parse_response(response, segment)
 
     def code_segments(self, segments: list[Segment]) -> list[list[Code]]:
         return [self.code_segment(seg) for seg in segments]
