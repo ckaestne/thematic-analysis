@@ -63,7 +63,7 @@ def resolve_target_code(codebook: Codebook, code_text: str) -> Code | None:
         return c
 
 
-def record_review(
+def apply_review_and_create_codebook_revision(
     *,
     source_agg_code: Code,
     decision: str,
@@ -73,7 +73,12 @@ def record_review(
     parent_codebook: Codebook,
     target_code: Code | None = None,
 ) -> Codebook:
-    """Persist a non-SKIP review decision; returns the new Codebook."""
+    """Apply a non-SKIP review decision: writes the new reviewer Code
+    AND the ``CodesDerived`` provenance edge AND a fresh Codebook
+    revision (with membership copied from ``parent_codebook`` and the
+    add/drop applied) — all as one logical update.
+
+    Returns the new Codebook revision."""
     if decision not in {DECISION_ADD, DECISION_MERGE, DECISION_UPDATE}:
         raise ValueError(f"invalid decision: {decision!r}")
     if decision in (DECISION_MERGE, DECISION_UPDATE) and target_code is None:

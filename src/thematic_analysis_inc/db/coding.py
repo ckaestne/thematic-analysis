@@ -208,10 +208,11 @@ def _assignment_pk(a: CodingQueueEntry) -> tuple[int, int, int]:
     return (a.segment_id, a.coder_id, a.codebook_used_id)
 
 
-def record_coding_result(
+def save_codes_and_finish_assignment(
     assignment: CodingQueueEntry, codes: list[Code]
 ) -> list[Code]:
-    """Persist the coder's transient ``Code`` rows for this assignment.
+    """Persist the coder's transient ``Code`` rows for this assignment
+    AND mark the queue entry finished — both in one transaction.
 
     The agent has already stamped ``segment_id``, ``coder_id``, and
     ``codebook_used_id`` on every Code (matching this assignment), so

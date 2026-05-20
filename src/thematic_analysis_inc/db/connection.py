@@ -144,13 +144,13 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     """Connect + apply schema + ensure an initial empty research-context
     revision and the codebook revision pinned to it exist.
 
-    ``set_research_context`` creates both the research-context row and a
-    matching codebook revision, so seeding the empty context is enough
-    to give every downstream FK something real to point at.
+    ``add_research_context_and_codebook_revision`` creates both rows in
+    one transaction, so seeding the empty context is enough to give
+    every downstream FK something real to point at.
     """
     from thematic_analysis_inc.db.research_context import (
+        add_research_context_and_codebook_revision,
         latest_research_context_version,
-        set_research_context,
     )
     from thematic_analysis.research_context import (
         ResearchContext as DomainResearchContext,
@@ -158,5 +158,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
 
     conn = connect(path)
     if latest_research_context_version() is None:
-        set_research_context(DomainResearchContext(description=""))
+        add_research_context_and_codebook_revision(
+            DomainResearchContext(description="")
+        )
     return conn
