@@ -22,7 +22,11 @@ This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
 - Run any project command via `uv run`:
   - `uv run ta ...`  (all Stage 1 + Stage 2 subcommands; see `ta --help`)
   - `uv run ta-web --db analysis.sqlite`
-  - `uv run pytest`
+  - `uv run pytest` — runs the offline unit suite. **Do not pass
+    `--run-integration` unless the user explicitly asks.** That flag
+    enables tests that download HuggingFace models (`all-MiniLM-L6-v2`)
+    and exercise real embeddings — slow, network-dependent, and not
+    needed for normal verification.
   - `uv run python -c "..."` for ad-hoc scripts.
 - The lockfile is `uv.lock` — commit it alongside `pyproject.toml` changes.
 
