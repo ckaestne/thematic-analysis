@@ -84,12 +84,12 @@ class TestReviewerAgent:
     @pytest.fixture
     def agent(self) -> ReviewerAgent:
         """Create a ReviewerAgent for tests."""
-        return ReviewerAgent()
+        return ReviewerAgent(codebook=Codebook(use_mock_embeddings=True))
 
     @pytest.fixture
     def agent_with_codebook(self) -> ReviewerAgent:
         """Create a ReviewerAgent with pre-populated codebook."""
-        codebook = Codebook()
+        codebook = Codebook(use_mock_embeddings=True)
         codebook.add_code("emotional support", [Quote("q1", "felt supported")])
         codebook.add_code("academic pressure", [Quote("q2", "stressed about exams")])
         codebook.add_code("time management", [Quote("q3", "too many deadlines")])
@@ -257,7 +257,7 @@ class TestReviewerAgent:
 
     def test_review_empty_codebook_adds_new(self):
         """A code reviewed against an empty codebook is added as new."""
-        agent = ReviewerAgent()
+        agent = ReviewerAgent(codebook=Codebook(use_mock_embeddings=True))
         result = agent.review_code(
             "academic stress",
             [Quote("q1", "I was stressed about my exams")],

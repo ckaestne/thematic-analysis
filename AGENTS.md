@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Designing or modifying agents
+
+When adding a new agent role (Coder, Aggregator, Reviewer, ThemeCoder,
+ThemeAggregator, …), changing an agent's public method, or wiring an
+agent into the worker layer, follow the conventions in
+[`.claude/skills/agent-design/SKILL.md`](.claude/skills/agent-design/SKILL.md):
+agents take and return SQLModel objects directly, navigate relationships
+instead of carrying parallel data, never touch the DB, and own their
+sentinel and short-circuit cases.
+
 ## Dependency management & running
 
 This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
@@ -12,7 +22,11 @@ This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
 - Run any project command via `uv run`:
   - `uv run ta ...`  (all Stage 1 + Stage 2 subcommands; see `ta --help`)
   - `uv run ta-web --db analysis.sqlite`
-  - `uv run pytest`
+  - `uv run pytest` — runs the offline unit suite. **Do not pass
+    `--run-integration` unless the user explicitly asks.** That flag
+    enables tests that download HuggingFace models (`all-MiniLM-L6-v2`)
+    and exercise real embeddings — slow, network-dependent, and not
+    needed for normal verification.
   - `uv run python -c "..."` for ad-hoc scripts.
 - The lockfile is `uv.lock` — commit it alongside `pyproject.toml` changes.
 

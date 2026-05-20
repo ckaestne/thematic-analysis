@@ -449,7 +449,13 @@ def test_cli_list_documents(tmp_path: Path, capsys) -> None:
 
     assert cli.main(["--db", str(db), "init"]) == 0
     assert cli.main(
-        ["--db", str(db), "add-document", "--segmentation", "paragraph", str(first)]
+        [
+            "--db", str(db),
+            "add-document",
+            "--segmentation", "paragraph",
+            "--min-words", "20",
+            str(first),
+        ]
     ) == 0
     capsys.readouterr()
     assert cli.main(

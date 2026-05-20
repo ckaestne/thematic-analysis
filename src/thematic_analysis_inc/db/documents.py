@@ -76,6 +76,12 @@ def enqueue_segments(
         return out
 
 
+def count_segments() -> int:
+    """Total number of segments across all documents."""
+    with session() as s:
+        return int(s.exec(select(func.count()).select_from(Segment)).one())
+
+
 def get_segment(segment_id: int) -> Segment | None:
     from sqlalchemy.orm import selectinload
 

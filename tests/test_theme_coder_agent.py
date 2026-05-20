@@ -133,7 +133,7 @@ class TestThemeCoderAgent:
     @pytest.fixture
     def codebook(self) -> Codebook:
         """Create a sample codebook."""
-        cb = Codebook()
+        cb = Codebook(use_mock_embeddings=True)
         cb.add_code("emotional support", [Quote("q1", "I felt supported by friends")])
         cb.add_code("peer connection", [Quote("q2", "Connected with classmates")])
         cb.add_code("academic stress", [Quote("q3", "Overwhelmed by coursework")])
@@ -153,7 +153,7 @@ class TestThemeCoderAgent:
 
     def test_initialization_empty_codebook(self):
         """Test agent initialization with empty codebook."""
-        agent = ThemeCoderAgent()
+        agent = ThemeCoderAgent(codebook=Codebook(use_mock_embeddings=True))
         assert len(agent.codebook) == 0
 
     def test_get_system_prompt_without_identity(self, agent: ThemeCoderAgent):
@@ -321,7 +321,7 @@ class TestThemeCoderAgent:
     @patch.object(ThemeCoderAgent, "_call_llm")
     def test_develop_themes_empty_codebook(self, mock_llm):
         """Test developing themes with empty codebook."""
-        agent = ThemeCoderAgent()
+        agent = ThemeCoderAgent(codebook=Codebook(use_mock_embeddings=True))
 
         result = agent.develop_themes()
 
@@ -352,11 +352,11 @@ class TestThemeCoderAgent:
             }
         )
 
-        codebook = Codebook()
+        codebook = Codebook(use_mock_embeddings=True)
         codebook.add_code("code1", [Quote("q1", "text1")])
         codebook.add_code("code2", [Quote("q2", "text2")])
 
-        agent = ThemeCoderAgent()
+        agent = ThemeCoderAgent(codebook=Codebook(use_mock_embeddings=True))
         result = agent.develop_themes_from_codebook(codebook)
 
         assert len(result.themes) == 1
@@ -366,6 +366,7 @@ class TestThemeCoderAgent:
 class TestThemeCoderIntegration:
     """Integration tests for ThemeCoderAgent."""
 
+    @pytest.mark.integration
     def test_full_theme_development_workflow(self):
         """Test complete theme development with real embeddings."""
         # Create a realistic codebook
@@ -398,7 +399,7 @@ class TestThemeCoderIntegration:
 
     def test_quote_collection_respects_max(self):
         """Test that quote collection respects max_quotes_per_theme."""
-        codebook = Codebook()
+        codebook = Codebook(use_mock_embeddings=True)
         # Add code with many quotes
         quotes = [Quote(f"q{i}", f"Quote text {i}") for i in range(15)]
         codebook.add_code("multi-quote code", quotes)
@@ -424,7 +425,7 @@ class TestThemeCoderAgentResearchContext:
     @pytest.fixture
     def sample_codebook(self) -> Codebook:
         """Create a sample codebook for testing."""
-        codebook = Codebook()
+        codebook = Codebook(use_mock_embeddings=True)
         codebook.add_code("climate anxiety", [Quote("q1", "I worry about the future")])
         codebook.add_code("hope for change", [Quote("q2", "We can make a difference")])
         codebook.add_code(
