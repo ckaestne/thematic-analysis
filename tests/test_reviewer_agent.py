@@ -109,16 +109,18 @@ class TestReviewerAgent:
         prompt = agent.get_system_prompt()
 
         assert "qualitative researcher" in prompt
-        assert "MERGE" in prompt
-        assert "UPDATE" in prompt
-        assert "ADD_NEW" in prompt
+        assert "merge" in prompt
+        assert "update" in prompt
+        assert "add_new" in prompt
 
     def test_get_system_prompt_orders_research_context_after_general(self):
-        agent = ReviewerAgent(
+        codebook = Codebook(
+            use_mock_embeddings=True,
             research_context=ResearchContext(
                 description="Study. Research question: How is risk framed?"
-            )
+            ),
         )
+        agent = ReviewerAgent(codebook=codebook)
         prompt = agent.get_system_prompt()
 
         assert "Research Context" in prompt
@@ -126,50 +128,29 @@ class TestReviewerAgent:
             "Research Context"
         )
 
-    def test_format_quotes_section(self, agent: ReviewerAgent):
-        """Test formatting quotes section."""
-        quotes = [
-            Quote("q1", "This is a sample quote"),
-            Quote("q2", "Another quote here"),
-        ]
-
-        section = agent._format_quotes_section(quotes)
-
-        assert "[q1]" in section
-        assert "sample quote" in section
-        assert "[q2]" in section
-
-    def test_format_quotes_section_empty(self, agent: ReviewerAgent):
-        """Test formatting empty quotes."""
-        section = agent._format_quotes_section([])
-
-        assert "No quotes available" in section
-
-    def test_format_quotes_section_long_quote(self, agent: ReviewerAgent):
-        """Test that long quotes are truncated."""
-        long_text = "x" * 300
-        quotes = [Quote("q1", long_text)]
-
-        section = agent._format_quotes_section(quotes)
-
-        assert "..." in section
-        assert len(section) < 350
-
-    def test_format_similar_codes_section(self, agent_with_codebook: ReviewerAgent):
-        """Test formatting similar codes."""
+    def test_build_payload_shape(self, agent_with_codebook: ReviewerAgent):
+        """The JSON payload carries the new code, its quotes, and every
+        similar code with its supporting quotes."""
         codebook = agent_with_codebook.codebook
         similar = [(codebook.entries[0], 0.85), (codebook.entries[1], 0.72)]
+        new_quotes = [Quote("q4", "feeling supported")]
 
-        section = agent_with_codebook._format_similar_codes_section(similar)
+        payload = agent_with_codebook._build_payload(
+            "peer comfort", new_quotes, similar
+        )
 
-        assert "emotional support" in section
-        assert "0.85" in section
+        assert payload["new_code"] == {
+            "code": "peer comfort",
+            "quotes": ["feeling supported"],
+        }
+        assert len(payload["similar_codes"]) == 2
+        assert payload["similar_codes"][0]["code"] == "emotional support"
+        assert payload["similar_codes"][0]["similarity"] == 0.85
+        assert payload["similar_codes"][0]["quotes"] == ["felt supported"]
 
-    def test_format_similar_codes_section_empty(self, agent: ReviewerAgent):
-        """Test formatting empty similar codes."""
-        section = agent._format_similar_codes_section([])
-
-        assert "No similar codes" in section
+    def test_build_payload_empty_similar(self, agent: ReviewerAgent):
+        payload = agent._build_payload("c", [Quote("q1", "t")], [])
+        assert payload["similar_codes"] == []
 
     def test_parse_response_valid_merge(self, agent: ReviewerAgent):
         """Test parsing valid merge response."""

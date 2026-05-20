@@ -3,11 +3,15 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 
 from thematic_analysis.codebook.embeddings import EmbeddingService
+
+if TYPE_CHECKING:
+    from thematic_analysis.research_context import ResearchContext
 
 
 @dataclass
@@ -52,6 +56,7 @@ class Codebook:
         embedding_service: EmbeddingService | None = None,
         max_quotes_per_code: int = 20,
         use_mock_embeddings: bool = False,
+        research_context: "ResearchContext | None" = None,
     ):
         """Initialize the codebook.
 
@@ -59,12 +64,16 @@ class Codebook:
             embedding_service: Service for generating embeddings.
             max_quotes_per_code: Maximum quotes to keep per code.
             use_mock_embeddings: If True, use mock embeddings (fast, for testing).
+            research_context: Research context pinned to this codebook
+                revision. Agents read it off the codebook rather than as a
+                separate argument.
         """
         self.embedding_service = embedding_service or EmbeddingService(
             use_mock=use_mock_embeddings
         )
         self.max_quotes_per_code = max_quotes_per_code
         self._entries: list[CodeEntry] = []
+        self.research_context = research_context
 
     @property
     def entries(self) -> list[CodeEntry]:

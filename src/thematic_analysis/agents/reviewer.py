@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.codebook import Codebook, CodeEntry, Quote
 from thematic_analysis.prompts import join_system_prompt_sections
-
-if TYPE_CHECKING:
-    from thematic_analysis.research_context import ResearchContext
 
 
 class ReviewDecision(Enum):
@@ -41,40 +39,37 @@ class ReviewerConfig(AgentConfig):
     similarity_threshold: float = 0.75  # Threshold for considering codes similar
     top_k_similar: int = 10  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging
+    max_quotes_per_code: int = 5  # Quotes shown per code in the prompt
 
 
 REVIEWER_SYSTEM_PROMPT = """\
 You are an expert qualitative researcher responsible for maintaining the codebook.
-Your task is to review new codes and decide how they should be integrated with
-existing codes in the codebook.
+Your task is to review a new code against similar existing codes and decide
+how it should be integrated.
 
-## Your Responsibilities:
-1. Compare new codes with existing similar codes
-2. Decide whether codes should be merged, updated, or kept separate
-3. Ensure the codebook remains consistent and well-organized
-4. Preserve important analytical distinctions
+## Input
+The user message is a JSON object:
+- `new_code`: an object with `code` (the new label) and `quotes` (the verbatim
+  quote texts that support it).
+- `similar_codes`: a list of existing codes that may overlap. Each entry has
+  `code` (the existing label), `similarity` (cosine similarity to the new code),
+  and `quotes` (the verbatim quote texts already associated with it).
 
-## Decision Guidelines:
-- **MERGE**: When codes capture the same concept with different wording
-- **UPDATE**: When a new code is a better label for an existing concept
-- **ADD_NEW**: When the code represents a genuinely new concept
-- **SKIP**: When the code is a duplicate, lacks analytical value, or is
-  off-topic relative to the research focus (if one is provided)
+## Decision Guidelines
+- **merge**: the new code captures the same concept as an existing one — just
+  with different wording. Set `target_code` to that existing code's label.
+- **update**: the new code is a clearly better label for an existing concept.
+  Set `target_code` to the existing code's label that should be renamed.
+- **add_new**: the code represents a genuinely new concept.
+- **skip**: the code is a duplicate without new information, lacks analytical
+  value, or is off-topic relative to the research focus (if one is provided).
 
-## Output Format:
-Respond with a JSON object containing:
-- "decision": One of "merge", "update", "add_new", or "skip"
-- "target_code": The existing code to merge with/update (if applicable)
-- "rationale": Brief explanation for the decision
-
-Example:
-```json
-{{
-  "decision": "merge",
-  "target_code": "emotional support",
-  "rationale": "Both codes describe receiving emotional assistance from others"
-}}
-```"""
+## Output Format
+Respond with a single JSON object:
+- `decision`: one of "merge", "update", "add_new", or "skip"
+- `target_code`: the existing code label to merge with / rename (for merge or
+  update). Use the exact label from the input. `null` for add_new and skip.
+- `rationale`: brief explanation for the decision."""
 
 REVIEWER_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -98,19 +93,6 @@ REVIEWER_RESPONSE_SCHEMA = {
 }
 
 
-REVIEWER_USER_PROMPT = """\
-## New Code to Review:
-Code: "{new_code}"
-Quotes:
-{quotes_section}
-
-## Similar Existing Codes:
-{similar_codes_section}
-
-Please review this code and decide how it should be integrated into the codebook.
-Provide your response as JSON."""
-
-
 class ReviewerAgent(BaseAgent):
     """Agent that maintains and updates the adaptive codebook.
 
@@ -123,74 +105,56 @@ class ReviewerAgent(BaseAgent):
         self,
         config: ReviewerConfig | None = None,
         codebook: Codebook | None = None,
-        research_context: ResearchContext | None = None,
     ):
-        """Initialize the Reviewer agent.
-
-        Args:
-            config: Reviewer configuration.
-            codebook: Initial codebook to maintain.
-            research_context: Optional research context for scope-aware review.
-        """
         super().__init__(config or ReviewerConfig())
         self.reviewer_config: ReviewerConfig = self.config  # type: ignore
         self.codebook = codebook if codebook is not None else Codebook()
-        self.research_context = research_context
+        # Debug fields populated by the most recent review_code call so
+        # callers (e.g. the `test-review` CLI) can inspect what the agent
+        # did without re-implementing prompt building or the LLM call.
+        # The short-circuit paths (auto-merge, no-similar-codes) leave
+        # these empty to signal "no LLM call".
+        self.last_similar_codes: list[tuple[CodeEntry, float]] = []
+        self.last_payload: dict | None = None
+        self.last_system_prompt: str = ""
+        self.last_user_prompt: str = ""
+        self.last_raw_response: str = ""
+        self.last_elapsed: float = 0.0
+        self.last_shortcut: str | None = None  # "auto_merge" | "no_similar" | None
 
     def get_system_prompt(self) -> str:
-        """Get the system prompt for review."""
+        rc = self.codebook.research_context
         research_section = ""
-        if self.research_context and not self.research_context.is_empty():
-            research_section = self.research_context.to_prompt_section(
-                role="reviewer"
-            )
+        if rc is not None and not rc.is_empty():
+            research_section = rc.to_prompt_section(role="reviewer")
         return join_system_prompt_sections(
             REVIEWER_SYSTEM_PROMPT,
             research_context_instructions=research_section,
         )
 
-    def _format_quotes_section(self, quotes: list[Quote]) -> str:
-        """Format quotes for the prompt."""
-        if not quotes:
-            return "No quotes available."
-
-        lines = []
-        for q in quotes[:5]:  # Show up to 5 quotes
-            text = q.text[:200] + "..." if len(q.text) > 200 else q.text
-            lines.append(f'- [{q.quote_id}] "{text}"')
-        return "\n".join(lines)
-
-    def _format_similar_codes_section(
-        self, similar_codes: list[tuple[CodeEntry, float]]
-    ) -> str:
-        """Format similar codes (with their quotes) for the prompt.
-
-        Per the paper, the reviewer compares new codes *and quotes* with
-        existing codes *and quotes* — so each similar code is shown with
-        a handful of its supporting quotes, not just its label.
-        """
-        if not similar_codes:
-            return "No similar codes found in the codebook."
-
-        lines = []
-        for entry, score in similar_codes:
-            lines.append(f"- **{entry.code}** (similarity: {score:.2f})")
-            for q in entry.quotes[:5]:
-                text = q.text[:200] + "..." if len(q.text) > 200 else q.text
-                lines.append(f'    - [{q.quote_id}] "{text}"')
-            if not entry.quotes:
-                lines.append("    - (no quotes recorded)")
-        return "\n".join(lines)
+    def _build_payload(
+        self,
+        code: str,
+        quotes: list[Quote],
+        similar_codes: list[tuple[CodeEntry, float]],
+    ) -> dict:
+        n = self.reviewer_config.max_quotes_per_code
+        return {
+            "new_code": {
+                "code": code,
+                "quotes": [q.text for q in quotes[:n]],
+            },
+            "similar_codes": [
+                {
+                    "code": entry.code,
+                    "similarity": round(score, 3),
+                    "quotes": [q.text for q in entry.quotes[:n]],
+                }
+                for entry, score in similar_codes
+            ],
+        }
 
     def _parse_response(self, response: str) -> tuple[ReviewDecision, str | None, str]:
-        """Parse the LLM response into a review decision.
-
-        Args:
-            response: The raw LLM response.
-
-        Returns:
-            Tuple of (decision, target_code, rationale).
-        """
         data = extract_response_json(response)
         if data is None:
             return ReviewDecision.ADD_NEW, None, "Could not parse response"
@@ -220,13 +184,23 @@ class ReviewerAgent(BaseAgent):
         Returns:
             ReviewResult with the decision.
         """
+        self.last_similar_codes = []
+        self.last_payload = None
+        self.last_system_prompt = ""
+        self.last_user_prompt = ""
+        self.last_raw_response = ""
+        self.last_elapsed = 0.0
+        self.last_shortcut = None
+
         similar_codes = self.codebook.find_similar_codes(
             code, top_k=self.reviewer_config.top_k_similar
         )
+        self.last_similar_codes = similar_codes
 
         if similar_codes:
             top_entry, top_score = similar_codes[0]
             if top_score >= self.reviewer_config.merge_threshold:
+                self.last_shortcut = "auto_merge"
                 return ReviewResult(
                     code=code,
                     decision=ReviewDecision.MERGE,
@@ -241,25 +215,28 @@ class ReviewerAgent(BaseAgent):
         ]
 
         if not similar_above_threshold:
+            self.last_shortcut = "no_similar"
             return ReviewResult(
                 code=code,
                 decision=ReviewDecision.ADD_NEW,
                 rationale="No similar codes found",
             )
 
-        user_prompt = REVIEWER_USER_PROMPT.format(
-            new_code=code,
-            quotes_section=self._format_quotes_section(quotes),
-            similar_codes_section=self._format_similar_codes_section(
-                similar_above_threshold
-            ),
-        )
+        payload = self._build_payload(code, quotes, similar_above_threshold)
+        system_prompt = self.get_system_prompt()
+        user_prompt = json.dumps(payload, indent=2)
+        self.last_payload = payload
+        self.last_system_prompt = system_prompt
+        self.last_user_prompt = user_prompt
 
+        t0 = time.monotonic()
         response = self._call_llm(
-            self.get_system_prompt(),
+            system_prompt,
             user_prompt,
             response_format=REVIEWER_RESPONSE_SCHEMA,
         )
+        self.last_raw_response = response
+        self.last_elapsed = time.monotonic() - t0
         decision, target_code, rationale = self._parse_response(response)
 
         return ReviewResult(

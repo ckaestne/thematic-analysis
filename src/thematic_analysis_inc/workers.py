@@ -88,6 +88,12 @@ def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
     cb = DomainCodebook.from_json(
         snapshot, use_mock_embeddings=use_mock_embeddings
     )
+    # Pin the research context to the codebook revision so agents bound
+    # to this codebook can read it off `codebook.research_context`
+    # instead of taking a separate constructor argument.
+    db_cb = db_codebook.get_codebook_with_codes_and_research_context(version)
+    if db_cb is not None and db_cb.research_context is not None:
+        cb.research_context = db.research_context_to_domain(db_cb.research_context)
     _codebook_cache[version] = cb
     return cb
 
@@ -519,6 +525,52 @@ _DECISION_TO_CHAR = {
 }
 
 
+def test_review_aggregated_code(
+    code_id: int,
+    *,
+    use_mock_embeddings: bool = False,
+) -> dict[str, Any]:
+    """Run the reviewer on one aggregator code without writing anything.
+    Returns a dict with the input code, the result, and the agent itself
+    so callers can inspect ``last_payload`` / ``last_system_prompt`` /
+    ``last_user_prompt`` / ``last_raw_response`` / ``last_elapsed`` /
+    ``last_shortcut`` / ``last_similar_codes``."""
+    target = db_aggregation.get_aggregator_code(code_id)
+    if target is None:
+        raise ValueError(f"unknown aggregator code_id: {code_id}")
+
+    quotes_data = db_aggregation.load_aggregated_code_quotes(code_id)
+    quotes = [
+        DomainQuote(quote_id=str(q["quote_id"]), text=q["text"])
+        for q in quotes_data
+    ]
+
+    latest = db_codebook.latest_codebook()
+    if latest is None:
+        raise RuntimeError("no codebook revision exists; run init first")
+
+    codebook = _get_codebook(latest.version, use_mock_embeddings)
+    agent = default_reviewer_factory(codebook)
+
+    llm_error: str | None = None
+    result = None
+    try:
+        result = agent.review_code(target.code, quotes)
+    except Exception as exc:
+        llm_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "code_id": code_id,
+        "code": target.code,
+        "segment_id": target.segment_id,
+        "codebook_version": latest.version,
+        "quotes": quotes,
+        "agent": agent,
+        "result": result,
+        "llm_error": llm_error,
+    }
+
+
 def review_one(
     conn: sqlite3.Connection | None = None,
     *,
@@ -543,7 +595,6 @@ def review_one(
     codebook = _get_codebook(parent_cb.version, use_mock_embeddings)
     factory = agent_factory or default_reviewer_factory
     agent = factory(codebook)
-    _apply_research_context(agent)
 
     t0 = time.monotonic()
     result = agent.review_code(target.code, quotes)

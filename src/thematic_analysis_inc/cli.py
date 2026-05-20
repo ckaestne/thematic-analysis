@@ -93,6 +93,7 @@ _REQUIRES_EXISTING_DB = {
     "clear-research-context",
     "test-code",
     "test-aggregate",
+    "test-review",
 }
 
 
@@ -853,6 +854,106 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
 
     print()
     print(f"[test-aggregate] segment={res['segment_id']} no DB writes")
+    return 0
+
+
+def _cmd_test_review(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    try:
+        res = workers.test_review_aggregated_code(args.code_id)
+    except (ValueError, RuntimeError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    sep = "─" * 72
+    agent = res["agent"]
+    result = res["result"]
+
+    print(sep)
+    print(
+        f"Input  code_id={res['code_id']} segment_id={res['segment_id']} "
+        f"codebook=v{res['codebook_version']}"
+    )
+    print(sep)
+    print(f"  code: {res['code']!r}")
+    print(f"  quotes ({len(res['quotes'])}):")
+    for q in res["quotes"]:
+        qt = (q.text or "").replace("\n", " ").strip()
+        if len(qt) > 200:
+            qt = qt[:197] + "..."
+        print(f"      [quote_id={q.quote_id}] \"{qt}\"")
+    print()
+
+    print(sep)
+    print(
+        f"Similar codes from codebook (top-k={agent.reviewer_config.top_k_similar})"
+    )
+    print(sep)
+    if not agent.last_similar_codes:
+        print("(none — codebook empty or no embeddings)")
+    for entry, score in agent.last_similar_codes:
+        marker = ""
+        if score >= agent.reviewer_config.merge_threshold:
+            marker = "  ← auto-merge"
+        elif score >= agent.reviewer_config.similarity_threshold:
+            marker = "  ← above similarity threshold"
+        print(f"  - {entry.code!r}  similarity={score:.3f}{marker}")
+        for q in entry.quotes[:3]:
+            qt = (q.text or "").replace("\n", " ").strip()
+            if len(qt) > 160:
+                qt = qt[:157] + "..."
+            print(f"      [quote_id={q.quote_id}] \"{qt}\"")
+    print()
+
+    if agent.last_shortcut == "auto_merge":
+        print(sep)
+        print("Shortcut: top similarity ≥ merge_threshold → auto-merge, no LLM call")
+        print(sep)
+        print()
+    elif agent.last_shortcut == "no_similar":
+        print(sep)
+        print(
+            "Shortcut: nothing above similarity_threshold → add_new, no LLM call"
+        )
+        print(sep)
+        print()
+    else:
+        print(sep)
+        print("System prompt")
+        print(sep)
+        print(agent.last_system_prompt)
+        print()
+
+        print(sep)
+        print("User prompt (JSON payload)")
+        print(sep)
+        print(agent.last_user_prompt or "(empty)")
+        print()
+
+        if res["llm_error"]:
+            print(sep)
+            print(f"LLM error: {res['llm_error']}", file=sys.stderr)
+            print(sep)
+            return 1
+
+        print(sep)
+        print(f"Raw LLM response  ({agent.last_elapsed:.1f}s)")
+        print(sep)
+        print(agent.last_raw_response or "(empty)")
+        print()
+
+    print(sep)
+    print("Reviewer decision")
+    print(sep)
+    if result is None:
+        print("(no result — see LLM error above)")
+    else:
+        print(f"  decision:    {result.decision.value}")
+        print(f"  target_code: {result.target_code!r}")
+        print(f"  rationale:   {result.rationale}")
+
+    print()
+    print(f"[test-review] code_id={res['code_id']} no DB writes")
     return 0
 
 
@@ -1728,6 +1829,22 @@ def _cli_test_aggregate(
         ctx,
         _cmd_test_aggregate,
         segment_id=segment_id,
+    )
+
+
+@app.command(
+    name="test-review",
+    rich_help_panel=PANEL_DEBUG,
+    help="run reviewer for one aggregator code, print all steps, no DB write",
+)
+def _cli_test_review(
+    ctx: typer.Context,
+    code_id: Annotated[int, typer.Argument(help="aggregator code_id to review")],
+) -> None:
+    _run(
+        ctx,
+        _cmd_test_review,
+        code_id=code_id,
     )
 
 
