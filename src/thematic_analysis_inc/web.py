@@ -155,7 +155,6 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                 "coder_id": q.coder_id,
                 "status": q.status,
                 "codebook_version": q.codebook_used_id,
-                "research_context_version": q.research_context_used_id,
                 "finished_at": (
                     q.finished_at.isoformat() if q.finished_at else None
                 ),
@@ -660,7 +659,6 @@ def create_app(db_path: str | Path) -> FastAPI:
                     "segment_id": q.segment_id,
                     "coder_id": q.coder_id,
                     "codebook_version": q.codebook_used_id,
-                    "research_context_version": q.research_context_used_id,
                     "claimed_at": (
                         q.claimed_at.isoformat() if q.claimed_at else None
                     ),
@@ -688,7 +686,7 @@ def create_app(db_path: str | Path) -> FastAPI:
         return {"removed": True}
 
     # Legacy aliases the bundled SPA references. The queue's primary key is
-    # composite (segment_id, coder_id, codebook_used_id, ...), so we encode
+    # composite (segment_id, coder_id, codebook_used_id), so we encode
     # it into a single string `id` of the form "{segment_id}_{coder_id}".
     @app.get("/api/coder-runs")
     def list_coder_runs(

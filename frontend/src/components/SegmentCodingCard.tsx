@@ -289,8 +289,7 @@ export function SegmentCodingCard({
                   <Text fw={600}>{run.coder_id}</Text>
                   <StatusBadge status={run.status} />
                   <Text size="xs" c="dimmed">
-                    codebook v{run.codebook_version} · research context v
-                    {run.research_context_version}
+                    codebook v{run.codebook_version}
                   </Text>
                   {run.finished_at && (
                     <Text size="xs" c="dimmed">

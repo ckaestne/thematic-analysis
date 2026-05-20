@@ -16,10 +16,11 @@ from the previous schema.
 
 ### research_context
 Append-only history of research-context revisions. Each call to
-`set_research_context` inserts a new row; the row with the highest
-`research_context_version` is the "current" one. Other tables that need
-to remember which research context was active when a row was produced
-carry a nullable `research_context_version` FK back here (see
+`set_research_context` inserts a new row **and** creates a fresh
+`codebook` revision pinned to it; the row with the highest
+`research_context_version` is the "current" one. Downstream tables
+only carry `codebook_version` — the matching research context is
+`codebook.research_context_version` of the referenced codebook (see
 [Versioning of research context](#versioning-of-research-context)).
 
 ```
@@ -45,18 +46,23 @@ falls back to the freeform `description`.
 
 ### codebook_versions
 Append-only history of codebook revisions. Membership is stored in a
-separate `codebook` table; this table only carries metadata.
+separate `codebook` table; this table only carries metadata. Each
+revision pins the `research_context` revision it was authored against,
+so the rest of the pipeline only tracks `codebook_version`.
 
 ```
 codebook_versions(
-    version         INTEGER PK,
-    parent_version  INTEGER REFERENCES codebook_versions(version),
-    created_at      DATETIME NOT NULL,
-    created_by      TEXT NOT NULL
+    version                   INTEGER PK,
+    parent_version            INTEGER REFERENCES codebook_versions(version),
+    research_context_version  INTEGER NOT NULL REFERENCES research_context(research_context_version),
+    created_at                DATETIME NOT NULL
 )
 ```
 
-Version 1 is created during `init_db` with no parent.
+Version 1 is created during `init_db` as the side effect of seeding the
+empty research context. Subsequent revisions come from either (a) a
+`set_research_context` call (new RC → new codebook pinned to it) or
+(b) a non-SKIP reviewer decision.
 
 ### coders
 Coder is now an integer-keyed table. Two **reserved** rows are seeded
@@ -112,20 +118,18 @@ this table. The author is identified by `coder_id`:
 - `coder_id = -1` — reviewer output (the canonical codebook code)
 
 `codebook_version` is the codebook version active when the code was
-authored. `research_context_version` records the research context that
-was active at the moment of authoring (nullable: may be NULL if no
-research context was set yet).
+authored. The research context active at authoring time is reachable
+via that codebook revision (`codebook.research_context_version`).
 
 ```
 codes(
-    code_id                   INTEGER PK AUTOINCREMENT,
-    segment_id                INTEGER REFERENCES segments(segment_id),
-    coder_id                  INTEGER NOT NULL REFERENCES coders(coder_id),
-    codebook_version          INTEGER REFERENCES codebook_versions(version),
-    research_context_version  INTEGER REFERENCES research_context(research_context_version),
-    code                      TEXT NOT NULL,
-    description               TEXT NOT NULL DEFAULT '',
-    rationale                 TEXT NOT NULL DEFAULT ''
+    code_id           INTEGER PK AUTOINCREMENT,
+    segment_id        INTEGER REFERENCES segments(segment_id),
+    coder_id          INTEGER NOT NULL REFERENCES coders(coder_id),
+    codebook_version  INTEGER REFERENCES codebook_versions(version),
+    code              TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    rationale         TEXT NOT NULL DEFAULT ''
 )
 ```
 
@@ -207,14 +211,13 @@ at the chosen codebook version; status is *derived* from
 
 ```
 coding_queue(
-    segment_id                INTEGER NOT NULL REFERENCES segments(segment_id),
-    coder_id                  INTEGER NOT NULL REFERENCES coders(coder_id),
-    codebook_version          INTEGER NOT NULL REFERENCES codebook_versions(version),
-    research_context_version  INTEGER REFERENCES research_context(research_context_version),
-    claimed_at                DATETIME,
-    finished_at               DATETIME,
-    error                     TEXT,
-    PRIMARY KEY (segment_id, coder_id)
+    segment_id        INTEGER NOT NULL REFERENCES segments(segment_id),
+    coder_id          INTEGER NOT NULL REFERENCES coders(coder_id),
+    codebook_version  INTEGER NOT NULL REFERENCES codebook_versions(version),
+    claimed_at        DATETIME,
+    finished_at       DATETIME,
+    error             TEXT,
+    PRIMARY KEY (segment_id, coder_id, codebook_version)
 )
 ```
 
@@ -231,15 +234,14 @@ Index: `(coder_id)`.
 
 ---
 
-## Stage 2 — theme tables (unchanged)
+## Stage 2 — theme tables
 
-Stage 2 schema is largely carried over from the previous design;
-`theme_coder_runs` and `theme_aggregations` additionally capture the
-research-context version active when the run started (nullable):
+The research context active for a Stage-2 row is reachable via its
+`codebook_version` (which pins one):
 
 - `theme_coders(theme_coder_id, identity, created_at)`
-- `theme_coder_runs(id, theme_coder_id, codebook_version, research_context_version, status, claimed_at, finished_at, result_json, raw_response, error)`
-- `theme_aggregations(id, codebook_version UNIQUE, research_context_version, status, created_at, finished_at, result_json, error)`
+- `theme_coder_runs(id, theme_coder_id, codebook_version, status, claimed_at, finished_at, result_json, raw_response, error)`
+- `theme_aggregations(id, codebook_version UNIQUE, status, created_at, finished_at, result_json, error)`
 - `theme_aggregation_inputs(theme_aggregation_id, theme_coder_run_id)`
 
 These keep their explicit `status` column; the surrounding pipeline
@@ -296,21 +298,13 @@ in tests, JSON serialisation, …). Writes use
 
 ## Versioning of research context
 
-The research context evolves over time; each `set_research_context` call
-creates a new row in `research_context` with a fresh
-`research_context_version`. Other tables that depend on which context
-was active when a row was produced carry a nullable
-`research_context_version INTEGER REFERENCES research_context(...)`:
-
-- `codes.research_context_version` — set when a code is authored
-  (coding, aggregation, or review).
-- `coding_queue.research_context_version` — captured when the queue row
-  is first inserted (in `sync_coding_queue`).
-- `theme_coder_runs.research_context_version` — captured at run start.
-- `theme_aggregations.research_context_version` — captured at start.
-
-A `NULL` value means "no research context was set at the time"; it is
-not an error.
+The research context evolves over time; each `set_research_context`
+call creates a new row in `research_context` with a fresh
+`research_context_version` **and** a new `codebook` revision pinned to
+it (membership copied from the previous codebook). Downstream tables —
+`codes`, `coding_queue`, `theme_coder_runs`, `theme_aggregations` —
+only carry `codebook_version`; the research context for any row is
+`codebook.research_context_version` of the referenced codebook.
 
 ---
 

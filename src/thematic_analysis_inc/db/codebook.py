@@ -15,11 +15,33 @@ from thematic_analysis_inc.db.models import (
 )
 
 
-def insert_codebook_version(parent: Codebook | None = None) -> Codebook:
-    """Insert a new Codebook revision; returns the persisted row."""
+def insert_codebook_version(
+    parent: Codebook | None = None,
+    research_context_version: int | None = None,
+) -> Codebook:
+    """Insert a new Codebook revision; returns the persisted row.
+
+    Every codebook revision pins exactly one research-context revision.
+    ``research_context_version`` defaults to the latest revision in the
+    table (callers that drive a review will normally let it default,
+    since reviews don't change the research context). Raises if no
+    research context exists yet.
+    """
+    if research_context_version is None:
+        from thematic_analysis_inc.db.research_context import (
+            latest_research_context_version,
+        )
+
+        research_context_version = latest_research_context_version()
+    if research_context_version is None:
+        raise RuntimeError(
+            "no research-context revision exists; set one before "
+            "creating a codebook revision"
+        )
     with session() as s:
         cb = Codebook(
-            parent_version=parent.version if parent is not None else None
+            parent_version=parent.version if parent is not None else None,
+            research_context_version=research_context_version,
         )
         s.add(cb)
         s.commit()

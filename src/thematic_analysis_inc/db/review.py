@@ -21,9 +21,6 @@ from thematic_analysis_inc.db.models import (
     DECISION_UPDATE,
     DERIVATION_REVIEW,
 )
-from thematic_analysis_inc.db.research_context import (
-    latest_research_context_version,
-)
 
 
 def next_aggregated_code_to_review() -> Code | None:
@@ -82,13 +79,11 @@ def record_review(
     if decision in (DECISION_MERGE, DECISION_UPDATE) and target_code is None:
         raise ValueError(f"decision {decision!r} requires target_code")
 
-    rc_version = latest_research_context_version()
     with session() as s:
         new_code = Code(
             segment_id=source_agg_code.segment_id,
             coder_id=SYSTEM_REVIEWER_ID,
             codebook_used_id=parent_codebook.version,
-            research_context_used_id=rc_version,
             code=new_code_text,
             description=new_description or "",
             rationale=rationale or "",
@@ -115,7 +110,6 @@ def record_review(
             segment_id=source_agg_code.segment_id,
             coder_id=SYSTEM_REVIEWER_ID,
             codebook_used_id=parent_codebook.version,
-            research_context_used_id=rc_version,
             code=new_code_text,
             description=new_description or "",
             rationale=rationale or "",

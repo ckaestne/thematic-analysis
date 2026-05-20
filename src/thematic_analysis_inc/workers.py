@@ -326,25 +326,17 @@ def _grouped_coder_codes(
     return [codes for _cid, codes in sorted(coder_codes.items())]
 
 
-def aggregate_one(
-    conn: sqlite3.Connection | None = None,
+def _do_aggregate(
+    seg: Any,
+    codebook_version: int,
     *,
-    use_mock_embeddings: bool = False,
     agent_factory: AggregatorFactory | None = None,
-) -> dict | None:
-    seg = db_aggregation.next_segment_to_aggregate()
-    if seg is None:
-        return None
+) -> dict:
+    """Core aggregation logic for one (segment, codebook_version) pair."""
     segment_id = seg.segment_id
-    text = seg.content
 
-    latest = db_codebook.latest_codebook()
-    if latest is None:
-        raise RuntimeError("no codebook revision exists; run init first")
-
-    target_cb, target_rc = db_aggregation._target_versions()
     coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=target_cb, rc_version=target_rc
+        seg, codebook_version=codebook_version
     )
     # Drop coder sentinel rows — they mean "this coder produced nothing"
     # and must not be treated as real input codes for the aggregator. A
@@ -364,11 +356,12 @@ def aggregate_one(
     n_in = sum(len(v) for v in coder_codes.values())
     try:
         if db_aggregation.segment_has_aggregator_code(
-            segment_id, codebook_version=target_cb, rc_version=target_rc
+            segment_id, codebook_version=codebook_version
         ):
             return {
                 "ok": False,
                 "segment_id": segment_id,
+                "codebook_version": codebook_version,
                 "error": "aggregator code already exists (race)",
                 "skipped": True,
             }
@@ -378,11 +371,12 @@ def aggregate_one(
             # No coder codes at this version: mark the segment aggregated
             # with the empty-aggregation sentinel so we don't re-pick it.
             db_aggregation.record_aggregation_result(
-                seg, [], codebook_version=target_cb, rc_version=target_rc
+                seg, [], codebook_version=codebook_version
             )
             return {
                 "ok": True,
                 "segment_id": segment_id,
+                "codebook_version": codebook_version,
                 "n_in": 0,
                 "n_merged": 0,
                 "n_retained": 0,
@@ -414,11 +408,12 @@ def aggregate_one(
             )
 
         db_aggregation.record_aggregation_result(
-            seg, merged, codebook_version=target_cb, rc_version=target_rc
+            seg, merged, codebook_version=codebook_version
         )
         return {
             "ok": True,
             "segment_id": segment_id,
+            "codebook_version": codebook_version,
             "n_in": n_in,
             "n_merged": len(result.merged_codes),
             "n_retained": len(result.retained_codes),
@@ -427,7 +422,59 @@ def aggregate_one(
         }
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
-        return {"ok": False, "segment_id": segment_id, "error": msg}
+        return {
+            "ok": False,
+            "segment_id": segment_id,
+            "codebook_version": codebook_version,
+            "error": msg,
+        }
+
+
+def aggregate_one(
+    conn: sqlite3.Connection | None = None,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AggregatorFactory | None = None,
+) -> dict | None:
+    """Find the next (segment, codebook_version) pair that needs aggregation
+    and process it. The codebook version is read from the database — the
+    latest version is NOT assumed. Returns None when nothing is ready."""
+    pair = db_aggregation.next_segment_codebook_to_aggregate()
+    if pair is None:
+        return None
+    seg, codebook_version = pair
+    return _do_aggregate(seg, codebook_version, agent_factory=agent_factory)
+
+
+def aggregate_segment(
+    conn: sqlite3.Connection | None = None,
+    segment_id: int = 0,
+    *,
+    use_mock_embeddings: bool = False,
+    agent_factory: AggregatorFactory | None = None,
+) -> list[dict]:
+    """Aggregate all unaggregated codebook versions for a specific segment.
+
+    Finds every codebook version that has finished coder codes but no
+    aggregator code yet for ``segment_id``, then calls the core aggregation
+    logic for each in ascending version order.
+    """
+    from thematic_analysis_inc.db.connection import session as _session
+    from thematic_analysis_inc.db.models import Segment as SegmentModel
+
+    with _session() as s:
+        seg = s.get(SegmentModel, segment_id)
+        if seg is None:
+            raise ValueError(f"unknown segment_id: {segment_id}")
+        _ = seg.content
+        s.expunge(seg)
+
+    versions = db_aggregation.unaggregated_codebook_versions_for_segment(
+        segment_id
+    )
+    return [
+        _do_aggregate(seg, v, agent_factory=agent_factory) for v in versions
+    ]
 
 
 def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
@@ -444,9 +491,9 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    target_cb, target_rc = db_aggregation._target_versions()
+    target_cb = latest.version
     coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=target_cb, rc_version=target_rc
+        seg, codebook_version=target_cb
     )
     grouped = _grouped_coder_codes(coder_codes)
 

@@ -1,16 +1,12 @@
 """Versioned research-context CRUD, backed by SQLModel.
 
-The research context is no longer a singleton: each call to
-:func:`set_research_context` inserts a new row keyed by an
-autoincrementing ``research_context_version``. The latest row is the
-"current" research context. Other tables that depend on the context
-active when a row was produced (``codes``, ``coding_queue``,
-``theme_coder_runs``, ``theme_aggregations``) carry a nullable FK back
-to a specific revision.
+Each call to :func:`set_research_context` inserts a new row keyed by
+an autoincrementing ``research_context_version`` *and* creates a new
+``Codebook`` revision pinned to it. The rest of the pipeline tracks
+only the codebook version — the research context active for any
+codebook is reachable via ``codebook.research_context``.
 
-This module is the first part of the SQLModel migration: it uses the
-:class:`~thematic_analysis_inc.db.models.ResearchContext` model
-directly. Callers receive SQLModel objects and use ``rc.description``,
+Callers receive SQLModel objects and use ``rc.description``,
 ``rc.research_context_version`` etc. as attributes. For places that
 still consume the domain dataclass (the LLM agents), use
 :func:`to_domain` to adapt.
@@ -82,19 +78,39 @@ def _from_domain(ctx: DomainResearchContext) -> ResearchContext:
 
 
 def set_research_context(ctx: DomainResearchContext) -> ResearchContext:
-    """Insert a new research-context revision. Returns the persisted row.
+    """Insert a new research-context revision and a fresh ``Codebook``
+    revision pinned to it. Returns the persisted research-context row.
 
+    The new codebook inherits its membership from the previous latest
+    codebook (if any) — callers that want to materialise membership
+    should use :func:`db.codebook.copy_codebook_membership` afterwards.
     History is preserved: previous revisions stay in the table so codes
-    / queue rows / theme runs that reference them remain valid.
+    / queue rows / theme runs that reference earlier codebook versions
+    remain valid.
     """
+    # Lazy import to avoid a top-level cycle (codebook.py imports
+    # latest_research_context_version from this module).
+    from thematic_analysis_inc.db.codebook import (
+        copy_codebook_membership,
+        insert_codebook_version,
+        latest_codebook,
+    )
+
     rc = _from_domain(ctx)
     with session() as s:
         s.add(rc)
         s.commit()
         s.refresh(rc)
-        # Detach so callers can use attributes after the session closes.
+        new_version = rc.research_context_version
         s.expunge(rc)
-        return rc
+
+    parent_cb = latest_codebook()
+    new_cb = insert_codebook_version(
+        parent=parent_cb, research_context_version=new_version
+    )
+    if parent_cb is not None:
+        copy_codebook_membership(from_codebook=parent_cb, to_codebook=new_cb)
+    return rc
 
 
 def get_research_context(
@@ -143,14 +159,18 @@ def list_research_context_versions() -> list[ResearchContext]:
 
 
 def clear_research_context() -> bool:
-    """Wipe research-context history. Returns ``True`` if rows were
-    removed.
+    """Wipe research-context history *and* every codebook revision that
+    pinned one. Returns ``True`` if rows were removed.
 
-    NB: fresh-DB policy — codes / queue rows / theme runs that reference
-    a research_context row will still carry their (now-dangling) FK
-    value. Callers should only use this on a DB with no dependent rows.
+    NB: fresh-DB policy — downstream rows (codes, queue, theme runs)
+    keep their codebook FK values, which will now be dangling. Callers
+    should only use this on a DB with no dependent rows.
     """
+    from thematic_analysis_inc.db.models import Codebook
+
     with session() as s:
+        for cb in s.exec(select(Codebook)).all():
+            s.delete(cb)
         rows = s.exec(select(ResearchContext)).all()
         for r in rows:
             s.delete(r)

@@ -7,9 +7,9 @@ created via ``SQLModel.metadata.create_all`` in
 ``theme_aggregation_inputs``) still live here as plain ``CREATE TABLE
 IF NOT EXISTS`` statements.
 
-FKs point at the Stage-1 singular table names (``codebook(version)``,
-``research_context(research_context_version)``) which are created by
-the SQLModel layer first.
+FKs point at the Stage-1 ``codebook(version)`` table, which is created
+by the SQLModel layer first. The research context active for any row
+here is reachable via that codebook's ``research_context``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS theme_coder_runs (
     id                        INTEGER PRIMARY KEY AUTOINCREMENT,
     theme_coder_id            TEXT NOT NULL,
     codebook_version          INTEGER NOT NULL,
-    research_context_version  INTEGER REFERENCES research_context(research_context_version),
     status                    TEXT NOT NULL DEFAULT 'running',
     claimed_at                DATETIME NOT NULL,
     finished_at               DATETIME,
@@ -47,7 +46,6 @@ CREATE INDEX IF NOT EXISTS idx_theme_coder_runs_version ON theme_coder_runs(code
 CREATE TABLE IF NOT EXISTS theme_aggregations (
     id                        INTEGER PRIMARY KEY AUTOINCREMENT,
     codebook_version          INTEGER NOT NULL UNIQUE,
-    research_context_version  INTEGER REFERENCES research_context(research_context_version),
     status                    TEXT NOT NULL DEFAULT 'running',
     created_at                DATETIME NOT NULL,
     finished_at               DATETIME,

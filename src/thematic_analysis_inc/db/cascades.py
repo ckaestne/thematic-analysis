@@ -213,7 +213,6 @@ def reset_coding_assignment_cascade(
                 assignment.segment_id,
                 assignment.coder_id,
                 assignment.codebook_used_id,
-                assignment.research_context_used_id,
             ),
         )
         if a is None:
