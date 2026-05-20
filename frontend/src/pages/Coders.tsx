@@ -9,7 +9,6 @@ import {
   Stack,
   Table,
   Text,
-  TextInput,
   Textarea,
   Title,
   Tooltip,
@@ -30,15 +29,15 @@ export function Coders() {
     queryFn: api.coders,
   });
   const [opened, setOpened] = useState(false);
-  const [form, setForm] = useState({ coder_id: "", identity: "" });
+  const [form, setForm] = useState({ identity: "" });
   const [force, setForce] = useState(true);
 
   const add = useMutation({
-    mutationFn: () => api.addCoder(form.coder_id, form.identity),
+    mutationFn: () => api.addCoder(form.identity),
     onSuccess: () => {
       notifications.show({ message: "Coder added", color: "teal" });
       setOpened(false);
-      setForm({ coder_id: "", identity: "" });
+      setForm({ identity: "" });
       qc.invalidateQueries({ queryKey: ["coders"] });
       qc.invalidateQueries({ queryKey: ["status"] });
     },
@@ -77,14 +76,6 @@ export function Coders() {
         centered
       >
         <Stack>
-          <TextInput
-            label="Coder ID"
-            value={form.coder_id}
-            onChange={(e) =>
-              setForm({ ...form, coder_id: e.currentTarget.value })
-            }
-            required
-          />
           <Textarea
             label="Identity"
             description="Analytical perspective shown to the agent."
@@ -103,7 +94,7 @@ export function Coders() {
             <Button
               onClick={() => add.mutate()}
               loading={add.isPending}
-              disabled={!form.coder_id || !form.identity}
+              disabled={!form.identity}
             >
               Add
             </Button>
