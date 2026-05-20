@@ -11,6 +11,7 @@ from thematic_analysis_inc.db.models import (
     Code,
     CodesDerived,
     DERIVATION_AGGREGATION,
+    SENTINEL_CODE_LABEL,
 )
 
 
@@ -252,7 +253,7 @@ class _EmptyCoder:
         pass
 
     def code_segment(self, segment):
-        return []
+        return [Code(code=SENTINEL_CODE_LABEL, description="")]
 
 
 def _empty_coder_factory():

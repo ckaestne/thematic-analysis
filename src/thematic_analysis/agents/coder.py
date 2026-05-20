@@ -27,7 +27,12 @@ from thematic_analysis.prompts import (
     CODER_USER_PROMPT,
     join_system_prompt_sections,
 )
-from thematic_analysis_inc.db.models import Code, Quote, Segment
+from thematic_analysis_inc.db.models import (
+    SENTINEL_CODE_LABEL,
+    Code,
+    Quote,
+    Segment,
+)
 
 
 if TYPE_CHECKING:
@@ -176,16 +181,18 @@ analytical rigor and staying grounded in the text."""
         substring of the segment text (best-effort verbatim check), and
         drops a code if no surviving quotes remain. Reuses any existing
         ``Quote`` on ``segment.quotes`` with matching text so we don't
-        create duplicate quote rows for the same segment. Returns ``[]``
-        on missing or malformed JSON.
+        create duplicate quote rows for the same segment. On missing or
+        malformed JSON, or when no usable codes survived filtering,
+        returns a single sentinel ``Code`` so the worker can persist
+        "ran and produced nothing" without inventing the sentinel itself.
         """
         json_str = extract_json_str(response)
         if json_str is None:
-            return []
+            return [self._sentinel()]
         try:
             parsed = _CoderResponse.model_validate_json(json_str)
         except (json.JSONDecodeError, ValidationError):
-            return []
+            return [self._sentinel()]
 
         existing_by_text = {q.text: q for q in (segment.quotes or [])}
 
@@ -210,7 +217,11 @@ analytical rigor and staying grounded in the text."""
             code = Code(code=code_text, description=item.description.strip())
             code.supporting_quotes = quotes
             out.append(code)
-        return out
+        return out or [self._sentinel()]
+
+    @staticmethod
+    def _sentinel() -> Code:
+        return Code(code=SENTINEL_CODE_LABEL, description="")
 
     def _build_user_prompt(self, segment: Segment) -> str:
         template = (

@@ -41,7 +41,7 @@ from thematic_analysis.agents.coder import (
     CoderAgent,
 )
 from thematic_analysis.prompts import join_system_prompt_sections
-from thematic_analysis_inc.db.models import Code, Segment
+from thematic_analysis_inc.db.models import Code, Segment, is_sentinel_code
 
 
 if TYPE_CHECKING:
@@ -303,7 +303,7 @@ class RefiningCoderAgent:
         )
         first_response = self._coder_completion(initial_msgs)
         first_codes = self.coder._parse_response(first_response, segment)
-        if not first_codes:
+        if all(is_sentinel_code(c) for c in first_codes):
             self.last_trace = {
                 "segment_text": text,
                 "first": first_codes,
@@ -351,7 +351,7 @@ class RefiningCoderAgent:
         )
         first_response = await self._coder_completion_async(initial_msgs)
         first_codes = self.coder._parse_response(first_response, segment)
-        if not first_codes:
+        if all(is_sentinel_code(c) for c in first_codes):
             self.last_trace = {
                 "segment_text": text,
                 "first": first_codes,
