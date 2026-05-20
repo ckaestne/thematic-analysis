@@ -41,23 +41,33 @@ def _add_segments(conn, doc, n: int) -> list[int]:
     return [s.segment_id for s in segs]
 
 
-def _stub_code(label: str, quote_text: str):
+def _stub_code(label: str, quote_text: str, *, segment, coder, codebook):
     from thematic_analysis_inc.db.models import Code, Quote as DBQuote
 
-    c = Code(code=label, description=f"desc: {label}")
-    c.supporting_quotes = [DBQuote(text=quote_text or "q")]
+    c = Code(
+        segment_id=segment.segment_id,
+        coder_id=coder.coder_id,
+        codebook_used_id=codebook.version,
+        code=label,
+        description=f"desc: {label}",
+    )
+    c.supporting_quotes = [
+        DBQuote(text=quote_text or "q", segment_id=segment.segment_id)
+    ]
     return c
 
 
 class _StubCoder:
     def __init__(self, codebook, coder):
-        pass
+        self.codebook = codebook
+        self.coder = coder
 
     def code_segment(self, segment):
         text = segment.content
+        kw = {"segment": segment, "coder": self.coder, "codebook": self.codebook}
         return [
-            _stub_code("alpha", text[:10] or "q"),
-            _stub_code("beta", text[:10] or "q"),
+            _stub_code("alpha", text[:10] or "q", **kw),
+            _stub_code("beta", text[:10] or "q", **kw),
         ]
 
 

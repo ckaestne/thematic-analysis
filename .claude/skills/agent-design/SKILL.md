@@ -135,6 +135,75 @@ Conventions:
 - The agent stores debug state on `self.last_*` for CLI inspection;
   these are fields, not return values.
 
+## 6a. Identity belongs on the constructor, not in a config blob
+
+If an agent's behaviour or output depends on *who* is running it (the
+`Coder` row, a `ThemeCoder`, etc.), accept that row as a constructor
+argument. Don't smuggle it in through `AgentConfig.identity` or any
+other generic config slot — the agent should hold the actual ORM row,
+not a flattened copy of one field.
+
+```python
+class CoderAgent(BaseAgent):
+    def __init__(
+        self,
+        coder: Coder,
+        codebook: Codebook,
+        config: CoderConfig | None = None,
+    ):
+        ...
+```
+
+That way the agent can:
+
+- stamp `coder_id` on every `Code` it returns (see §6b), and
+- read other Coder columns (identity, role, future fields) without the
+  worker remembering to wire each one through `config=`.
+
+The same rule applies to the `Codebook`: pass the ORM row in the
+constructor (the agent is bound to one revision for its lifetime), and
+read the codebook's research context off
+`codebook.research_context`. Don't accept a separate `research_context`
+argument — the research context is pinned to a codebook revision, so
+"which codebook?" already answers "which research context?". A
+duplicate `research_context=` parameter just creates a way for the two
+to disagree.
+
+## 6b. Stamp the assignment keys; don't let the worker rebuild the row
+
+Every `Code` an agent returns must already have its identifying foreign
+keys set: `segment_id`, `coder_id`, and `codebook_used_id`. Real codes
+and sentinels alike — the sentinel goes through the same construction
+path. The worker's persistence helper is then a flat `s.add(c)` per
+returned row, not a "rebuild the Code from the assignment" loop:
+
+```python
+# in the agent
+def _new_code(self, segment: Segment, code: str, description: str) -> Code:
+    return Code(
+        segment_id=segment.segment_id,
+        coder_id=self.coder.coder_id,
+        codebook_used_id=self.codebook.version,
+        code=code,
+        description=description,
+    )
+
+# in the persistence helper
+for c in codes:
+    c.supporting_quotes = [
+        s.merge(q) if q.quote_id is not None else q
+        for q in (c.supporting_quotes or [])
+    ]
+    s.add(c)
+s.commit()
+```
+
+Why this matters: if persistence "fixes up" missing fields, the agent
+can return half-built rows (no segment_id, no coder_id) and tests pass
+locally — but the agent then doesn't actually own its output. Every
+field on the Code is the agent's choice; the worker just writes what
+it's handed.
+
 ## 7. Model changes follow the agent's needs
 
 If wiring an agent's output as a model graph requires a model tweak,
@@ -177,6 +246,12 @@ The worker:
 - [ ] No `Quote(text=...)` construction from quote *text* inside an agent.
 - [ ] Public method takes domain objects (Segment / Codebook / Code /
       Theme), returns model objects.
+- [ ] Identity-bearing ORM rows (`Coder`, `ThemeCoder`, …) are
+      constructor arguments, not flattened into an `AgentConfig` field.
+- [ ] No separate `research_context=` argument when the agent has a
+      `Codebook` — read it off `codebook.research_context`.
+- [ ] Returned `Code`s carry `segment_id` / `coder_id` /
+      `codebook_used_id` already set; the worker just `s.add`s them.
 - [ ] Sentinel cases handled inside the agent.
 - [ ] Deterministic cases short-circuit the LLM.
 - [ ] Worker uses one session with `selectinload` for everything the

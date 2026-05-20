@@ -5,10 +5,11 @@ writes 1–3 codes per segment. For each code, it provides a short
 description of the analytic concept and extracts one or more verbatim
 quotes from the segment as evidence.
 
-The agent returns transient (un-persisted) ``Code`` SQLModel instances
-with attached ``Quote`` instances on ``supporting_quotes``. Persistence
-(segment_id, coder_id, codebook version, etc.) is the caller's
-responsibility.
+The agent is bound to one ``Coder`` and one ``Codebook`` revision via
+its constructor. Each returned ``Code`` carries ``segment_id``,
+``coder_id``, and ``codebook_used_id`` already set, so the worker can
+``s.add(c)`` without rebuilding the row. Research context is read from
+``codebook.research_context``; it is not a separate constructor arg.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_json_str
-from thematic_analysis.codebook import Codebook
 from thematic_analysis.prompts import (
     CODER_SYSTEM_PROMPT,
     CODER_USER_PROMPT,
@@ -30,14 +30,18 @@ from thematic_analysis.prompts import (
 from thematic_analysis_inc.db.models import (
     SENTINEL_CODE_LABEL,
     Code,
+    Codebook,
+    Coder,
     Quote,
     Segment,
+)
+from thematic_analysis_inc.db.research_context import (
+    to_domain as _research_context_to_domain,
 )
 
 
 if TYPE_CHECKING:
     from thematic_analysis.prompts import CoderPrompts
-    from thematic_analysis.research_context import ResearchContext
 
 
 @dataclass
@@ -45,7 +49,6 @@ class CoderConfig(AgentConfig):
     """Configuration for the Coder agent."""
 
     max_codes_per_segment: int = 5
-    similarity_threshold: float = 0.7
     include_6rs_guidance: bool = True
     custom_prompts: CoderPrompts | None = None
 
@@ -101,42 +104,49 @@ CODER_RESPONSE_SCHEMA = {
 class CoderAgent(BaseAgent):
     """Agent that assigns codes to text segments.
 
-    Returns a list of transient ``Code`` instances with attached
-    transient ``Quote`` instances (via ``code.supporting_quotes``).
+    The ``Coder`` and ``Codebook`` come in via the constructor — the
+    agent stamps ``coder_id`` and ``codebook_used_id`` from them onto
+    every returned ``Code`` (real or sentinel). The codebook also
+    carries the research context via ``codebook.research_context``.
     """
 
     def __init__(
         self,
+        coder: Coder,
+        codebook: Codebook,
         config: CoderConfig | None = None,
-        codebook: Codebook | None = None,
-        research_context: ResearchContext | None = None,
     ):
         super().__init__(config or CoderConfig())
         self.coder_config: CoderConfig = self.config  # type: ignore
-        self.codebook = codebook if codebook is not None else Codebook()
-        self.research_context = research_context
-
-    def set_research_context(self, context: ResearchContext) -> None:
-        self.research_context = context
+        self.coder = coder
+        self.codebook = codebook
 
     def get_system_prompt(self) -> str:
         identity_section = ""
-        if self.config.identity:
-            identity_section = f"""
-## Your Perspective:
-You are coding from the following perspective: {self.config.identity}
-Let this perspective inform how you interpret and code the data, while maintaining
-analytical rigor and staying grounded in the text."""
-
-        research_section = ""
-        if self.research_context and not self.research_context.is_empty():
-            research_section = "## Research context\n" + self.research_context.to_prompt_section(
-                role="coder"
+        if self.coder.identity:
+            identity_section = (
+                "\n## Your Perspective:\n"
+                "You are coding from the following perspective: "
+                f"{self.coder.identity}\n"
+                "Let this perspective inform how you interpret and code the "
+                "data, while maintaining\n"
+                "analytical rigor and staying grounded in the text."
             )
 
-        base_prompt = CODER_SYSTEM_PROMPT
-        if self.coder_config.custom_prompts is not None:
-            base_prompt = self.coder_config.custom_prompts.system_prompt
+        research_section = ""
+        rc_row = self.codebook.research_context
+        if rc_row is not None:
+            rc = _research_context_to_domain(rc_row)
+            if not rc.is_empty():
+                research_section = (
+                    "## Research context\n" + rc.to_prompt_section(role="coder")
+                )
+
+        base_prompt = (
+            self.coder_config.custom_prompts.system_prompt
+            if self.coder_config.custom_prompts is not None
+            else CODER_SYSTEM_PROMPT
+        )
         return join_system_prompt_sections(
             base_prompt,
             research_context_instructions=research_section,
@@ -144,34 +154,22 @@ analytical rigor and staying grounded in the text."""
         )
 
     def _format_codebook_section(self) -> str:
-        if len(self.codebook) == 0:
+        codes = list(self.codebook.codes or [])
+        if not codes:
             return "The codebook is currently empty. Create new codes as needed."
+        codes_list = "\n".join(f"- {c.code}" for c in codes[:50])
+        return f"Existing codes ({len(codes)} total):\n{codes_list}"
 
-        codes_list = "\n".join(
-            f"- {entry.code}" for entry in self.codebook.entries[:50]
+    def _build_user_prompt(self, segment: Segment) -> str:
+        template = (
+            self.coder_config.custom_prompts.user_prompt
+            if self.coder_config.custom_prompts is not None
+            else CODER_USER_PROMPT
         )
-        return f"Existing codes ({len(self.codebook)} total):\n{codes_list}"
-
-    def _format_similar_codes_section(self, text: str) -> str:
-        if len(self.codebook) == 0:
-            return ""
-
-        similar = self.codebook.find_similar_codes(text, top_k=5)
-        if not similar:
-            return ""
-
-        similar_list = "\n".join(
-            f"- {entry.code} (similarity: {score:.2f})"
-            for entry, score in similar
-            if score >= self.coder_config.similarity_threshold
-        )
-
-        if not similar_list:
-            return ""
-
-        return (
-            "## Similar Existing Codes:\n"
-            f"Consider using these relevant codes:\n{similar_list}"
+        return template.format(
+            codebook_section=self._format_codebook_section(),
+            segment_id=str(segment.segment_id),
+            segment_text=segment.content,
         )
 
     def _parse_response(self, response: str, segment: Segment) -> list[Code]:
@@ -183,16 +181,15 @@ analytical rigor and staying grounded in the text."""
         ``Quote`` on ``segment.quotes`` with matching text so we don't
         create duplicate quote rows for the same segment. On missing or
         malformed JSON, or when no usable codes survived filtering,
-        returns a single sentinel ``Code`` so the worker can persist
-        "ran and produced nothing" without inventing the sentinel itself.
+        returns a single sentinel ``Code``.
         """
         json_str = extract_json_str(response)
         if json_str is None:
-            return [self._sentinel()]
+            return [self._sentinel(segment)]
         try:
             parsed = _CoderResponse.model_validate_json(json_str)
         except (json.JSONDecodeError, ValidationError):
-            return [self._sentinel()]
+            return [self._sentinel(segment)]
 
         existing_by_text = {q.text: q for q in (segment.quotes or [])}
 
@@ -214,29 +211,24 @@ analytical rigor and staying grounded in the text."""
                 )
             if not quotes:
                 continue
-            code = Code(code=code_text, description=item.description.strip())
+            code = self._new_code(
+                segment, code_text, item.description.strip()
+            )
             code.supporting_quotes = quotes
             out.append(code)
-        return out or [self._sentinel()]
+        return out or [self._sentinel(segment)]
 
-    @staticmethod
-    def _sentinel() -> Code:
-        return Code(code=SENTINEL_CODE_LABEL, description="")
+    def _new_code(self, segment: Segment, code: str, description: str) -> Code:
+        return Code(
+            segment_id=segment.segment_id,
+            coder_id=self.coder.coder_id,
+            codebook_used_id=self.codebook.version,
+            code=code,
+            description=description,
+        )
 
-    def _build_user_prompt(self, segment: Segment) -> str:
-        template = (
-            self.coder_config.custom_prompts.user_prompt
-            if self.coder_config.custom_prompts is not None
-            else CODER_USER_PROMPT
-        )
-        return template.format(
-            codebook_section=self._format_codebook_section(),
-            segment_id=str(segment.segment_id),
-            segment_text=segment.content,
-            similar_codes_section=self._format_similar_codes_section(
-                segment.content
-            ),
-        )
+    def _sentinel(self, segment: Segment) -> Code:
+        return self._new_code(segment, SENTINEL_CODE_LABEL, "")
 
     def code_segment(self, segment: Segment) -> list[Code]:
         response = self._call_llm(

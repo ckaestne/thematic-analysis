@@ -21,12 +21,13 @@ class TestCodebookIdentityBug:
 
     def test_coder_agent_preserves_codebook_identity(self):
         """CoderAgent should use the exact codebook passed to it."""
-        codebook = Codebook(use_mock_embeddings=True)
-        original_id = id(codebook)
+        from types import SimpleNamespace
 
-        agent = CoderAgent(codebook=codebook)
+        codebook = SimpleNamespace(version=1, codes=[], research_context=None)
+        coder = SimpleNamespace(coder_id=1, identity=None)
 
-        assert id(agent.codebook) == original_id
+        agent = CoderAgent(coder=coder, codebook=codebook)
+
         assert agent.codebook is codebook
 
     def test_reviewer_agent_preserves_codebook_identity(self):

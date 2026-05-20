@@ -17,7 +17,7 @@ from thematic_analysis.agents.aggregator import (
     AggregatorConfig,
     CodeAggregatorAgent,
 )
-from thematic_analysis.agents.coder import CoderAgent, CoderConfig
+from thematic_analysis.agents.coder import CoderAgent
 from thematic_analysis.agents.reviewer import (
     ReviewDecision,
     ReviewerAgent,
@@ -49,6 +49,7 @@ from thematic_analysis_inc.db import (
 )
 from thematic_analysis_inc.db.models import (
     Code,
+    Codebook as DBCodebook,
     Coder,
     DECISION_ADD,
     DECISION_MERGE,
@@ -91,15 +92,39 @@ def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
     return cb
 
 
+def _load_db_codebook(version: int) -> DBCodebook:
+    """Load the DB ``Codebook`` row with ``.codes`` and ``.research_context``
+    eager-loaded so the (expunged) instance is safe for the agent to
+    traverse without an active session."""
+    from sqlalchemy.orm import selectinload
+    from sqlmodel import select
+
+    from thematic_analysis_inc.db.connection import session
+
+    with session() as s:
+        cb = s.exec(
+            select(DBCodebook)
+            .options(
+                selectinload(DBCodebook.codes),  # type: ignore[arg-type]
+                selectinload(DBCodebook.research_context),  # type: ignore[arg-type]
+            )
+            .where(DBCodebook.version == version)
+        ).first()
+        if cb is None:
+            raise ValueError(f"unknown codebook version: {version}")
+        _ = list(cb.codes)
+        _ = cb.research_context
+        s.expunge_all()
+        return cb
+
+
 # ── Stage-A coder worker ─────────────────────────────────────────────────────
 
-AgentFactory = Callable[[DomainCodebook, Coder], Any]
+AgentFactory = Callable[[DBCodebook, Coder], Any]
 
 
-def default_coder_factory(codebook: DomainCodebook, coder: Coder) -> Any:
-    base = CoderAgent(
-        config=CoderConfig(identity=coder.identity), codebook=codebook
-    )
+def default_coder_factory(codebook: DBCodebook, coder: Coder) -> Any:
+    base = CoderAgent(coder=coder, codebook=codebook)
     return wrap_with_refinement(base)
 
 
@@ -115,10 +140,9 @@ async def _run_coder_for_segment(
     if seg is None:
         raise ValueError(f"unknown segment_id: {segment_id}")
 
-    codebook = _get_codebook(version, use_mock_embeddings)
+    codebook = _load_db_codebook(version)
     factory = agent_factory or default_coder_factory
     agent = factory(codebook, coder)
-    _apply_research_context(agent)
 
     t0 = time.monotonic()
     if hasattr(agent, "code_segment_async"):

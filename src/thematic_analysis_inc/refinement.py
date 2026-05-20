@@ -230,31 +230,16 @@ class RefiningCoderAgent:
     def critic(self) -> Critic:
         """The adversarial critic. Created lazily so wrapping a coder
         whose LLM isn't configured yet doesn't trigger env lookup.
-        Inherits the coder's current research context at creation."""
+        Inherits the research context off the coder's codebook."""
         if self._critic is None:
-            self._critic = Critic(
-                self.coder.llm,
-                research_context=self.coder.research_context,
+            from thematic_analysis_inc.db.research_context import (
+                to_domain as _rc_to_domain,
             )
+
+            rc_row = self.coder.codebook.research_context
+            rc = _rc_to_domain(rc_row) if rc_row is not None else None
+            self._critic = Critic(self.coder.llm, research_context=rc)
         return self._critic
-
-    # Duck-typed attributes the worker layer reads/writes.
-    @property
-    def research_context(self):
-        return self.coder.research_context
-
-    @research_context.setter
-    def research_context(self, value) -> None:
-        """Propagate research context to both the coder and the critic.
-
-        The worker layer sets this on the wrapper before each coding
-        call, so the critic needs to pick it up too — without the
-        research context the critic can't judge whether codes are
-        responsive to the research question.
-        """
-        self.coder.research_context = value
-        if self._critic is not None:
-            self._critic.research_context = value
 
     @property
     def codebook(self):  # pragma: no cover - trivial delegation

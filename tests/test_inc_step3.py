@@ -31,23 +31,33 @@ def _add_segments(conn, doc, n: int) -> list[int]:
     return [s.segment_id for s in segs]
 
 
-def _stub_code(label: str, quote_text: str):
+def _stub_code(label: str, quote_text: str, *, segment, coder, codebook):
     from thematic_analysis_inc.db.models import Code, Quote as DBQuote
 
-    c = Code(code=label, description=f"desc: {label}")
-    c.supporting_quotes = [DBQuote(text=quote_text or "q")]
+    c = Code(
+        segment_id=segment.segment_id,
+        coder_id=coder.coder_id,
+        codebook_used_id=codebook.version,
+        code=label,
+        description=f"desc: {label}",
+    )
+    c.supporting_quotes = [
+        DBQuote(text=quote_text or "q", segment_id=segment.segment_id)
+    ]
     return c
 
 
 class _StubCoder:
     def __init__(self, codebook, coder):
+        self.codebook = codebook
         self.coder = coder
 
     def code_segment(self, segment):
         text = segment.content
+        kw = {"segment": segment, "coder": self.coder, "codebook": self.codebook}
         return [
-            _stub_code(f"c{self.coder.coder_id}-only", text[:10] or "q"),
-            _stub_code("shared", text[:10] or "q"),
+            _stub_code(f"c{self.coder.coder_id}-only", text[:10] or "q", **kw),
+            _stub_code("shared", text[:10] or "q", **kw),
         ]
 
 
@@ -250,10 +260,19 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
 
 class _EmptyCoder:
     def __init__(self, codebook, coder):
-        pass
+        self.codebook = codebook
+        self.coder = coder
 
     def code_segment(self, segment):
-        return [Code(code=SENTINEL_CODE_LABEL, description="")]
+        return [
+            Code(
+                segment_id=segment.segment_id,
+                coder_id=self.coder.coder_id,
+                codebook_used_id=self.codebook.version,
+                code=SENTINEL_CODE_LABEL,
+                description="",
+            )
+        ]
 
 
 def _empty_coder_factory():
@@ -339,12 +358,22 @@ def _seed_segment_coded_at_version(conn, seg_id: int, coders: list, cb_version: 
         ((seg_id, c.coder_id) for c in coders),
         codebook_version=cb_version,
     )
+    seg = store.get_segment(seg_id)
+    cb = store.get_codebook(cb_version)
     for coder in coders:
         assignment = store.coding.claim_next_assignment(coder)
         if assignment is not None:
             store.coding.record_coding_result(
                 assignment,
-                [_stub_code(f"code-v{cb_version}-c{coder.coder_id}", "quote")],
+                [
+                    _stub_code(
+                        f"code-v{cb_version}-c{coder.coder_id}",
+                        "quote",
+                        segment=seg,
+                        coder=coder,
+                        codebook=cb,
+                    )
+                ],
             )
 
 
@@ -392,7 +421,18 @@ def test_next_segment_codebook_skips_version_with_unfinished_queue(tmp_path: Pat
         codebook_version=v1,
     )
     a_assign = store.coding.claim_next_assignment(coder_a)
-    store.coding.record_coding_result(a_assign, [_stub_code("x", "q")])
+    store.coding.record_coding_result(
+        a_assign,
+        [
+            _stub_code(
+                "x",
+                "q",
+                segment=store.get_segment(sid),
+                coder=coder_a,
+                codebook=store.get_codebook(v1),
+            )
+        ],
+    )
 
     assert store.aggregation.next_segment_codebook_to_aggregate() is None
 

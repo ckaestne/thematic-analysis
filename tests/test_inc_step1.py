@@ -187,9 +187,17 @@ def test_enqueue_creates_new_row_when_codebook_changes(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _stub_code(label: str, quote_text: str) -> Code:
-    c = Code(code=label, description=f"desc: {label}")
-    c.supporting_quotes = [Quote(text=quote_text)]
+def _stub_code(
+    label: str, quote_text: str, *, segment, coder, codebook
+) -> Code:
+    c = Code(
+        segment_id=segment.segment_id,
+        coder_id=coder.coder_id,
+        codebook_used_id=codebook.version,
+        code=label,
+        description=f"desc: {label}",
+    )
+    c.supporting_quotes = [Quote(text=quote_text, segment_id=segment.segment_id)]
     return c
 
 
@@ -206,9 +214,12 @@ class _StubAgent:
         text = segment.content
         if self.raise_on is not None and str(segment_id) == self.raise_on:
             raise RuntimeError("boom")
+        kw = {"segment": segment, "coder": self.coder, "codebook": self.codebook}
         return [
-            _stub_code(f"{self.coder.coder_id}::{segment_id}::a", text[:10] or "q"),
-            _stub_code("shared", text[:10] or "q"),
+            _stub_code(
+                f"{self.coder.coder_id}::{segment_id}::a", text[:10] or "q", **kw
+            ),
+            _stub_code("shared", text[:10] or "q", **kw),
         ]
 
     async def code_segment_async(self, segment):
@@ -230,7 +241,15 @@ class _TraceStubAgent:
     def code_segment(self, segment):
         segment_id = segment.segment_id
         text = segment.content
-        codes = [_stub_code(f"{self.coder.coder_id}::{segment_id}::trace", text)]
+        codes = [
+            _stub_code(
+                f"{self.coder.coder_id}::{segment_id}::trace",
+                text,
+                segment=segment,
+                coder=self.coder,
+                codebook=self.codebook,
+            )
+        ]
         self.last_trace = {
             "segment_text": text,
             "first": codes,

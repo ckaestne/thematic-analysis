@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -27,7 +28,6 @@ import pytest
 from openhands.sdk import Message, TextContent
 
 from thematic_analysis.agents.coder import CoderAgent
-from thematic_analysis.codebook import Codebook
 from thematic_analysis_inc.db.models import is_sentinel_code
 from thematic_analysis.research_context import ResearchContext
 from thematic_analysis_inc import workers
@@ -46,8 +46,30 @@ SEG_TEXT = "the actual segment text we feed the coder"
 
 
 def _seg(text: str, sid: int = 1):
-    from types import SimpleNamespace
     return SimpleNamespace(segment_id=sid, content=text, quotes=[])
+
+
+def _coder_stub(coder_id: int = 1, identity: str | None = None):
+    return SimpleNamespace(coder_id=coder_id, identity=identity)
+
+
+def _rc_row(description: str = "", coder_prompt: str | None = None):
+    return SimpleNamespace(
+        description=description,
+        coder_prompt=coder_prompt,
+        coding_critic_prompt=None,
+        reviewer_prompt=None,
+        theme_coder_prompt=None,
+        theme_aggregator_prompt=None,
+    )
+
+
+def _codebook_stub(version: int = 1, codes=None, research_context=None):
+    return SimpleNamespace(
+        version=version,
+        codes=codes or [],
+        research_context=research_context,
+    )
 
 
 def _make_response(text: str) -> Any:
@@ -103,10 +125,18 @@ def _fake_llm(responses: list[str]) -> tuple[MagicMock, list[_Call]]:
     return llm, calls
 
 
-def _coder_with_llm(llm: MagicMock) -> CoderAgent:
-    coder = CoderAgent(codebook=Codebook(use_mock_embeddings=True))
-    coder._llm = llm
-    return coder
+def _coder_with_llm(
+    llm: MagicMock,
+    *,
+    coder=None,
+    codebook=None,
+) -> CoderAgent:
+    agent = CoderAgent(
+        coder=coder or _coder_stub(),
+        codebook=codebook or _codebook_stub(),
+    )
+    agent._llm = llm
+    return agent
 
 
 class TestCritic:
@@ -269,17 +299,11 @@ class TestRefiningCoderAgent:
         assert len(calls) == 3
 
     def test_critic_chat_excludes_codebook_and_identity(self):
-        from thematic_analysis.agents.coder import CoderConfig
-        from thematic_analysis.codebook import Quote as DomainQuote
-
-        codebook = Codebook(use_mock_embeddings=True)
-        codebook.add_code("existing-code", [DomainQuote("q1", "some quote")])
+        existing = SimpleNamespace(code="existing-code")
+        rc = _rc_row(description="Study of gendered narratives.")
         coder = CoderAgent(
-            config=CoderConfig(identity="feminist scholar"),
-            codebook=codebook,
-            research_context=ResearchContext(
-                description="Study of gendered narratives."
-            ),
+            coder=_coder_stub(identity="feminist scholar"),
+            codebook=_codebook_stub(codes=[existing], research_context=rc),
         )
         llm, calls = _fake_llm(
             [
@@ -305,45 +329,18 @@ class TestRefiningCoderAgent:
 
         assert "gendered narratives" in critic_sys
 
-    def test_research_context_set_via_wrapper_reaches_critic(self):
-        llm, calls = _fake_llm(
-            [_single("c", "actual segment"), "critique",
-             _single("c'", "segment text")]
+    def test_critic_inherits_research_context_from_codebook(self):
+        rc = _rc_row(description="Late context attached to codebook.")
+        coder = _coder_with_llm(
+            _fake_llm(
+                [_single("c", "actual segment"), "critique",
+                 _single("c'", "segment text")]
+            )[0],
+            codebook=_codebook_stub(research_context=rc),
         )
-        agent = RefiningCoderAgent(_coder_with_llm(llm))
-        _ = agent.critic
-
-        ctx = ResearchContext(description="Late context. Set after construction.")
-        agent.research_context = ctx
-        assert agent.critic.research_context is ctx
-
-        agent.code_segment(_seg(SEG_TEXT))
-        critic_sys = calls[1].messages[0].content[0].text
-        assert "Late context" in critic_sys
-
-    def test_research_context_set_before_critic_creation(self):
-        llm, calls = _fake_llm(
-            [_single("c", "actual segment"), "critique",
-             _single("c'", "segment text")]
-        )
-        agent = RefiningCoderAgent(_coder_with_llm(llm))
-        ctx = ResearchContext(description="Early context. Set before construction.")
-        agent.research_context = ctx
-        assert agent._critic is None
-
-        agent.code_segment(_seg(SEG_TEXT))
-        critic_sys = calls[1].messages[0].content[0].text
-        assert "Early context" in critic_sys
-
-    def test_research_context_passthrough(self):
-        llm, _ = _fake_llm([_json_codes([])])
-        coder = _coder_with_llm(llm)
         agent = RefiningCoderAgent(coder)
-
-        ctx = ResearchContext(description="A study.")
-        agent.research_context = ctx
-        assert coder.research_context is ctx
-        assert agent.research_context is ctx
+        assert agent.critic.research_context is not None
+        assert "Late context" in agent.critic.research_context.description
 
     @pytest.mark.asyncio
     async def test_async_flow_mirrors_sync(self):
@@ -383,7 +380,7 @@ class TestRefiningCoderAgent:
 
 class TestWrapWithRefinement:
     def test_wraps_coder_agent(self):
-        coder = CoderAgent(codebook=Codebook(use_mock_embeddings=True))
+        coder = CoderAgent(coder=_coder_stub(), codebook=_codebook_stub())
         wrapped = wrap_with_refinement(coder)
         assert isinstance(wrapped, RefiningCoderAgent)
         assert wrapped.coder is coder
@@ -395,12 +392,12 @@ class TestWrapWithRefinement:
 
 class TestWorkerDefaultFactory:
     def test_default_factory_returns_refining_agent(self):
-        codebook = Codebook(use_mock_embeddings=True)
+        codebook = _codebook_stub()
         coder_row = store.Coder(coder_id=1, identity="x")
         agent = workers.default_coder_factory(codebook, coder_row)
         assert isinstance(agent, RefiningCoderAgent)
         assert isinstance(agent.coder, CoderAgent)
-        assert agent.coder.config.identity == "x"
+        assert agent.coder.coder.identity == "x"
 
 
 class TestWorkerEndToEnd:
@@ -426,8 +423,7 @@ class TestWorkerEndToEnd:
         )
 
         def factory(codebook, coder):
-            base = CoderAgent(codebook=codebook)
-            base.coder_config.identity = coder.identity
+            base = CoderAgent(coder=coder, codebook=codebook)
             base._llm = llm
             return wrap_with_refinement(base)
 
