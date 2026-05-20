@@ -1,10 +1,8 @@
 """Agents module for thematic analysis."""
 
 from thematic_analysis.agents.aggregator import (
-    AggregationResult,
     AggregatorConfig,
     CodeAggregatorAgent,
-    MergedCode,
 )
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.coder import CoderAgent, CoderConfig
@@ -35,8 +33,6 @@ __all__ = [
     "CoderConfig",
     "CodeAggregatorAgent",
     "AggregatorConfig",
-    "AggregationResult",
-    "MergedCode",
     "ReviewerAgent",
     "ReviewerConfig",
     "ReviewResult",

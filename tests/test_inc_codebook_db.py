@@ -19,10 +19,9 @@ from pathlib import Path
 import pytest
 
 from thematic_analysis_inc import db
-from thematic_analysis_inc.db.aggregation import (
-    AggregatorMergeInput,
-    record_aggregation_result,
-)
+from thematic_analysis_inc.db.aggregation import record_aggregation_result
+from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
+from thematic_analysis_inc.db.models import Code, Quote
 from thematic_analysis_inc.db.review import (
     DECISION_ADD,
     DECISION_MERGE,
@@ -134,17 +133,18 @@ def _add_agg_code(
 ) -> int:
     """Insert one aggregator code (coder_id=0). Returns the new code_id."""
     seg = _segment_obj(segment_id)
+    quotes = [db.add_quote(seg, t) for t in (quote_texts or [])]
+    new_code = Code(
+        segment_id=segment_id,
+        coder_id=SYSTEM_AGGREGATOR_ID,
+        codebook_used_id=version,
+        code=code,
+        description=description,
+        rationale=rationale,
+    )
+    new_code.supporting_quotes = list(quotes)
     new_codes = record_aggregation_result(
-        seg,
-        [
-            AggregatorMergeInput(
-                code=code,
-                description=description,
-                rationale=rationale,
-                quote_texts=list(quote_texts or []),
-                source_codes=[],
-            )
-        ],
+        seg, [new_code], codebook_version=version
     )
     assert len(new_codes) == 1
     return new_codes[0].code_id
@@ -559,25 +559,30 @@ def test_aggregator_emits_multiple_codes_with_distinct_quotes(
     conn = _init(tmp_path)
     seg = _seed_segment(conn)
 
-    new_codes = record_aggregation_result(
-        _segment_obj(seg),
-        [
-            AggregatorMergeInput(
-                code="alpha",
-                description="first",
-                rationale="r1",
-                quote_texts=["a1", "a2"],
-                source_codes=[],
-            ),
-            AggregatorMergeInput(
-                code="beta",
-                description="second",
-                rationale="r2",
-                quote_texts=["b1"],
-                source_codes=[],
-            ),
-        ],
+    seg_obj = _segment_obj(seg)
+    qa1 = db.add_quote(seg_obj, "a1")
+    qa2 = db.add_quote(seg_obj, "a2")
+    qb1 = db.add_quote(seg_obj, "b1")
+    cb_version = db.latest_codebook().version
+    alpha = Code(
+        segment_id=seg,
+        coder_id=SYSTEM_AGGREGATOR_ID,
+        codebook_used_id=cb_version,
+        code="alpha",
+        description="first",
+        rationale="r1",
     )
+    alpha.supporting_quotes = [qa1, qa2]
+    beta = Code(
+        segment_id=seg,
+        coder_id=SYSTEM_AGGREGATOR_ID,
+        codebook_used_id=cb_version,
+        code="beta",
+        description="second",
+        rationale="r2",
+    )
+    beta.supporting_quotes = [qb1]
+    new_codes = record_aggregation_result(seg_obj, [alpha, beta])
     new_ids = [c.code_id for c in new_codes]
     assert len(new_ids) == 2
 

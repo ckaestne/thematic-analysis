@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
-
 from sqlalchemy import func
 from sqlalchemy.orm import aliased
 from sqlmodel import select
@@ -14,25 +11,12 @@ from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
     Code,
-    CodesDerived,
     CodesSupportingQuotes,
     CodingQueueEntry,
-    DERIVATION_AGGREGATION,
     Quote,
     Segment,
     SENTINEL_CODE_LABEL,
 )
-
-
-@dataclass
-class AggregatorMergeInput:
-    """One merged/retained code from the aggregator agent."""
-
-    code: str
-    description: str = ""
-    rationale: str = ""
-    quote_texts: list[str] = field(default_factory=list)
-    source_codes: list[Code] = field(default_factory=list)
 
 
 def _target_codebook_version() -> int:
@@ -187,77 +171,62 @@ def segment_has_aggregator_code(
 
 def record_aggregation_result(
     segment: Segment,
-    merged: list[AggregatorMergeInput],
+    codes: list[Code],
     *,
     codebook_version: int | None = None,
 ) -> list[Code]:
-    """For each merged code: insert Quote rows, an aggregator Code row,
-    quote links, and ``CodesDerived('A', ...)`` edges per source. Returns
-    the new aggregator Codes (detached).
+    """Persist new aggregator Codes returned by the agent.
 
-    If ``merged`` is empty, a single sentinel aggregator row is inserted
-    (see :data:`SENTINEL_CODE_LABEL`) so the segment is marked as
-    aggregated for this version even though no codes were produced.
+    ``codes`` is the list produced by ``CodeAggregatorAgent.aggregate``.
+    Items with ``code_id`` set are retained originals (already in the
+    DB) and are skipped. New items are added; their ``supporting_quotes``
+    and ``derivation_sources`` lists are wired through to existing rows
+    and link/edge rows are inserted via cascade.
 
-    ``codebook_version`` defaults to the latest revision.
+    If ``codes`` is empty, a single sentinel aggregator row is inserted
+    so the segment is marked aggregated for this version. The caller is
+    expected to pass an empty list only when the agent saw no Stage-A
+    input at all; otherwise the agent itself emits the sentinel.
     """
     if codebook_version is None:
         codebook_version = _target_codebook_version()
 
-    if not merged:
-        merged = [AggregatorMergeInput(code=SENTINEL_CODE_LABEL)]
-
-    out_ids: list[int] = []
-    out_texts: list[tuple[str, str, str]] = []
     with session() as s:
-        for inp in merged:
-            agg_code = Code(
+        if not codes:
+            sentinel = Code(
                 segment_id=segment.segment_id,
                 coder_id=SYSTEM_AGGREGATOR_ID,
                 codebook_used_id=codebook_version,
-                code=inp.code,
-                description=inp.description or "",
-                rationale=inp.rationale or "",
+                code=SENTINEL_CODE_LABEL,
             )
-            s.add(agg_code)
+            s.add(sentinel)
             s.commit()
-            s.refresh(agg_code)
-            cid = agg_code.code_id
-            for text in inp.quote_texts or []:
-                q = Quote(segment_id=segment.segment_id, text=text)
-                s.add(q)
-                s.commit()
-                s.refresh(q)
-                s.add(
-                    CodesSupportingQuotes(code_id=cid, quote_id=q.quote_id)
-                )
-            for src in inp.source_codes or []:
-                existing = s.get(CodesDerived, (cid, src.code_id))
-                if existing is None:
-                    s.add(
-                        CodesDerived(
-                            new_code_id=cid,
-                            source_code_id=src.code_id,
-                            derivation_type=DERIVATION_AGGREGATION,
-                        )
-                    )
-            s.commit()
-            out_ids.append(cid)
-            out_texts.append(
-                (inp.code, inp.description or "", inp.rationale or "")
-            )
-    return [
-        Code(
-            code_id=cid,
-            segment_id=segment.segment_id,
-            coder_id=SYSTEM_AGGREGATOR_ID,
-            codebook_used_id=codebook_version,
-            code=code,
-            description=desc,
-            rationale=rat,
-        )
-        for cid, (code, desc, rat) in zip(out_ids, out_texts)
-    ]
+            s.refresh(sentinel)
+            s.expunge(sentinel)
+            return [sentinel]
+
+        written: list[Code] = []
+        for c in codes:
+            if c.code_id is not None:
+                continue
+            c.supporting_quotes = [
+                s.merge(q) if q.quote_id is not None else q
+                for q in (c.supporting_quotes or [])
+            ]
+            for edge in c.derivation_sources or []:
+                if edge.source_code is not None and edge.source_code.code_id is not None:
+                    edge.source_code = s.merge(edge.source_code)
+            s.add(c)
+            written.append(c)
+        s.commit()
+        out: list[Code] = []
+        for c in written:
+            s.refresh(c)
+            _ = list(c.supporting_quotes)
+            _ = list(c.derivation_sources)
+            s.expunge(c)
+            out.append(c)
+        return out
 
 
 def load_aggregated_code_quotes(code_id: int) -> list[dict]:

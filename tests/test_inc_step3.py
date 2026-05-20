@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from thematic_analysis.agents.aggregator import AggregationResult, MergedCode
-from thematic_analysis.codebook import Quote
-
 from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
+from thematic_analysis_inc.db.models import (
+    Code,
+    CodesDerived,
+    DERIVATION_AGGREGATION,
+)
 
 
 def _seed_document(conn):
@@ -39,7 +42,8 @@ class _StubCoder:
     def __init__(self, codebook, coder):
         self.coder = coder
 
-    def code_segment(self, segment_id, text):
+    def code_segment(self, segment):
+        text = segment.content
         return [
             _stub_code(f"c{self.coder.coder_id}-only", text[:10] or "q"),
             _stub_code("shared", text[:10] or "q"),
@@ -52,36 +56,66 @@ def _coder_factory():
     return f
 
 
+def _new_agg_code(segment, codebook, label, rationale, sources):
+    """Build an unattached aggregator Code with quotes + provenance wired."""
+    c = Code(
+        segment_id=segment.segment_id,
+        coder_id=SYSTEM_AGGREGATOR_ID,
+        codebook_used_id=codebook.version,
+        code=label,
+        description="",
+        rationale=rationale,
+    )
+    quotes_by_id: dict[int, object] = {}
+    for s in sources:
+        for q in s.supporting_quotes or []:
+            if q.quote_id is not None and q.quote_id not in quotes_by_id:
+                quotes_by_id[q.quote_id] = q
+    c.supporting_quotes = list(quotes_by_id.values())
+    c.derivation_sources = [
+        CodesDerived(source_code=s, derivation_type=DERIVATION_AGGREGATION)
+        for s in sources
+    ]
+    return c
+
+
 class _StubAggregator:
-    """Merges all `*-only` codes into 'unique' and retains 'shared'."""
+    """Merges all `*-only` codes into 'unique' and merges 'shared' codes."""
 
     def __init__(self):
-        self.last_assignments = None
+        self.last_segment = None
 
-    def aggregate(self, coder_codes):
-        self.last_assignments = coder_codes
-        all_unique = sorted(
-            {c.code for codes in coder_codes for c in codes if c.code.endswith("-only")}
-        )
-        # All codes belong to the same segment.
-        seg_id = str(coder_codes[0][0].segment_id)
-        sample_quote_text = (
-            coder_codes[0][0].supporting_quotes[0].text
-            if coder_codes[0][0].supporting_quotes
-            else ""
-        )
-        merged = MergedCode(
-            code="unique",
-            original_codes=all_unique,
-            quotes=[Quote(quote_id=seg_id, text=sample_quote_text)],
-            merge_rationale="combined uniques",
-        )
-        retained = MergedCode(
-            code="shared",
-            original_codes=["shared"],
-            quotes=[Quote(quote_id=seg_id, text=sample_quote_text)],
-        )
-        return AggregationResult(merged_codes=[merged], retained_codes=[retained])
+    def aggregate(self, segment, codebook):
+        self.last_segment = segment
+        inputs = [
+            c
+            for c in segment.codes
+            if c.coder_id >= 1
+            and c.codebook_used is codebook
+            and c.code != ""
+        ]
+        unique_srcs = [c for c in inputs if c.code.endswith("-only")]
+        shared_srcs = [c for c in inputs if c.code == "shared"]
+        other_srcs = [
+            c for c in inputs if c not in unique_srcs and c not in shared_srcs
+        ]
+        out: list[Code] = []
+        if unique_srcs:
+            out.append(
+                _new_agg_code(
+                    segment, codebook, "unique", "combined uniques", unique_srcs
+                )
+            )
+        if shared_srcs:
+            out.append(
+                _new_agg_code(segment, codebook, "shared", "", shared_srcs)
+            )
+        # Anything we don't recognise: emit one new aggregator code per
+        # source, preserving its label. Mirrors what a real LLM would do
+        # for codes it can't categorise.
+        for src in other_srcs:
+            out.append(_new_agg_code(segment, codebook, src.code, "", [src]))
+        return out
 
 
 def _agg_factory():
@@ -151,8 +185,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
 
     res = workers.aggregate_one(conn, agent_factory=_agg_factory())
     assert res is not None and res["ok"] is True
-    assert res["n_merged"] == 1
-    assert res["n_retained"] == 1
+    assert res["n_new"] == 2
     assert res["n_in"] == 4  # 2 coders × 2 codes
 
     rows = conn.execute(
@@ -194,15 +227,21 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
     sids = _seed_two_coders_done(conn, n=1)
 
     class _Empty:
-        def aggregate(self, assignments):
-            return AggregationResult(merged_codes=[], retained_codes=[])
+        def aggregate(self, segment, codebook):
+            # No codes from the LLM at all — the worker must still mark the
+            # segment aggregated so it doesn't get re-picked. We return
+            # the sentinel ourselves to make that explicit.
+            return [
+                Code(
+                    segment_id=segment.segment_id,
+                    coder_id=SYSTEM_AGGREGATOR_ID,
+                    codebook_used_id=codebook.version,
+                    code="",
+                )
+            ]
 
     res = workers.aggregate_one(conn, agent_factory=_Empty)
     assert res is not None and res["ok"]
-    # An empty aggregation result still records a sentinel aggregator row
-    # (empty `code`) so the segment is marked aggregated for this
-    # codebook version. The sentinel is not reviewable, so the segment is
-    # "done".
     assert store.aggregation.segment_has_aggregator_code(sids[0])
     s = store.status.derive_segment_status(sids[0])
     assert s == "done"
@@ -212,7 +251,7 @@ class _EmptyCoder:
     def __init__(self, codebook, coder):
         pass
 
-    def code_segment(self, segment_id, text):
+    def code_segment(self, segment):
         return []
 
 
@@ -239,7 +278,7 @@ def test_coder_writes_sentinel_when_no_codes(tmp_path: Path) -> None:
     assert [r["code"] for r in rows] == [""]
 
 
-def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
+def test_aggregator_emits_sentinel_when_all_coders_sentinel(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     store.add_coder("id-a")
     store.add_coder("id-b")
@@ -252,17 +291,11 @@ def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
         ) is not None:
             pass
 
-    called = {"n": 0}
-
-    class _ShouldNotRun:
-        def aggregate(self, coder_codes):
-            called["n"] += 1
-            return AggregationResult(merged_codes=[], retained_codes=[])
-
-    res = workers.aggregate_one(conn, agent_factory=_ShouldNotRun)
+    # Real aggregator (no stub) — all inputs are sentinels, so the agent
+    # short-circuits to its own sentinel without an LLM call.
+    res = workers.aggregate_one(conn)
     assert res is not None and res["ok"] is True
     assert res.get("empty") is True
-    assert called["n"] == 0
     # Aggregator sentinel persisted as a single empty-code row.
     n_sent = conn.execute(
         "SELECT COUNT(*) AS n FROM code "
@@ -270,7 +303,6 @@ def test_aggregator_skips_llm_when_all_coders_sentinel(tmp_path: Path) -> None:
         (sids[0],),
     ).fetchone()["n"]
     assert n_sent == 1
-    # And the segment is done.
     assert store.status.derive_segment_status(sids[0]) == "done"
 
 
@@ -490,4 +522,4 @@ def test_cli_aggregate_runs_against_stub(
     rc = cli.main(["--db", str(db), "update-codebook", "--mock-embeddings"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "merged=" in out and "retained=" in out
+    assert "out=" in out and "new=" in out

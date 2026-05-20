@@ -562,7 +562,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
         if res["ok"]:
             print(
                 f"[aggregate] {res['segment_id']} in={res['n_in']} "
-                f"merged={res['n_merged']} retained={res['n_retained']} "
+                f"out={res['n_out']} new={res['n_new']} "
                 f"({n} ok={c['done']} failed={c['failed']} "
                 f"{res['elapsed']:.1f}s)"
             )
@@ -827,46 +827,29 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
     print()
 
     print(sep)
-    print("Parsed AggregationResult")
+    print("Aggregator output — Code objects the worker would write")
     print(sep)
-    result = res["result"]
-    if result is None:
-        print("(parse failed — aggregator would fall back to retaining all codes)")
-    else:
-        print(f"merged_codes: {len(result.merged_codes)}")
-        for mc in result.merged_codes:
-            print(f"  - {mc.code}")
-            print(f"      from: {mc.original_codes}")
-            if mc.merge_rationale:
-                print(f"      why:  {mc.merge_rationale}")
-            print(f"      quotes: {len(mc.quotes)}")
-        print(f"retained_codes: {len(result.retained_codes)}")
-        for rc in result.retained_codes:
-            print(f"  - {rc.code}  ({len(rc.quotes)} quote(s))")
-
-    print()
-    print(sep)
-    print("DB preview — aggregator rows that would be written")
-    print(sep)
-    db_preview = res.get("db_preview") or []
-    if not db_preview:
-        print("(nothing would be written — empty input or parse failure)")
-    else:
-        for inp in db_preview:
-            src_labels = [c.code for c in inp.source_codes]
-            print(f"  - code: {inp.code}")
-            if inp.rationale:
-                print(f"      rationale: {inp.rationale}")
+    result = res["result"] or []
+    if not result:
+        print("(no codes — empty input or parse failure)")
+    for c in result:
+        kind = "retained" if c.code_id is not None else "new"
+        src_labels = [e.source_code.code for e in (c.derivation_sources or [])]
+        print(f"  - [{kind}] {c.code!r} (obj_id={id(c)})")
+        if c.rationale:
+            print(f"      rationale: {c.rationale}")
+        if src_labels:
             print(
                 f"      source codes: {src_labels} "
-                f"(ids={[c.code_id for c in inp.source_codes]})"
+                f"(ids={[e.source_code.code_id for e in c.derivation_sources or []]})"
             )
-            print(f"      quotes ({len(inp.quote_texts)}):")
-            for qt in inp.quote_texts:
-                qts = qt.replace("\n", " ").strip()
-                if len(qts) > 200:
-                    qts = qts[:197] + "..."
-                print(f"          \"{qts}\"")
+        quotes = list(c.supporting_quotes or [])
+        print(f"      quotes ({len(quotes)}):")
+        for q in quotes:
+            qts = (q.text or "").replace("\n", " ").strip()
+            if len(qts) > 200:
+                qts = qts[:197] + "..."
+            print(f"          [quote_id={q.quote_id} obj_id={id(q)}] \"{qts}\"")
 
     print()
     print(f"[test-aggregate] segment={res['segment_id']} no DB writes")

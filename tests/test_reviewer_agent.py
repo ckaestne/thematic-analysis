@@ -6,8 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from thematic_analysis.agents import (
-    AggregationResult,
-    MergedCode,
     ReviewDecision,
     ReviewerAgent,
     ReviewerConfig,
@@ -15,6 +13,7 @@ from thematic_analysis.agents import (
 )
 from thematic_analysis.codebook import Codebook, Quote
 from thematic_analysis.research_context import ResearchContext
+from thematic_analysis_inc.db.models import Code as DBCode, Quote as DBQuote
 
 
 class TestReviewerConfig:
@@ -339,25 +338,27 @@ class TestReviewerAgent:
         assert len(agent_with_codebook.codebook) == initial_count
 
     def test_process_aggregation_result(self, agent: ReviewerAgent):
-        """Test processing aggregation result."""
-        agg_result = AggregationResult(
-            merged_codes=[
-                MergedCode(
-                    code="merged code",
-                    original_codes=["a", "b"],
-                    quotes=[Quote("q1", "text1")],
-                )
-            ],
-            retained_codes=[
-                MergedCode(
-                    code="retained code",
-                    original_codes=["c"],
-                    quotes=[Quote("q2", "text2")],
-                )
-            ],
+        """Test processing a list of aggregator Codes."""
+        merged = DBCode(
+            segment_id=1,
+            coder_id=0,
+            codebook_used_id=1,
+            code="merged code",
+            description="",
+            rationale="",
         )
+        merged.supporting_quotes = [DBQuote(quote_id=1, segment_id=1, text="text1")]
+        retained = DBCode(
+            segment_id=1,
+            coder_id=0,
+            codebook_used_id=1,
+            code="retained code",
+            description="",
+            rationale="",
+        )
+        retained.supporting_quotes = [DBQuote(quote_id=2, segment_id=1, text="text2")]
 
-        results = agent.process_aggregation_result(agg_result)
+        results = agent.process_aggregation_result([merged, retained])
 
         assert len(results) == 2
         assert len(agent.codebook) == 2

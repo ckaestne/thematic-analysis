@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from thematic_analysis.agents.aggregator import AggregationResult
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_response_json
 from thematic_analysis.codebook import Codebook, CodeEntry, Quote
@@ -14,6 +13,7 @@ from thematic_analysis.prompts import join_system_prompt_sections
 
 if TYPE_CHECKING:
     from thematic_analysis.research_context import ResearchContext
+    from thematic_analysis_inc.db.models import Code as DBCode
 
 
 class ReviewDecision(Enum):
@@ -316,23 +316,16 @@ class ReviewerAgent(BaseAgent):
         # SKIP decision: do nothing
 
     def process_aggregation_result(
-        self, result: AggregationResult
+        self, codes: list["DBCode"]
     ) -> list[ReviewResult]:
-        """Process codes from an aggregation result.
-
-        Args:
-            result: Aggregation result to process.
-
-        Returns:
-            List of review results.
-        """
+        """Review each aggregator code against the codebook."""
         review_results = []
-
-        for merged_code in result.all_codes():
-            review_result = self.review_code(merged_code.code, merged_code.quotes)
+        for code in codes:
+            review_result = self.review_code(
+                code.code, list(code.supporting_quotes or [])
+            )
             self.apply_review(review_result)
             review_results.append(review_result)
-
         return review_results
 
     def get_codebook_json(self) -> str:

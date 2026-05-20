@@ -115,7 +115,6 @@ async def _run_coder_for_segment(
     if seg is None:
         raise ValueError(f"unknown segment_id: {segment_id}")
 
-    text = seg.content
     codebook = _get_codebook(version, use_mock_embeddings)
     factory = agent_factory or default_coder_factory
     agent = factory(codebook, coder)
@@ -123,9 +122,9 @@ async def _run_coder_for_segment(
 
     t0 = time.monotonic()
     if hasattr(agent, "code_segment_async"):
-        codes = await agent.code_segment_async(str(segment_id), text)
+        codes = await agent.code_segment_async(seg)
     else:
-        codes = agent.code_segment(str(segment_id), text)
+        codes = agent.code_segment(seg)
 
     res: dict[str, Any] = {
         "ok": True,
@@ -319,13 +318,6 @@ def default_aggregator_factory() -> CodeAggregatorAgent:
     return CodeAggregatorAgent(config=AggregatorConfig())
 
 
-def _grouped_coder_codes(
-    coder_codes: dict[int, list[Code]],
-) -> list[list[Code]]:
-    """Return the per-coder code lists in coder_id order."""
-    return [codes for _cid, codes in sorted(coder_codes.items())]
-
-
 def _do_aggregate(
     seg: Any,
     codebook_version: int,
@@ -333,100 +325,91 @@ def _do_aggregate(
     agent_factory: AggregatorFactory | None = None,
 ) -> dict:
     """Core aggregation logic for one (segment, codebook_version) pair."""
-    segment_id = seg.segment_id
+    from sqlalchemy.orm import selectinload
 
-    coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=codebook_version
+    from thematic_analysis_inc.db.connection import session as _session
+    from thematic_analysis_inc.db.models import (
+        Codebook as CodebookModel,
+        Segment as SegmentModel,
+        SENTINEL_CODE_LABEL,
     )
-    # Drop coder sentinel rows — they mean "this coder produced nothing"
-    # and must not be treated as real input codes for the aggregator. A
-    # coder whose only row is a sentinel is dropped from the input map
-    # entirely, so the `not coder_codes` branch below short-circuits to
-    # an aggregator sentinel without calling the LLM.
-    coder_codes = {
-        cid: [c for c in codes if not is_sentinel_code(c)]
-        for cid, codes in coder_codes.items()
-    }
-    coder_codes = {cid: codes for cid, codes in coder_codes.items() if codes}
-    code_map: dict[tuple[int, str], Code] = {}
-    for cid, codes in coder_codes.items():
-        for c in codes:
-            code_map[(cid, c.code)] = c
+    from sqlmodel import select
 
-    n_in = sum(len(v) for v in coder_codes.values())
+    segment_id = seg.segment_id
+    t0 = time.monotonic()
     try:
-        if db_aggregation.segment_has_aggregator_code(
-            segment_id, codebook_version=codebook_version
-        ):
-            return {
-                "ok": False,
-                "segment_id": segment_id,
-                "codebook_version": codebook_version,
-                "error": "aggregator code already exists (race)",
-                "skipped": True,
-            }
-
-        t0 = time.monotonic()
-        if not coder_codes:
-            # No coder codes at this version: mark the segment aggregated
-            # with the empty-aggregation sentinel so we don't re-pick it.
-            db_aggregation.record_aggregation_result(
-                seg, [], codebook_version=codebook_version
-            )
-            return {
-                "ok": True,
-                "segment_id": segment_id,
-                "codebook_version": codebook_version,
-                "n_in": 0,
-                "n_merged": 0,
-                "n_retained": 0,
-                "elapsed": time.monotonic() - t0,
-                "empty": True,
-            }
-
-        factory = agent_factory or default_aggregator_factory
-        agent = factory()
-        result = agent.aggregate(_grouped_coder_codes(coder_codes))
-
-        merged: list[db_aggregation.AggregatorMergeInput] = []
-        for mc in result.all_codes():
-            sources: list[Code] = []
-            seen: set[int] = set()
-            for orig in mc.original_codes:
-                for (cid, ctext), c in code_map.items():
-                    if ctext == orig and c.code_id not in seen:
-                        sources.append(c)
-                        seen.add(c.code_id)
-            merged.append(
-                db_aggregation.AggregatorMergeInput(
-                    code=mc.code,
-                    description="",
-                    rationale=mc.merge_rationale or "",
-                    quote_texts=[q.text for q in mc.quotes],
-                    source_codes=sources,
+        with _session() as s:
+            attached = s.exec(
+                select(SegmentModel)
+                .options(
+                    selectinload(SegmentModel.codes)  # type: ignore[arg-type]
+                    .selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
                 )
+                .where(SegmentModel.segment_id == segment_id)
+            ).one()
+            codebook = s.get(CodebookModel, codebook_version)
+            if codebook is None:
+                return {
+                    "ok": False,
+                    "segment_id": segment_id,
+                    "codebook_version": codebook_version,
+                    "error": f"codebook version {codebook_version} not found",
+                }
+
+            already = s.exec(
+                select(Code.code_id).where(
+                    Code.segment_id == segment_id,
+                    Code.coder_id == 0,
+                    Code.codebook_used_id == codebook_version,
+                ).limit(1)
+            ).first()
+            if already is not None:
+                return {
+                    "ok": False,
+                    "segment_id": segment_id,
+                    "codebook_version": codebook_version,
+                    "error": "aggregator code already exists (race)",
+                    "skipped": True,
+                }
+
+            n_in = sum(
+                1
+                for c in attached.codes
+                if c.coder_id >= 1
+                and c.codebook_used_id == codebook_version
+                and not is_sentinel_code(c)
             )
 
-        db_aggregation.record_aggregation_result(
-            seg, merged, codebook_version=codebook_version
-        )
+            factory = agent_factory or default_aggregator_factory
+            agent = factory()
+            result_codes = agent.aggregate(attached, codebook)
+
+            n_new = 0
+            for c in result_codes:
+                if c.code_id is None:
+                    s.add(c)
+                    n_new += 1
+            s.commit()
+            empty = (
+                len(result_codes) == 1
+                and result_codes[0].code == SENTINEL_CODE_LABEL
+            )
         return {
             "ok": True,
             "segment_id": segment_id,
             "codebook_version": codebook_version,
             "n_in": n_in,
-            "n_merged": len(result.merged_codes),
-            "n_retained": len(result.retained_codes),
+            "n_out": len(result_codes),
+            "n_new": n_new,
             "elapsed": time.monotonic() - t0,
-            "empty": not merged,
+            "empty": empty,
         }
     except Exception as exc:
-        msg = f"{type(exc).__name__}: {exc}"
         return {
             "ok": False,
             "segment_id": segment_id,
             "codebook_version": codebook_version,
-            "error": msg,
+            "error": f"{type(exc).__name__}: {exc}",
         }
 
 
@@ -479,67 +462,66 @@ def aggregate_segment(
 
 def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
     """Run the aggregator on one segment without writing anything. Returns
-    a dict with the segment, per-coder input codes, the parsed result, a
-    preview of the DB rows that would be written, and the agent itself
+    a dict with the segment, the result Code list, and the agent itself
     (so callers can inspect ``last_system_prompt`` / ``last_user_prompt``
     / ``last_raw_response`` / ``last_elapsed`` / ``last_attempts``)."""
-    seg = db.get_segment(segment_id)
-    if seg is None:
-        raise ValueError(f"unknown segment_id: {segment_id}")
+    from sqlalchemy.orm import selectinload
+    from sqlmodel import select
+
+    from thematic_analysis_inc.db.connection import session as _session
+    from thematic_analysis_inc.db.models import (
+        Codebook as CodebookModel,
+        Segment as SegmentModel,
+    )
 
     latest = db_codebook.latest_codebook()
     if latest is None:
         raise RuntimeError("no codebook revision exists; run init first")
 
-    target_cb = latest.version
-    coder_codes = db_coding.load_segment_coder_codes(
-        seg, codebook_version=target_cb
-    )
-    grouped = _grouped_coder_codes(coder_codes)
-
     agent = CodeAggregatorAgent(config=AggregatorConfig())
-    result = None
+    result: list[Code] = []
+    coder_codes: list[Code] = []
+    segment_text = ""
     llm_error: str | None = None
-    try:
-        result = agent.aggregate(grouped)
-    except Exception as exc:
-        llm_error = f"{type(exc).__name__}: {exc}"
-
-    # Map the agent's text-only result back onto concrete `Code` rows so
-    # we can show exactly what `record_aggregation_result` would write.
-    code_map: dict[tuple[int, str], Code] = {}
-    for cid, codes in coder_codes.items():
-        for c in codes:
-            code_map[(cid, c.code)] = c
-    db_preview: list[db_aggregation.AggregatorMergeInput] = []
-    if result is not None:
-        for mc in result.all_codes():
-            sources: list[Code] = []
-            seen: set[int] = set()
-            for orig in mc.original_codes:
-                for (cid, ctext), c in code_map.items():
-                    if ctext == orig and c.code_id not in seen:
-                        sources.append(c)
-                        seen.add(c.code_id)
-            db_preview.append(
-                db_aggregation.AggregatorMergeInput(
-                    code=mc.code,
-                    description="",
-                    rationale=mc.merge_rationale or "",
-                    quote_texts=[q.text for q in mc.quotes],
-                    source_codes=sources,
-                )
+    with _session() as s:
+        attached = s.exec(
+            select(SegmentModel)
+            .options(
+                selectinload(SegmentModel.codes)  # type: ignore[arg-type]
+                .selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
             )
+            .where(SegmentModel.segment_id == segment_id)
+        ).first()
+        if attached is None:
+            raise ValueError(f"unknown segment_id: {segment_id}")
+        codebook = s.get(CodebookModel, latest.version)
+        segment_text = attached.content
+        coder_codes = [
+            c
+            for c in attached.codes
+            if c.coder_id >= 1
+            and c.codebook_used_id == latest.version
+            and not is_sentinel_code(c)
+        ]
+        try:
+            result = agent.aggregate(attached, codebook)
+        except Exception as exc:
+            llm_error = f"{type(exc).__name__}: {exc}"
+        # Materialise relationship state before the session closes so
+        # the CLI can render quotes/sources after we return.
+        for c in result:
+            _ = list(c.supporting_quotes or [])
+            for edge in c.derivation_sources or []:
+                _ = edge.source_code
 
     return {
         "segment_id": segment_id,
-        "segment_text": seg.content,
+        "segment_text": segment_text,
         "codebook_version": latest.version,
         "coder_codes": coder_codes,
         "agent": agent,
         "result": result,
         "llm_error": llm_error,
-        "db_preview": db_preview,
     }
 
 

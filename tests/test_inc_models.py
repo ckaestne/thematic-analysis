@@ -250,10 +250,6 @@ def test_aggregator_code_exposes_quotes_and_derivation_edges(
         DERIVATION_AGGREGATION
     ]
     assert agg.derivation_sources[0].source_code.code == "resistance"
-    assert [
-        (d.derivation_type, d.decision) for d in agg.derivation_targets
-    ] == [(DERIVATION_REVIEW, DECISION_ADD)]
-    assert agg.derivation_targets[0].new_code.code == "resistance"
 
 
 def test_codebook_lists_member_codes(session: Session) -> None:

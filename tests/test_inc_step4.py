@@ -5,10 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from thematic_analysis.agents.reviewer import ReviewDecision, ReviewResult
-from thematic_analysis.codebook import Quote
 
 from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
+from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
+from thematic_analysis_inc.db.models import (
+    Code,
+    CodesDerived,
+    DERIVATION_AGGREGATION,
+)
 
 
 def _get_codebook_codes(version: int):
@@ -48,7 +53,8 @@ class _StubCoder:
     def __init__(self, codebook, coder):
         pass
 
-    def code_segment(self, segment_id, text):
+    def code_segment(self, segment):
+        text = segment.content
         return [
             _stub_code("alpha", text[:10] or "q"),
             _stub_code("beta", text[:10] or "q"),
@@ -56,36 +62,41 @@ class _StubCoder:
 
 
 class _StubAggregator:
-    """Returns two retained codes: 'alpha' and 'beta'."""
+    """Emits one aggregator Code per input label ('alpha', 'beta')."""
 
-    def __init__(self):
-        pass
-
-    def aggregate(self, coder_codes):
-        from thematic_analysis.agents.aggregator import (
-            AggregationResult,
-            MergedCode,
-        )
-
-        seg_id = str(coder_codes[0][0].segment_id)
-        seg_text = (
-            coder_codes[0][0].supporting_quotes[0].text
-            if coder_codes[0][0].supporting_quotes
-            else ""
-        )
-        return AggregationResult(
-            merged_codes=[],
-            retained_codes=[
-                MergedCode(
-                    code="alpha", original_codes=["alpha"],
-                    quotes=[Quote(quote_id=seg_id, text=seg_text)],
-                ),
-                MergedCode(
-                    code="beta", original_codes=["beta"],
-                    quotes=[Quote(quote_id=seg_id, text=seg_text)],
-                ),
-            ],
-        )
+    def aggregate(self, segment, codebook):
+        inputs = [
+            c
+            for c in segment.codes
+            if c.coder_id >= 1
+            and c.codebook_used is codebook
+            and c.code != ""
+        ]
+        out: list[Code] = []
+        by_label: dict[str, list[Code]] = {}
+        for c in inputs:
+            by_label.setdefault(c.code, []).append(c)
+        for label, sources in by_label.items():
+            new = Code(
+                segment_id=segment.segment_id,
+                coder_id=SYSTEM_AGGREGATOR_ID,
+                codebook_used_id=codebook.version,
+                code=label,
+                description="",
+                rationale="",
+            )
+            quotes_by_id = {}
+            for s in sources:
+                for q in s.supporting_quotes or []:
+                    if q.quote_id is not None and q.quote_id not in quotes_by_id:
+                        quotes_by_id[q.quote_id] = q
+            new.supporting_quotes = list(quotes_by_id.values())
+            new.derivation_sources = [
+                CodesDerived(source_code=s, derivation_type=DERIVATION_AGGREGATION)
+                for s in sources
+            ]
+            out.append(new)
+        return out
 
 
 def _seed_ready_to_review(conn, n: int = 1) -> list[int]:

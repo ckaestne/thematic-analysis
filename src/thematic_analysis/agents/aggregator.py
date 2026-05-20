@@ -6,8 +6,16 @@ from dataclasses import dataclass
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_response_json
-from thematic_analysis.codebook import Quote
-from thematic_analysis_inc.db.models import Code as DBCode
+from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
+from thematic_analysis_inc.db.models import (
+    DERIVATION_AGGREGATION,
+    SENTINEL_CODE_LABEL,
+    Code,
+    Codebook,
+    CodesDerived,
+    Segment,
+    is_sentinel_code,
+)
 
 
 @dataclass
@@ -15,58 +23,6 @@ class AggregatorConfig(AgentConfig):
     """Configuration for the Code Aggregator agent."""
 
     max_quotes_per_code: int = 10
-
-
-@dataclass
-class MergedCode:
-    """A code that may combine multiple similar codes."""
-
-    code: str
-    original_codes: list[str]
-    quotes: list[Quote]
-    merge_rationale: str = ""
-
-
-@dataclass
-class AggregationResult:
-    """Result of aggregating codes from multiple coders."""
-
-    merged_codes: list[MergedCode]
-    retained_codes: list[MergedCode]  # Codes kept separate (different concepts)
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary format."""
-        return {
-            "merged_codes": [
-                {
-                    "code": mc.code,
-                    "original_codes": mc.original_codes,
-                    "quotes": [
-                        {"quote_id": q.quote_id, "text": q.text} for q in mc.quotes
-                    ],
-                    "merge_rationale": mc.merge_rationale,
-                }
-                for mc in self.merged_codes
-            ],
-            "retained_codes": [
-                {
-                    "code": rc.code,
-                    "original_codes": rc.original_codes,
-                    "quotes": [
-                        {"quote_id": q.quote_id, "text": q.text} for q in rc.quotes
-                    ],
-                }
-                for rc in self.retained_codes
-            ],
-        }
-
-    def to_json(self) -> str:
-        """Convert to structured JSON format."""
-        return json.dumps(self.to_dict(), indent=2)
-
-    def all_codes(self) -> list[MergedCode]:
-        """Return all codes (merged and retained)."""
-        return self.merged_codes + self.retained_codes
 
 
 AGGREGATOR_SYSTEM_PROMPT = """\
@@ -148,16 +104,17 @@ class CodeAggregatorAgent(BaseAgent):
 
     The Code Aggregator takes code assignments from multiple coder agents,
     identifies codes with similar meanings, merges them when appropriate,
-    and organizes the results with top-K most relevant quotes.
+    and emits new Code objects (with quotes and provenance edges wired
+    up in memory) for the worker to persist.
     """
 
     def __init__(self, config: AggregatorConfig | None = None):
         super().__init__(config or AggregatorConfig())
         self.aggregator_config: AggregatorConfig = self.config  # type: ignore
-        # Debug fields populated by the most recent `aggregate()` call so
-        # callers (e.g. the `test-aggregate` CLI) can inspect what the
-        # agent did without re-implementing prompt building or the LLM
-        # call.
+        # Debug fields populated by the most recent per-codebook
+        # aggregation so callers (e.g. the `test-aggregate` CLI) can
+        # inspect what the agent did without re-implementing prompt
+        # building or the LLM call.
         self.last_payload: dict | None = None
         self.last_system_prompt: str = ""
         self.last_user_prompt: str = ""
@@ -168,43 +125,109 @@ class CodeAggregatorAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         return AGGREGATOR_SYSTEM_PROMPT
 
-    def _build_prompt_payload(
-        self, coder_codes: list[list[DBCode]]
-    ) -> tuple[dict, dict[int, DBCode]]:
-        """Assign sequential ids and build the JSON payload for the LLM.
+    def aggregate(
+        self,
+        segment: Segment,
+        codebook: Codebook | None = None,
+    ) -> list[Code]:
+        """Aggregate codes for one segment.
 
-        Returns:
-            payload: dict to be json-dumped as the user message.
-            code_index: assigned code id -> DBCode row.
+        With ``codebook``, aggregate only that codebook revision. Without,
+        group the segment's codes by ``codebook_used`` and aggregate each
+        revision in turn (concatenated result).
         """
-        code_index: dict[int, DBCode] = {}
+        if codebook is not None:
+            return self._aggregate_one(segment, codebook)
 
-        def _quote_texts(code: DBCode) -> list[str]:
-            return [sq.text for sq in (code.supporting_quotes or [])]
+        # SQLModel disables __hash__, so a set over Codebook objects raises
+        # TypeError; key the dedup on the FK int instead (one entry per
+        # codebook revision, identity preserved via the value).
+        codebooks = {c.codebook_used_id: c.codebook_used for c in segment.codes}
+        return [
+            resulting_code
+            for codebook in codebooks.values()
+            for resulting_code in self._aggregate_one(segment, codebook)
+        ]
 
-        def _code_payload(code: DBCode) -> dict:
+    def _aggregate_one(
+        self, segment: Segment, codebook: Codebook
+    ) -> list[Code]:
+        inputs = [
+            c
+            for c in segment.codes
+            if c.coder_id >= 1 and c.codebook_used is codebook
+        ]
+        if not inputs:
+            return []
+        if all(is_sentinel_code(c) for c in inputs):
+            return [self._sentinel(segment, codebook)]
+
+        grouped: dict[int, list[Code]] = {}
+        for c in inputs:
+            if is_sentinel_code(c):
+                continue
+            grouped.setdefault(c.coder_id, []).append(c)
+        coder_codes = [grouped[k] for k in sorted(grouped)]
+
+        # Single-coder short-circuit: there is nothing to merge across
+        # coders, so copy each code over under the aggregator's coder_id
+        # without an LLM call. Quotes are reused; one provenance edge
+        # links each new code back to its source.
+        if len(coder_codes) == 1:
+            self.last_payload = None
+            self.last_user_prompt = ""
+            self.last_raw_response = ""
+            self.last_elapsed = 0.0
+            self.last_attempts = 0
+            return [
+                self._copy_as_aggregator(segment, codebook, src)
+                for src in coder_codes[0]
+            ]
+
+        payload, code_index = self._build_prompt_payload(coder_codes)
+        system_prompt = self.get_system_prompt()
+        user_prompt = json.dumps(payload, indent=2)
+        self.last_payload = payload
+        self.last_system_prompt = system_prompt
+        self.last_user_prompt = user_prompt
+
+        data, response, elapsed, attempts = self._call_with_retries(
+            system_prompt, user_prompt, code_index
+        )
+        self.last_raw_response = response
+        self.last_elapsed = elapsed
+        self.last_attempts = attempts
+
+        if data is None:
+            # Parse failure: fall back to retaining every input code as-is.
+            return [c for codes in coder_codes for c in codes]
+
+        return self._build_codes(segment, codebook, data, code_index)
+
+    def _build_prompt_payload(
+        self, coder_codes: list[list[Code]]
+    ) -> tuple[dict, dict[int, Code]]:
+        code_index: dict[int, Code] = {}
+
+        def _code_payload(code: Code) -> dict:
             cid = len(code_index) + 1
             code_index[cid] = code
-            return {"id": cid, "label": code.code, "quotes": _quote_texts(code)}
+            quotes = [q.text for q in (code.supporting_quotes or [])]
+            return {"id": cid, "label": code.code, "quotes": quotes}
 
         coders_payload = [
             {
                 "coder_id": codes[0].coder_id,
-                "codes": [_code_payload(code) for code in codes],
+                "codes": [_code_payload(c) for c in codes],
             }
             for codes in coder_codes
             if codes
         ]
-
-        payload = {"coders": coders_payload}
-        return payload, code_index
+        return {"coders": coders_payload}, code_index
 
     def _coverage_errors(
-        self, data: dict, code_index: dict[int, DBCode]
+        self, data: dict, code_index: dict[int, Code]
     ) -> list[str]:
-        """Check that every input code id appears in exactly one of
-        ``merge_groups[*].original_code_ids`` or ``retain_code_ids``.
-        Returns a list of human-readable error strings; empty if valid."""
         seen_counts: dict[int, int] = {}
         unknown: list[int] = []
 
@@ -234,104 +257,25 @@ class CodeAggregatorAgent(BaseAgent):
                 f"missing code ids (not assigned to any merge or retain): {missing}"
             )
         if duplicates:
-            errors.append(
-                f"code ids assigned more than once: {duplicates}"
-            )
+            errors.append(f"code ids assigned more than once: {duplicates}")
         if unknown:
-            errors.append(
-                f"unknown code ids (not in the input): {unknown}"
-            )
+            errors.append(f"unknown code ids (not in the input): {unknown}")
         return errors
 
-    def _parse_response(
+    def _call_with_retries(
         self,
-        response: str,
-        code_index: dict[int, DBCode],
-    ) -> AggregationResult | None:
-        """Parse the LLM response into an AggregationResult."""
-        data = extract_response_json(response)
-        if data is None:
-            return None
-
-        max_quotes = self.aggregator_config.max_quotes_per_code
-        merged_codes: list[MergedCode] = []
-        retained_codes: list[MergedCode] = []
-        consumed_ids: set[int] = set()
-
-        for group in data.get("merge_groups", []):
-            label = group.get("merged_code", "")
-            orig_ids = [int(i) for i in group.get("original_code_ids", [])]
-            rationale = group.get("rationale", "")
-
-            original_codes: list[str] = []
-            quotes: list[Quote] = []
-            for cid in orig_ids:
-                src = code_index.get(cid)
-                if src is None:
-                    continue
-                consumed_ids.add(cid)
-                original_codes.append(src.code)
-                quotes.extend(src.supporting_quotes or [])
-
-            if not original_codes:
-                continue
-            merged_codes.append(
-                MergedCode(
-                    code=label,
-                    original_codes=original_codes,
-                    quotes=quotes[:max_quotes],
-                    merge_rationale=rationale,
-                )
-            )
-
-        for cid in data.get("retain_code_ids", []):
-            cid = int(cid)
-            src = code_index.get(cid)
-            if src is None or cid in consumed_ids:
-                continue
-            consumed_ids.add(cid)
-            quotes = (src.supporting_quotes or [])[:max_quotes]
-            retained_codes.append(
-                MergedCode(
-                    code=src.code,
-                    original_codes=[src.code],
-                    quotes=quotes,
-                )
-            )
-
-        return AggregationResult(
-            merged_codes=merged_codes,
-            retained_codes=retained_codes,
-        )
-
-    def aggregate(self, coder_codes: list[list[DBCode]]) -> AggregationResult:
-        """Aggregate codes from multiple coders for one segment.
-
-        Args:
-            coder_codes: One inner list of ``Code`` rows per coder, all for
-                the same segment. Each ``Code`` is expected to carry its
-                ``supporting_quotes``.
-        """
-        payload, code_index = self._build_prompt_payload(coder_codes)
-
-        system_prompt = self.get_system_prompt()
-        user_prompt = json.dumps(payload, indent=2) if code_index else ""
-        self.last_payload = payload
-        self.last_system_prompt = system_prompt
-        self.last_user_prompt = user_prompt
-        self.last_raw_response = ""
-        self.last_elapsed = 0.0
-        self.last_attempts = 0
-
-        if not code_index:
-            return AggregationResult(merged_codes=[], retained_codes=[])
-
+        system_prompt: str,
+        user_prompt: str,
+        code_index: dict[int, Code],
+    ) -> tuple[dict | None, str, float, int]:
         max_attempts = 3
         current_prompt = user_prompt
         response = ""
+        data: dict | None = None
         t0 = time.monotonic()
+        attempts = 0
         for attempt in range(max_attempts):
-            self.last_attempts = attempt + 1
+            attempts = attempt + 1
             response = self._call_llm(
                 system_prompt,
                 current_prompt,
@@ -339,8 +283,6 @@ class CodeAggregatorAgent(BaseAgent):
             )
             data = extract_response_json(response)
             if data is None:
-                # parse failure is handled by _parse_response below; no
-                # point asking for a coverage fix when we can't even parse.
                 break
             errors = self._coverage_errors(data, code_index)
             if not errors:
@@ -358,21 +300,93 @@ class CodeAggregatorAgent(BaseAgent):
                 f"Return a corrected JSON object that fixes these issues. "
                 f"Use only the code ids from the original input."
             )
-        self.last_elapsed = time.monotonic() - t0
-        self.last_raw_response = response
+        return data, response, time.monotonic() - t0, attempts
 
-        result = self._parse_response(response, code_index)
+    def _build_codes(
+        self,
+        segment: Segment,
+        codebook: Codebook,
+        data: dict,
+        code_index: dict[int, Code],
+    ) -> list[Code]:
+        max_quotes = self.aggregator_config.max_quotes_per_code
+        out: list[Code] = []
+        consumed: set[int] = set()
 
-        if result is None:
-            max_quotes = self.aggregator_config.max_quotes_per_code
-            retained = [
-                MergedCode(
-                    code=c.code,
-                    original_codes=[c.code],
-                    quotes=(c.supporting_quotes or [])[:max_quotes],
+        for group in data.get("merge_groups", []) or []:
+            label = group.get("merged_code", "")
+            orig_ids = [int(i) for i in group.get("original_code_ids", [])]
+            rationale = group.get("rationale", "")
+
+            sources: list[Code] = []
+            quotes: list = []
+            seen_qids: set[int] = set()
+            for cid in orig_ids:
+                src = code_index.get(cid)
+                if src is None or cid in consumed:
+                    continue
+                consumed.add(cid)
+                sources.append(src)
+                for q in src.supporting_quotes or []:
+                    if q.quote_id is None or q.quote_id in seen_qids:
+                        continue
+                    seen_qids.add(q.quote_id)
+                    quotes.append(q)
+
+            if not sources:
+                continue
+            new_code = Code(
+                segment_id=segment.segment_id,
+                coder_id=SYSTEM_AGGREGATOR_ID,
+                codebook_used_id=codebook.version,
+                code=label,
+                description="",
+                rationale=rationale,
+            )
+            new_code.supporting_quotes = quotes[:max_quotes]
+            new_code.derivation_sources = [
+                CodesDerived(
+                    source_code=src,
+                    derivation_type=DERIVATION_AGGREGATION,
                 )
-                for c in code_index.values()
+                for src in sources
             ]
-            return AggregationResult(merged_codes=[], retained_codes=retained)
+            out.append(new_code)
 
-        return result
+        for raw in data.get("retain_code_ids", []) or []:
+            cid = int(raw)
+            src = code_index.get(cid)
+            if src is None or cid in consumed:
+                continue
+            consumed.add(cid)
+            out.append(src)
+
+        return out
+
+    def _sentinel(self, segment: Segment, codebook: Codebook) -> Code:
+        return Code(
+            segment_id=segment.segment_id,
+            coder_id=SYSTEM_AGGREGATOR_ID,
+            codebook_used_id=codebook.version,
+            code=SENTINEL_CODE_LABEL,
+        )
+
+    def _copy_as_aggregator(
+        self, segment: Segment, codebook: Codebook, src: Code
+    ) -> Code:
+        """Re-stamp ``src`` as an aggregator code with one provenance edge."""
+        new_code = Code(
+            segment_id=segment.segment_id,
+            coder_id=SYSTEM_AGGREGATOR_ID,
+            codebook_used_id=codebook.version,
+            code=src.code,
+            description=src.description,
+            rationale=src.rationale,
+        )
+        new_code.supporting_quotes = list(src.supporting_quotes or [])[
+            : self.aggregator_config.max_quotes_per_code
+        ]
+        new_code.derivation_sources = [
+            CodesDerived(source_code=src, derivation_type=DERIVATION_AGGREGATION)
+        ]
+        return new_code

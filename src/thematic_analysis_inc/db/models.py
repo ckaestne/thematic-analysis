@@ -255,24 +255,16 @@ class Code(SQLModel, table=True):
         sa_relationship_kwargs={"secondary": "codes_supporting_quotes"},
     )
 
-    # Provenance edges (codes_derived). Both directions are exposed:
-    #   derivation_sources: edges where this code is the *result* —
-    #     "what did this code derive from?"
-    #   derivation_targets: edges where this code is the *source* —
-    #     "what was derived from this code?"
+    # Inbound provenance edges (codes_derived) — "what did this code
+    # derive from?" Assignable; the worker writes a Code with its
+    # `derivation_sources` list populated and the link rows cascade in.
     derivation_sources: list["CodesDerived"] = Relationship(
+        back_populates="new_code",
         sa_relationship_kwargs={
             "primaryjoin": "Code.code_id == CodesDerived.new_code_id",
             "foreign_keys": "CodesDerived.new_code_id",
-            "viewonly": True,
-        }
-    )
-    derivation_targets: list["CodesDerived"] = Relationship(
-        sa_relationship_kwargs={
-            "primaryjoin": "Code.code_id == CodesDerived.source_code_id",
-            "foreign_keys": "CodesDerived.source_code_id",
-            "viewonly": True,
-        }
+            "cascade": "all, delete-orphan",
+        },
     )
 
 
@@ -464,14 +456,15 @@ class CodesDerived(SQLModel, table=True):
     rationale: Optional[str] = None
 
     new_code: Code = Relationship(
+        back_populates="derivation_sources",
         sa_relationship_kwargs={
             "foreign_keys": "[CodesDerived.new_code_id]",
-        }
+        },
     )
     source_code: Code = Relationship(
         sa_relationship_kwargs={
             "foreign_keys": "[CodesDerived.source_code_id]",
-        }
+        },
     )
 
     __table_args__ = (
