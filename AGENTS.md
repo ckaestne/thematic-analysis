@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Designing or modifying agents
+
+When adding a new agent role (Coder, Aggregator, Reviewer, ThemeCoder,
+ThemeAggregator, …), changing an agent's public method, or wiring an
+agent into the worker layer, follow the conventions in
+[`.claude/skills/agent-design/SKILL.md`](.claude/skills/agent-design/SKILL.md):
+agents take and return SQLModel objects directly, navigate relationships
+instead of carrying parallel data, never touch the DB, and own their
+sentinel and short-circuit cases.
+
 ## Dependency management & running
 
 This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
