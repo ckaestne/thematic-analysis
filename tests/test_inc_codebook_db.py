@@ -596,6 +596,30 @@ def test_aggregator_code_without_review_is_pending(tmp_path: Path) -> None:
     assert _get_codebook_codes(1) == []
 
 
+def test_aggregator_sentinel_skipped_by_review_queue(tmp_path: Path) -> None:
+    """Sentinel aggregator codes (empty label, meaning 'nothing to code
+    here') must not be fed to the reviewer — otherwise they propagate
+    into the codebook as empty entries."""
+    from thematic_analysis_inc.db.review import (
+        pending_review_count,
+        segment_review_remaining,
+    )
+
+    conn = _init(tmp_path)
+    seg = _seed_segment(conn)
+    _add_agg_code(conn, segment_id=seg, version=1, code="")
+
+    assert next_aggregated_code_to_review() is None
+    assert pending_review_count() == 0
+    assert segment_review_remaining(seg) == 0
+
+    real = _add_agg_code(conn, segment_id=seg, version=1, code="real")
+    nxt = next_aggregated_code_to_review()
+    assert nxt is not None and nxt.code_id == real
+    assert pending_review_count() == 1
+    assert segment_review_remaining(seg) == 1
+
+
 # ---------------------------------------------------------------------------
 # Version lineage
 # ---------------------------------------------------------------------------
