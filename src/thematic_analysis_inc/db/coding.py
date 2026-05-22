@@ -242,6 +242,9 @@ def save_codes_and_finish_assignment(
             _normalize_quote_text(q.text): q for q in existing_quotes
         }
         for c in codes:
+            # Add c before wiring relationships so back-population of
+            # Quote.codes sees c as session-resident (avoids SAWarning).
+            s.add(c)
             merged: list[Quote] = []
             for q in (c.supporting_quotes or []):
                 if q.quote_id is not None:
@@ -257,7 +260,6 @@ def save_codes_and_finish_assignment(
                     by_key[key] = q
                     merged.append(q)
             c.supporting_quotes = merged
-            s.add(c)
         a.finished_at = _utcnow()
         s.add(a)
         s.commit()

@@ -105,6 +105,9 @@ def save_reviewer_decision(code: Code) -> Code:
             "save_reviewer_decision expects a fresh Code with code_id=None"
         )
     with session() as s:
+        # Add code before wiring relationships so back-population of
+        # Quote.codes sees it as session-resident (avoids SAWarning).
+        s.add(code)
         code.supporting_quotes = [
             s.merge(q) if q.quote_id is not None else q
             for q in (code.supporting_quotes or [])
@@ -112,7 +115,6 @@ def save_reviewer_decision(code: Code) -> Code:
         for edge in code.derivation_sources or []:
             if edge.source_code is not None and edge.source_code.code_id is not None:
                 edge.source_code = s.merge(edge.source_code)
-        s.add(code)
         s.commit()
         s.refresh(code)
         _ = list(code.supporting_quotes)
