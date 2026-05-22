@@ -92,7 +92,6 @@ const PROSE_STYLE: CSSProperties = {
   letterSpacing: "0.005em",
   color: "var(--mantine-color-dark-8)",
   maxWidth: "68ch",
-  margin: "0 auto",
   WebkitFontSmoothing: "antialiased",
   MozOsxFontSmoothing: "grayscale",
   hyphens: "auto",
@@ -318,7 +317,7 @@ function HighlightedText({
                       }}
                     >
                       {labelByKey[k]}
-                    </sup>
+                    </span>
                   );
                 })}
               </span>
