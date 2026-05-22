@@ -93,6 +93,7 @@ _REQUIRES_EXISTING_DB = {
     "clear-research-context",
     "test-code",
     "test-aggregate",
+    "test-review",
 }
 
 
@@ -595,10 +596,10 @@ def _cmd_review(args: SimpleNamespace) -> int:
 
     def on_event(res: dict, c: dict) -> None:
         n = c["done"] + c["failed"]
-        v_str = f"v→{res['new_version']}" if res.get("new_version") else "skip"
+        new_label = res.get("new_code") or res.get("code")
         print(
             f"[review] {res['segment_id']} code={res['code']!r} "
-            f"decision={res['decision']} {v_str} "
+            f"decision={res['decision']} new={new_label!r} "
             f"({n} ok={c['done']} failed={c['failed']} "
             f"{res['elapsed']:.1f}s)"
         )
@@ -620,7 +621,17 @@ def _cmd_update_codebook(args: SimpleNamespace) -> int:
     rc = _cmd_aggregate(args)
     if rc:
         return rc
-    return _cmd_review(args)
+    rc = _cmd_review(args)
+    if rc:
+        return rc
+    # Materialize one new Codebook revision capturing all reviewer
+    # decisions written above (no-op if nothing changed).
+    new_version = workers.finalize_codebook()
+    if new_version is None:
+        print("[update-codebook] codebook unchanged")
+    else:
+        print(f"[update-codebook] created codebook v{new_version}")
+    return 0
 
 
 def _cmd_status(args: SimpleNamespace) -> int:
@@ -853,6 +864,127 @@ def _cmd_test_aggregate(args: SimpleNamespace) -> int:
 
     print()
     print(f"[test-aggregate] segment={res['segment_id']} no DB writes")
+    return 0
+
+
+def _cmd_test_review(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    try:
+        res = workers.test_review_aggregated_code(args.code_id)
+    except (ValueError, RuntimeError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    sep = "─" * 72
+    agent = res["agent"]
+    result = res["result"]
+    target = res["target"]
+
+    print(sep)
+    print(
+        f"Input  code_id={res['code_id']} segment_id={res['segment_id']} "
+        f"codebook=v{res['codebook_version']}"
+    )
+    print(sep)
+    print(f"  code: {res['code']!r}")
+    target_quotes = list(target.supporting_quotes or [])
+    print(f"  quotes ({len(target_quotes)}):")
+    for q in target_quotes:
+        qt = (q.text or "").replace("\n", " ").strip()
+        if len(qt) > 200:
+            qt = qt[:197] + "..."
+        print(f"      [quote_id={q.quote_id}] \"{qt}\"")
+    print()
+
+    print(sep)
+    print(
+        f"Similar codes from codebook (top-k={agent.reviewer_config.top_k_similar})"
+    )
+    print(sep)
+    if not agent.last_similar:
+        print("(none — codebook empty or no embeddings)")
+    for entry, score in agent.last_similar:
+        marker = ""
+        if score >= agent.reviewer_config.merge_threshold:
+            marker = "  ← auto-merge"
+        elif score >= agent.reviewer_config.similarity_threshold:
+            marker = "  ← above similarity threshold"
+        print(f"  - {entry.code!r}  similarity={score:.3f}{marker}")
+        for q in (entry.supporting_quotes or [])[:3]:
+            qt = (q.text or "").replace("\n", " ").strip()
+            if len(qt) > 160:
+                qt = qt[:157] + "..."
+            print(f"      [quote_id={q.quote_id}] \"{qt}\"")
+    print()
+
+    if agent.last_shortcut == "auto_merge":
+        print(sep)
+        print("Shortcut: top similarity ≥ merge_threshold → auto-merge, no LLM call")
+        print(sep)
+        print()
+    elif agent.last_shortcut == "no_similar":
+        print(sep)
+        print(
+            "Shortcut: nothing above similarity_threshold → add_new, no LLM call"
+        )
+        print(sep)
+        print()
+    else:
+        print(sep)
+        print("System prompt")
+        print(sep)
+        print(agent.last_system_prompt)
+        print()
+
+        print(sep)
+        print("User prompt (JSON payload)")
+        print(sep)
+        print(agent.last_user_prompt or "(empty)")
+        print()
+
+        if res["llm_error"]:
+            print(sep)
+            print(f"LLM error: {res['llm_error']}", file=sys.stderr)
+            print(sep)
+            return 1
+
+        print(sep)
+        print(f"Raw LLM response  ({agent.last_elapsed:.1f}s)")
+        print(sep)
+        print(agent.last_raw_response or "(empty)")
+        print()
+
+    print(sep)
+    print("Reviewer decision (would-be new Code)")
+    print(sep)
+    if result is None:
+        print("(no result — see LLM error above)")
+    else:
+        edges = list(result.derivation_sources or [])
+        decision = edges[0].decision if edges else "?"
+        print(f"  decision:    {decision}")
+        print(f"  new label:   {result.code!r}")
+        print(f"  rationale:   {result.rationale}")
+        sources = [
+            (e.source_code.code_id, e.source_code.code, e.source_code.coder_id)
+            for e in edges
+            if e.source_code is not None
+        ]
+        print(f"  provenance ({len(sources)} edges):")
+        for cid, label, coder in sources:
+            kind = {0: "aggregator", -1: "previous reviewer"}.get(
+                coder, f"coder={coder}"
+            )
+            print(f"    ← code_id={cid} [{kind}] {label!r}")
+        print(f"  quotes ({len(result.supporting_quotes or [])}):")
+        for q in (result.supporting_quotes or []):
+            qt = (q.text or "").replace("\n", " ").strip()
+            if len(qt) > 160:
+                qt = qt[:157] + "..."
+            print(f"      [quote_id={q.quote_id}] \"{qt}\"")
+
+    print()
+    print(f"[test-review] code_id={res['code_id']} no DB writes")
     return 0
 
 
@@ -1728,6 +1860,22 @@ def _cli_test_aggregate(
         ctx,
         _cmd_test_aggregate,
         segment_id=segment_id,
+    )
+
+
+@app.command(
+    name="test-review",
+    rich_help_panel=PANEL_DEBUG,
+    help="run reviewer for one aggregator code, print all steps, no DB write",
+)
+def _cli_test_review(
+    ctx: typer.Context,
+    code_id: Annotated[int, typer.Argument(help="aggregator code_id to review")],
+) -> None:
+    _run(
+        ctx,
+        _cmd_test_review,
+        code_id=code_id,
     )
 
 

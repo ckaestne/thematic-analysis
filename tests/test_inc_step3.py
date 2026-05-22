@@ -541,21 +541,46 @@ def test_cli_aggregate_runs_against_stub(
         workers, "default_aggregator_factory", lambda: _StubAggregator()
     )
 
-    # Reviewer is the same stub used in step4; here we just need a no-op
-    # reviewer to avoid network. Use ADD_NEW so the codebook grows.
-    from thematic_analysis.agents.reviewer import ReviewDecision, ReviewResult
+    # Reviewer stub: ADD every aggregator code as a new reviewer code.
+    from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
+    from thematic_analysis_inc.db.models import (
+        Code,
+        CodesDerived,
+        DECISION_ADD,
+        DERIVATION_REVIEW,
+    )
 
     class _Reviewer:
-        def __init__(self, cb): self.codebook = cb
-        def review_code(self, code, quotes):
-            return ReviewResult(
-                code=code, decision=ReviewDecision.ADD_NEW,
-                rationale="ok", quotes=quotes,
-            )
-        def apply_review(self, result):
-            self.codebook.add_code(result.code, result.quotes or [])
+        def __init__(self, codebook, live_codes, embedding_service):
+            self.codebook = codebook
+            self.live_codes = live_codes
+            self.embedding_service = embedding_service
 
-    monkeypatch.setattr(workers, "default_reviewer_factory", lambda cb: _Reviewer(cb))
+        def review_code(self, code):
+            new = Code(
+                segment_id=code.segment_id,
+                coder_id=SYSTEM_REVIEWER_ID,
+                codebook_used_id=self.codebook.version,
+                code=code.code,
+                rationale="ok",
+                embedding=None,
+            )
+            new.supporting_quotes = list(code.supporting_quotes or [])
+            new.derivation_sources = [
+                CodesDerived(
+                    source_code=code,
+                    derivation_type=DERIVATION_REVIEW,
+                    decision=DECISION_ADD,
+                    rationale="ok",
+                )
+            ]
+            return new
+
+    monkeypatch.setattr(
+        workers,
+        "default_reviewer_factory",
+        lambda codebook, live, svc: _Reviewer(codebook, live, svc),
+    )
 
     assert cli.main(["--db", str(db), "code", "--mock-embeddings"]) == 0
     capsys.readouterr()

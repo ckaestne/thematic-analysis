@@ -240,6 +240,25 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
         return out
 
 
+def get_aggregator_code(code_id: int) -> Code | None:
+    """Detached aggregator (``coder_id == 0``) ``Code`` row by id, or
+    ``None`` if missing or not an aggregator code. ``supporting_quotes``
+    is eager-loaded so callers can iterate quotes without a session."""
+    from sqlalchemy.orm import selectinload
+
+    with session() as s:
+        c = s.exec(
+            select(Code)
+            .where(Code.code_id == code_id)
+            .options(selectinload(Code.supporting_quotes))
+        ).first()
+        if c is None or c.coder_id != 0:
+            return None
+        _ = list(c.supporting_quotes)
+        s.expunge(c)
+        return c
+
+
 def load_aggregated_code_quotes(code_id: int) -> list[dict]:
     """Return ``[{quote_id, text}, ...]`` for an aggregator code."""
     with session() as s:

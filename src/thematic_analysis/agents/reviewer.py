@@ -1,39 +1,41 @@
-"""Reviewer agent for maintaining and updating the adaptive codebook."""
+"""Reviewer agent: integrates an aggregator Code into the codebook.
+
+The agent takes one aggregator ``Code`` and returns a fresh reviewer
+``Code`` (PK ``None``, ``coder_id == -1``, ``codebook_used_id ==
+parent.version``). The returned Code carries provenance through
+``derivation_sources`` (``CodesDerived`` 'R' edges) so the full history of
+every reviewer decision is reachable as a graph:
+
+- ADD     → one edge, source=aggregator.
+- MERGE   → two edges, sources=[aggregator, previous_target_reviewer_code].
+            Label kept from target; quotes union of target and aggregator.
+- UPDATE  → two edges, same as MERGE. Label renamed to a new label.
+
+The agent never mutates existing rows. The previous target reviewer Code
+stays in the ``code`` table — it just drops out of the next codebook
+revision's membership when ``materialize_codebook_revision`` runs.
+"""
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_response_json
-from thematic_analysis.codebook import Codebook, CodeEntry, Quote
 from thematic_analysis.prompts import join_system_prompt_sections
-
-if TYPE_CHECKING:
-    from thematic_analysis.research_context import ResearchContext
-    from thematic_analysis_inc.db.models import Code as DBCode
-
-
-class ReviewDecision(Enum):
-    """Decision types for code review."""
-
-    ADD_NEW = "add_new"  # Add as a new code
-    MERGE = "merge"  # Merge with existing code
-    UPDATE = "update"  # Update existing code's description/name
-    SKIP = "skip"  # Skip (duplicate or low quality)
-
-
-@dataclass
-class ReviewResult:
-    """Result of reviewing a code against the codebook."""
-
-    code: str
-    decision: ReviewDecision
-    target_code: str | None = None  # Code to merge with or update
-    rationale: str = ""
-    quotes: list[Quote] | None = None
+from thematic_analysis_inc.db import embeddings as db_embeddings
+from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
+from thematic_analysis_inc.db.models import (
+    Code,
+    Codebook,
+    CodesDerived,
+    DECISION_ADD,
+    DECISION_MERGE,
+    DECISION_MERGE_AND_RENAME,
+    DERIVATION_REVIEW,
+)
 
 
 @dataclass
@@ -41,42 +43,42 @@ class ReviewerConfig(AgentConfig):
     """Configuration for the Reviewer agent."""
 
     similarity_threshold: float = 0.75  # Threshold for considering codes similar
-    top_k_similar: int = 5  # Number of similar codes to retrieve
+    top_k_similar: int = 10  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging
+    max_quotes_per_code: int = 5  # Quotes shown per code in the prompt
 
 
 REVIEWER_SYSTEM_PROMPT = """\
 You are an expert qualitative researcher responsible for maintaining the codebook.
-Your task is to review new codes and decide how they should be integrated with
-existing codes in the codebook.
+Your task is to review a new code against similar existing codes and decide
+how it should be integrated.
 
-## Your Responsibilities:
-1. Compare new codes with existing similar codes
-2. Decide whether codes should be merged, updated, or kept separate
-3. Ensure the codebook remains consistent and well-organized
-4. Preserve important analytical distinctions
+## Input
+The user message is a JSON object:
+- `new_code`: an object with `code` (the new label) and `quotes` (the verbatim
+  quote texts that support it).
+- `similar_codes`: a list of existing codes that may overlap. Each entry has
+  `code` (the existing label), `similarity` (cosine similarity to the new code),
+  and `quotes` (the verbatim quote texts already associated with it).
 
-## Decision Guidelines:
-- **MERGE**: When codes capture the same concept with different wording
-- **UPDATE**: When a new code is a better label for an existing concept
-- **ADD_NEW**: When the code represents a genuinely new concept
-- **SKIP**: When the code is a duplicate, lacks analytical value, or is
-  off-topic relative to the research focus (if one is provided)
+## Decision Guidelines
+- **add_new**: the code represents a genuinely new concept. No other fields
+  needed.
+- **merge**: the new code captures the same concept as an existing one. Set
+  `target_code` to the existing code's label (it is kept as the merged label).
+- **merge_and_rename**: same as merge, but neither the existing label nor the
+  new label is a good fit — propose a more representative label that captures
+  both. Set `target_code` to the existing code's label and `new_label` to your
+  proposed name.
 
-## Output Format:
-Respond with a JSON object containing:
-- "decision": One of "merge", "update", "add_new", or "skip"
-- "target_code": The existing code to merge with/update (if applicable)
-- "rationale": Brief explanation for the decision
-
-Example:
-```json
-{{
-  "decision": "merge",
-  "target_code": "emotional support",
-  "rationale": "Both codes describe receiving emotional assistance from others"
-}}
-```"""
+## Output Format
+Respond with a single JSON object:
+- `decision`: one of "add_new", "merge", or "merge_and_rename"
+- `target_code`: the existing code label being merged into (exact label from
+  the input). `null` for add_new.
+- `new_label`: the proposed replacement label for merge_and_rename. `null` for
+  add_new and merge.
+- `rationale`: brief explanation for the decision."""
 
 REVIEWER_RESPONSE_SCHEMA = {
     "type": "json_schema",
@@ -89,259 +91,319 @@ REVIEWER_RESPONSE_SCHEMA = {
             "properties": {
                 "decision": {
                     "type": "string",
-                    "enum": ["merge", "update", "add_new", "skip"],
+                    "enum": ["add_new", "merge", "merge_and_rename"],
                 },
                 "target_code": {"type": ["string", "null"]},
+                "new_label": {"type": ["string", "null"]},
                 "rationale": {"type": "string"},
             },
-            "required": ["decision", "target_code", "rationale"],
+            "required": [
+                "decision", "target_code", "new_label", "rationale",
+            ],
         },
     },
 }
 
 
-REVIEWER_USER_PROMPT = """\
-## New Code to Review:
-Code: "{new_code}"
-Quotes:
-{quotes_section}
-
-## Similar Existing Codes:
-{similar_codes_section}
-
-Please review this code and decide how it should be integrated into the codebook.
-Provide your response as JSON."""
-
-
 class ReviewerAgent(BaseAgent):
-    """Agent that maintains and updates the adaptive codebook.
+    """Reviewer agent — see module docstring for the contract.
 
-    The Reviewer Agent processes new codes from coders/aggregators,
-    compares them with existing codes using semantic similarity,
-    and decides whether to add, merge, update, or skip codes.
+    Constructor args:
+
+    - ``codebook``: the parent DB ``Codebook`` row (only ``.research_context``
+      and ``.version`` are read). Detached is fine.
+    - ``live_codes``: the effective codebook membership during this batch
+      (``db.live_codes_for_batch(parent)``). Used as the similarity-search pool.
+      The agent never reads ``codebook.codes`` directly so it doesn't matter
+      whether new codes added earlier in the batch are visible via the
+      relationship.
+    - ``embedding_service``: instance the agent uses to embed new code labels.
     """
 
     def __init__(
         self,
+        codebook: Codebook,
+        live_codes: list[Code],
+        embedding_service: db_embeddings.EmbeddingService,
         config: ReviewerConfig | None = None,
-        codebook: Codebook | None = None,
-        research_context: ResearchContext | None = None,
     ):
-        """Initialize the Reviewer agent.
-
-        Args:
-            config: Reviewer configuration.
-            codebook: Initial codebook to maintain.
-            research_context: Optional research context for scope-aware review.
-        """
         super().__init__(config or ReviewerConfig())
         self.reviewer_config: ReviewerConfig = self.config  # type: ignore
-        self.codebook = codebook if codebook is not None else Codebook()
-        self.research_context = research_context
+        self.codebook = codebook
+        self.live_codes = list(live_codes)
+        self.embedding_service = embedding_service
+
+        # Debug fields populated by the most recent ``review_code`` call.
+        # Short-circuit paths (auto-merge, no-similar) leave the LLM-specific
+        # fields empty.
+        self.last_similar: list[tuple[Code, float]] = []
+        self.last_payload: dict | None = None
+        self.last_system_prompt: str = ""
+        self.last_user_prompt: str = ""
+        self.last_raw_response: str = ""
+        self.last_elapsed: float = 0.0
+        self.last_shortcut: str | None = None  # "auto_merge" | "no_similar" | None
 
     def get_system_prompt(self) -> str:
-        """Get the system prompt for review."""
+        # Render the research context the same way the domain dataclass would:
+        # tailored ``reviewer_prompt`` if present, else the raw description
+        # wrapped in a generic header. The agent reads the DB row directly
+        # rather than depending on a domain conversion helper.
+        rc = self.codebook.research_context
         research_section = ""
-        if self.research_context and not self.research_context.is_empty():
-            research_section = self.research_context.to_prompt_section(
-                role="reviewer"
-            )
+        if rc is not None:
+            tailored = (getattr(rc, "reviewer_prompt", None) or "").strip()
+            if tailored:
+                research_section = tailored
+            else:
+                desc = (getattr(rc, "description", None) or "").strip()
+                if desc:
+                    research_section = f"## Research Context\n{desc}"
         return join_system_prompt_sections(
             REVIEWER_SYSTEM_PROMPT,
             research_context_instructions=research_section,
         )
 
-    def _format_quotes_section(self, quotes: list[Quote]) -> str:
-        """Format quotes for the prompt."""
-        if not quotes:
-            return "No quotes available."
+    # ── construction helpers ────────────────────────────────────────────
 
-        lines = []
-        for q in quotes[:5]:  # Show up to 5 quotes
-            text = q.text[:200] + "..." if len(q.text) > 200 else q.text
-            lines.append(f'- [{q.quote_id}] "{text}"')
-        return "\n".join(lines)
+    def _embed(self, text: str) -> bytes:
+        return db_embeddings.encode(self.embedding_service.embed_single(text))
 
-    def _format_similar_codes_section(
-        self, similar_codes: list[tuple[CodeEntry, float]]
-    ) -> str:
-        """Format similar codes for the prompt."""
-        if not similar_codes:
-            return "No similar codes found in the codebook."
+    def _new_reviewer_code(
+        self,
+        source_code_from_aggregator: Code,
+        label: str,
+        rationale: str,
+        quotes: list,
+        embedding: bytes,
+        prev_target: Code | None,
+        decision: str,
+    ) -> Code:
+        """Build a fresh reviewer Code with provenance edges wired up."""
+        new_code = Code(
+            segment_id=source_code_from_aggregator.segment_id,
+            coder_id=SYSTEM_REVIEWER_ID,
+            codebook_used_id=self.codebook.version,
+            code=label,
+            description="",
+            rationale=rationale,
+            embedding=embedding,
+        )
+        new_code.supporting_quotes = list(quotes)
+        edges = [
+            CodesDerived(
+                source_code=source_code_from_aggregator,
+                derivation_type=DERIVATION_REVIEW,
+                decision=decision,
+                rationale=rationale,
+            )
+        ]
+        if prev_target is not None:
+            edges.append(
+                CodesDerived(
+                    source_code=prev_target,
+                    derivation_type=DERIVATION_REVIEW,
+                    decision=decision,
+                    rationale=rationale,
+                )
+            )
+        new_code.derivation_sources = edges
+        return new_code
 
-        lines = []
-        for entry, score in similar_codes:
-            quote_sample = ""
-            if entry.quotes:
-                quote_sample = f' (e.g., "{entry.quotes[0].text[:100]}...")'
-            lines.append(f"- **{entry.code}** (similarity: {score:.2f}){quote_sample}")
-        return "\n".join(lines)
+    def _add(self, source_code_from_aggregator: Code, label: str, rationale: str) -> Code:
+        return self._new_reviewer_code(
+            source_code_from_aggregator=source_code_from_aggregator,
+            label=label,
+            rationale=rationale,
+            quotes=list(source_code_from_aggregator.supporting_quotes or []),
+            embedding=self._embed(label),
+            prev_target=None,
+            decision=DECISION_ADD,
+        )
 
-    def _parse_response(self, response: str) -> tuple[ReviewDecision, str | None, str]:
-        """Parse the LLM response into a review decision.
+    def _merge_or_update(
+        self,
+        source_code_from_aggregator: Code,
+        target: Code,
+        label: str,
+        rationale: str,
+        decision: str,
+    ) -> Code:
+        quotes = self._union_quotes(target, source_code_from_aggregator)
+        return self._new_reviewer_code(
+            source_code_from_aggregator=source_code_from_aggregator,
+            label=label,
+            rationale=rationale,
+            quotes=quotes,
+            embedding=self._embed(label),
+            prev_target=target,
+            decision=decision,
+        )
 
-        Args:
-            response: The raw LLM response.
+    @staticmethod
+    def _union_quotes(target: Code, source_code_from_aggregator: Code) -> list:
+        # SQLModel Quote rows are unhashable; key on PK in a dict so the
+        # identity map's canonical instance is preserved.
+        out: dict[int, object] = {}
+        for q in (target.supporting_quotes or []):
+            if q.quote_id is not None:
+                out[q.quote_id] = q
+        for q in (source_code_from_aggregator.supporting_quotes or []):
+            if q.quote_id is not None and q.quote_id not in out:
+                out[q.quote_id] = q
+        return list(out.values())
 
-        Returns:
-            Tuple of (decision, target_code, rationale).
+    # ── prompt + parsing ────────────────────────────────────────────────
+
+    def _build_payload(
+        self,
+        new_code_text: str,
+        new_code_quotes: list,
+        similar: list[tuple[Code, float]],
+    ) -> dict:
+        n = self.reviewer_config.max_quotes_per_code
+        return {
+            "new_code": {
+                "code": new_code_text,
+                "quotes": [q.text for q in new_code_quotes[:n]],
+            },
+            "similar_codes": [
+                {
+                    "code": entry.code,
+                    "similarity": round(score, 3),
+                    "quotes": [q.text for q in (entry.supporting_quotes or [])[:n]],
+                }
+                for entry, score in similar
+            ],
+        }
+
+    def _parse_response(
+        self, response: str
+    ) -> tuple[str, str | None, str | None, str]:
+        """Return ``(decision_str, target_label, new_label, rationale)``.
+
+        Falls back to ``("add_new", None, None, …)`` on parse failure.
         """
         data = extract_response_json(response)
         if data is None:
-            return ReviewDecision.ADD_NEW, None, "Could not parse response"
-
-        decision_str = data.get("decision", "add_new").lower()
-        target_code = data.get("target_code")
-        rationale = data.get("rationale", "")
-
-        decision_map = {
-            "merge": ReviewDecision.MERGE,
-            "update": ReviewDecision.UPDATE,
-            "add_new": ReviewDecision.ADD_NEW,
-            "skip": ReviewDecision.SKIP,
-        }
-        decision = decision_map.get(decision_str, ReviewDecision.ADD_NEW)
-
-        return decision, target_code, rationale
-
-    def review_code(self, code: str, quotes: list[Quote]) -> ReviewResult:
-        """Review a single code against the codebook.
-
-        Args:
-            code: The code label to review.
-            quotes: Associated quotes for the code.
-
-        Returns:
-            ReviewResult with the decision.
-        """
-        # Find similar existing codes
-        similar_codes = self.codebook.find_similar_codes(
-            code, top_k=self.reviewer_config.top_k_similar
+            return "add_new", None, None, "Could not parse response"
+        decision_str = (data.get("decision") or "add_new").lower()
+        if decision_str not in {"add_new", "merge", "merge_and_rename"}:
+            decision_str = "add_new"
+        return (
+            decision_str,
+            data.get("target_code"),
+            data.get("new_label"),
+            data.get("rationale", ""),
         )
 
-        # Check for automatic merge (very high similarity)
-        if similar_codes:
-            top_entry, top_score = similar_codes[0]
+    def _resolve_target(self, label: str | None) -> Code | None:
+        if label is None:
+            return None
+        for c in self.live_codes:
+            if c.code == label:
+                return c
+        return None
+
+    # ── public API ──────────────────────────────────────────────────────
+
+    def review_code(self, code: Code) -> Code:
+        """Review one aggregator ``Code`` and return a fresh reviewer ``Code``.
+
+        The returned Code's ``code_id`` is ``None``; the worker calls
+        ``s.add`` and lets the cascade write the provenance edges and the
+        quote links.
+        """
+        self.last_similar = []
+        self.last_payload = None
+        self.last_system_prompt = ""
+        self.last_user_prompt = ""
+        self.last_raw_response = ""
+        self.last_elapsed = 0.0
+        self.last_shortcut = None
+
+        query_emb = self.embedding_service.embed_single(code.code)
+        similar = db_embeddings.find_similar(
+            query_emb, self.live_codes, top_k=self.reviewer_config.top_k_similar
+        )
+        self.last_similar = similar
+
+        # Auto-merge: top match similarity ≥ merge_threshold.
+        if similar:
+            top_entry, top_score = similar[0]
             if top_score >= self.reviewer_config.merge_threshold:
-                return ReviewResult(
-                    code=code,
-                    decision=ReviewDecision.MERGE,
-                    target_code=top_entry.code,
+                self.last_shortcut = "auto_merge"
+                return self._merge_or_update(
+                    source_code_from_aggregator=code,
+                    target=top_entry,
+                    label=top_entry.code,
                     rationale=f"Automatic merge: {top_score:.2f} similarity",
-                    quotes=quotes,
+                    decision=DECISION_MERGE,
                 )
 
-        # Filter to codes above similarity threshold
-        similar_above_threshold = [
+        # Below threshold: nothing to compare against → ADD.
+        above = [
             (entry, score)
-            for entry, score in similar_codes
+            for entry, score in similar
             if score >= self.reviewer_config.similarity_threshold
         ]
-
-        # If no similar codes, add as new
-        if not similar_above_threshold:
-            return ReviewResult(
-                code=code,
-                decision=ReviewDecision.ADD_NEW,
+        if not above:
+            self.last_shortcut = "no_similar"
+            return self._add(
+                source_code_from_aggregator=code,
+                label=code.code,
                 rationale="No similar codes found",
-                quotes=quotes,
             )
 
-        # Ask LLM to decide
-        user_prompt = REVIEWER_USER_PROMPT.format(
-            new_code=code,
-            quotes_section=self._format_quotes_section(quotes),
-            similar_codes_section=self._format_similar_codes_section(
-                similar_above_threshold
-            ),
+        # Otherwise let the LLM decide.
+        payload = self._build_payload(
+            code.code, list(code.supporting_quotes or []), above
         )
+        system_prompt = self.get_system_prompt()
+        user_prompt = json.dumps(payload, indent=2)
+        self.last_payload = payload
+        self.last_system_prompt = system_prompt
+        self.last_user_prompt = user_prompt
 
+        t0 = time.monotonic()
         response = self._call_llm(
-            self.get_system_prompt(),
-            user_prompt,
-            response_format=REVIEWER_RESPONSE_SCHEMA,
+            system_prompt, user_prompt, response_format=REVIEWER_RESPONSE_SCHEMA
         )
-        decision, target_code, rationale = self._parse_response(response)
+        self.last_raw_response = response
+        self.last_elapsed = time.monotonic() - t0
 
-        return ReviewResult(
-            code=code,
-            decision=decision,
-            target_code=target_code,
-            rationale=rationale,
-            quotes=quotes,
+        decision_str, target_label, new_label, rationale = self._parse_response(
+            response
         )
+        target = self._resolve_target(target_label) if decision_str in {
+            "merge",
+            "merge_and_rename",
+        } else None
 
-    def apply_review(self, result: ReviewResult) -> None:
-        """Apply a review decision to the codebook.
-
-        Args:
-            result: The review result to apply.
-        """
-        quotes = result.quotes or []
-
-        if result.decision == ReviewDecision.ADD_NEW:
-            self.codebook.add_code(result.code, quotes)
-
-        elif result.decision == ReviewDecision.MERGE:
-            if result.target_code:
-                # Find the target code index
-                target_idx = None
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        target_idx = i
-                        break
-
-                if target_idx is not None:
-                    self.codebook.add_quotes_to_code(target_idx, quotes)
-                else:
-                    # Target not found, add as new
-                    self.codebook.add_code(result.code, quotes)
-
-        elif result.decision == ReviewDecision.UPDATE:
-            if result.target_code:
-                # Find and update the target code
-                target_idx = None
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        target_idx = i
-                        break
-
-                if target_idx is not None:
-                    # Update the code name and add quotes
-                    self.codebook.update_code(target_idx, result.code)
-                    self.codebook.add_quotes_to_code(target_idx, quotes)
-                else:
-                    self.codebook.add_code(result.code, quotes)
-
-        # SKIP decision: do nothing
-
-    def process_aggregation_result(
-        self, codes: list["DBCode"]
-    ) -> list[ReviewResult]:
-        """Review each aggregator code against the codebook."""
-        review_results = []
-        for code in codes:
-            review_result = self.review_code(
-                code.code, list(code.supporting_quotes or [])
+        if decision_str == "merge" and target is not None:
+            return self._merge_or_update(
+                source_code_from_aggregator=code,
+                target=target,
+                label=target.code,
+                rationale=rationale,
+                decision=DECISION_MERGE,
             )
-            self.apply_review(review_result)
-            review_results.append(review_result)
-        return review_results
-
-    def get_codebook_json(self) -> str:
-        """Get the current codebook as JSON.
-
-        Returns:
-            JSON string representation of the codebook.
-        """
-        return self.codebook.to_json()
-
-    def get_codebook_summary(self) -> str:
-        """Get a summary of the codebook state.
-
-        Returns:
-            Summary string.
-        """
-        total_codes = len(self.codebook)
-        total_quotes = sum(len(e.quotes) for e in self.codebook.entries)
-        return f"Codebook: {total_codes} codes, {total_quotes} quotes"
+        if (
+            decision_str == "merge_and_rename"
+            and target is not None
+            and new_label
+        ):
+            return self._merge_or_update(
+                source_code_from_aggregator=code,
+                target=target,
+                label=new_label,
+                rationale=rationale,
+                decision=DECISION_MERGE_AND_RENAME,
+            )
+        # add_new, or merge/merge_and_rename with an unresolvable target or
+        # (for rename) a missing new_label.
+        return self._add(
+            source_code_from_aggregator=code,
+            label=code.code,
+            rationale=rationale or "Add as new code",
+        )

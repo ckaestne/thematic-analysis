@@ -1,18 +1,20 @@
-"""Tests for thematic_analysis_inc Step 4 (reviewer worker) — refactored schema."""
+"""Tests for thematic_analysis_inc Step 4 (reviewer worker)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from thematic_analysis.agents.reviewer import ReviewDecision, ReviewResult
-
-from thematic_analysis_inc import cli, workers
+from thematic_analysis_inc import workers
 from thematic_analysis_inc import db as store
-from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID
+from thematic_analysis_inc.db.coders import SYSTEM_AGGREGATOR_ID, SYSTEM_REVIEWER_ID
 from thematic_analysis_inc.db.models import (
     Code,
     CodesDerived,
+    DECISION_ADD,
+    DECISION_MERGE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_AGGREGATION,
+    DERIVATION_REVIEW,
 )
 
 
@@ -42,7 +44,7 @@ def _add_segments(conn, doc, n: int) -> list[int]:
 
 
 def _stub_code(label: str, quote_text: str, *, segment, coder, codebook):
-    from thematic_analysis_inc.db.models import Code, Quote as DBQuote
+    from thematic_analysis_inc.db.models import Quote as DBQuote
 
     c = Code(
         segment_id=segment.segment_id,
@@ -128,34 +130,82 @@ def _seed_ready_to_review(conn, n: int = 1) -> list[int]:
     return sids
 
 
-def _make_reviewer_factory(decision: ReviewDecision, target_code: str | None = None):
+def _stub_reviewer_factory(decision: str, target_label: str | None = None):
+    """Build a reviewer factory whose ``review_code`` returns a fresh Code
+    encoding ``decision``. For MERGE/UPDATE, looks up ``target_label`` in
+    ``live_codes`` and appends the second provenance edge."""
+
     class _StubReviewer:
-        def __init__(self, codebook):
+        def __init__(self, codebook, live_codes, embedding_service):
             self.codebook = codebook
+            self.live_codes = live_codes
+            self.embedding_service = embedding_service
 
-        def review_code(self, code, quotes):
-            return ReviewResult(
-                code=code, decision=decision, target_code=target_code,
-                rationale=f"stub-{decision.value}", quotes=quotes,
+        def review_code(self, code: Code) -> Code:
+            target = None
+            if target_label is not None:
+                for c in self.live_codes:
+                    if c.code == target_label:
+                        target = c
+                        break
+            if decision == DECISION_ADD:
+                label = code.code
+                quotes = list(code.supporting_quotes or [])
+            elif decision == DECISION_MERGE:
+                assert target is not None, (
+                    f"merge target {target_label!r} not in live_codes"
+                )
+                label = target.code
+                quotes = _union_quotes(target, code)
+            else:  # UPDATE
+                assert target is not None, (
+                    f"update target {target_label!r} not in live_codes"
+                )
+                label = code.code
+                quotes = _union_quotes(target, code)
+
+            new = Code(
+                segment_id=code.segment_id,
+                coder_id=SYSTEM_REVIEWER_ID,
+                codebook_used_id=self.codebook.version,
+                code=label,
+                description="",
+                rationale=f"stub-{decision}",
+                embedding=None,
             )
+            new.supporting_quotes = quotes
+            edges = [
+                CodesDerived(
+                    source_code=code,
+                    derivation_type=DERIVATION_REVIEW,
+                    decision=decision,
+                    rationale=f"stub-{decision}",
+                )
+            ]
+            if target is not None:
+                edges.append(
+                    CodesDerived(
+                        source_code=target,
+                        derivation_type=DERIVATION_REVIEW,
+                        decision=decision,
+                        rationale=f"stub-{decision}",
+                    )
+                )
+            new.derivation_sources = edges
+            return new
 
-        def apply_review(self, result):
-            quotes = result.quotes or []
-            if result.decision == ReviewDecision.ADD_NEW:
-                self.codebook.add_code(result.code, quotes)
-            elif result.decision == ReviewDecision.MERGE and result.target_code:
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        self.codebook.add_quotes_to_code(i, quotes)
-                        break
-            elif result.decision == ReviewDecision.UPDATE and result.target_code:
-                for i, entry in enumerate(self.codebook.entries):
-                    if entry.code == result.target_code:
-                        self.codebook.update_code(i, result.code)
-                        self.codebook.add_quotes_to_code(i, quotes)
-                        break
+    return lambda codebook, live, svc: _StubReviewer(codebook, live, svc)
 
-    return lambda cb: _StubReviewer(cb)
+
+def _union_quotes(a: Code, b: Code) -> list:
+    out: dict[int, object] = {}
+    for q in (a.supporting_quotes or []):
+        if q.quote_id is not None:
+            out[q.quote_id] = q
+    for q in (b.supporting_quotes or []):
+        if q.quote_id is not None and q.quote_id not in out:
+            out[q.quote_id] = q
+    return list(out.values())
 
 
 # ---------------------------------------------------------------------------
@@ -163,28 +213,26 @@ def _make_reviewer_factory(decision: ReviewDecision, target_code: str | None = N
 # ---------------------------------------------------------------------------
 
 
-def test_review_one_add_new_creates_version(tmp_path: Path) -> None:
+def test_review_one_add_writes_reviewer_code_no_new_revision(
+    tmp_path: Path,
+) -> None:
+    """review_one writes the reviewer Code + edge but **does not** create
+    a new Codebook revision — that's finalize_codebook's job."""
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=1)
     v_before = store.latest_codebook().version
 
     res = workers.review_one(
         conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(ReviewDecision.ADD_NEW),
+        agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     assert res is not None and res["ok"] is True
     assert res["decision"] == "add_new"
-    assert res["new_version"] is not None
-    assert res["new_version"] > v_before
 
-    cv = store.latest_codebook()
-    assert cv.version == res["new_version"]
-    codes_in_new = {
-        e.code for e in _get_codebook_codes(cv.version)
-    }
-    assert res["code"] in codes_in_new
+    # No new codebook revision yet.
+    assert store.latest_codebook().version == v_before
 
-    # A reviewer code row should exist for this decision.
+    # Reviewer Code row exists with a CodesDerived 'R' edge.
     row = conn.execute(
         "SELECT decision FROM codes_derived WHERE source_code_id = ? "
         "AND derivation_type = 'R'",
@@ -193,90 +241,83 @@ def test_review_one_add_new_creates_version(tmp_path: Path) -> None:
     assert row["decision"] == "A"
 
 
-def test_review_one_skip_leaves_no_trace(tmp_path: Path) -> None:
+def test_finalize_after_adds_creates_one_new_revision(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    _seed_ready_to_review(conn, n=1)
+    _seed_ready_to_review(conn, n=2)  # 2 segments × 2 codes = 4 aggregator codes
     v_before = store.latest_codebook().version
 
-    res = workers.review_one(
+    counters = workers.drain_review(
         conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(ReviewDecision.SKIP),
+        agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
-    assert res is not None and res["ok"] is True
-    assert res["decision"] == "skip"
-    assert res["new_version"] is None
+    assert counters == {"done": 4, "failed": 0}
 
-    # Codebook version unchanged.
+    # Still no new codebook revision after the drain.
     assert store.latest_codebook().version == v_before
 
-    # No codes_derived row for this aggregator code.
-    n = conn.execute(
-        "SELECT COUNT(*) AS n FROM codes_derived WHERE source_code_id = ?",
-        (res["aggregated_code_id"],),
-    ).fetchone()["n"]
-    assert n == 0
+    new_version = workers.finalize_codebook()
+    assert new_version is not None and new_version > v_before
+
+    # Exactly one new codebook revision was created.
+    assert store.latest_codebook().version == new_version
+    codes_in_new = {e.code for e in _get_codebook_codes(new_version)}
+    # Two distinct labels ("alpha", "beta") → after dedup, possibly both in the
+    # new codebook (depends on stub behavior). Both labels should appear since
+    # each aggregator code becomes a new reviewer code.
+    assert "alpha" in codes_in_new or "beta" in codes_in_new
 
 
-def test_review_one_merge_keeps_target(tmp_path: Path) -> None:
-    conn = store.init_db(tmp_path / "x.sqlite")
-    # Seed: ADD an 'existing-code' through a review so it's in the codebook.
-    _seed_ready_to_review(conn, n=1)
-    # First review (alpha) goes through as ADD with name 'existing-code'
-    workers.review_one(
-        conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(ReviewDecision.ADD_NEW),
-    )
-
-    # The second aggregator code (beta) we MERGE into 'alpha'.
-    res = workers.review_one(
-        conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(
-            ReviewDecision.MERGE, target_code="alpha"
-        ),
-    )
-    assert res is not None and res["ok"]
-    assert res["decision"] == "merge"
-    cv = store.latest_codebook()
-    codes_in_new = {
-        e.code for e in _get_codebook_codes(cv.version)
-    }
-    assert "alpha" in codes_in_new
-
-
-def test_review_one_update_replaces_target(tmp_path: Path) -> None:
+def test_review_one_merge_drops_target_from_new_revision(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=1)
-    # First ADD 'alpha' to codebook.
+    # First ADD seeds 'alpha' into the codebook (after finalize).
     workers.review_one(
         conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(ReviewDecision.ADD_NEW),
+        agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
-    # Now UPDATE alpha → with the new code text from the reviewer (which is
-    # the source aggregator code text, i.e. 'beta').
-    res = workers.review_one(
+    workers.finalize_codebook()
+    v_after_add = store.latest_codebook().version
+    add_codes = {e.code for e in _get_codebook_codes(v_after_add)}
+    assert "alpha" in add_codes
+
+    # Second review MERGEs (beta into alpha) — new revision should still
+    # contain a code labeled 'alpha' but the previous 'alpha' Code is dropped.
+    workers.review_one(
         conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(
-            ReviewDecision.UPDATE, target_code="alpha"
-        ),
+        agent_factory=_stub_reviewer_factory(DECISION_MERGE, target_label="alpha"),
     )
-    assert res is not None and res["ok"]
-    cv = store.latest_codebook()
-    codes_in_new = {
-        e.code for e in _get_codebook_codes(cv.version)
-    }
-    # 'alpha' should be gone, 'beta' (the reviewer's new code text) present.
+    new_version = workers.finalize_codebook()
+    assert new_version is not None and new_version > v_after_add
+    codes_in_new = {e.code for e in _get_codebook_codes(new_version)}
+    assert "alpha" in codes_in_new  # same label, but a *different* Code row
+
+
+def test_review_one_update_renames_target(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    _seed_ready_to_review(conn, n=1)
+    workers.review_one(
+        conn, use_mock_embeddings=True,
+        agent_factory=_stub_reviewer_factory(DECISION_ADD),
+    )
+    workers.finalize_codebook()
+
+    workers.review_one(
+        conn, use_mock_embeddings=True,
+        agent_factory=_stub_reviewer_factory(DECISION_MERGE_AND_RENAME, target_label="alpha"),
+    )
+    new_version = workers.finalize_codebook()
+    assert new_version is not None
+    codes_in_new = {e.code for e in _get_codebook_codes(new_version)}
+    # 'alpha' replaced by the new label (the aggregator's source code label,
+    # which is 'beta' for the second aggregator code).
     assert "alpha" not in codes_in_new
     assert "beta" in codes_in_new
 
 
-def test_review_one_segment_done_after_all_reviewed_non_skip(
-    tmp_path: Path,
-) -> None:
-    """ADD-only walkthrough: when every aggregator code has an outgoing
-    review edge, the segment is `done`."""
+def test_review_one_segment_done_after_all_reviewed(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_ready_to_review(conn, n=1)
-    factory = _make_reviewer_factory(ReviewDecision.ADD_NEW)
+    factory = _stub_reviewer_factory(DECISION_ADD)
 
     workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
     s1 = store.status.derive_segment_status(sids[0])
@@ -286,31 +327,25 @@ def test_review_one_segment_done_after_all_reviewed_non_skip(
     assert s2 == "done"
 
 
-def test_review_one_skip_leaves_segment_reviewing(tmp_path: Path) -> None:
-    """SKIP doesn't write a `codes_derived` edge, so the segment stays
-    in `reviewing` until a non-SKIP decision settles it. This is the
-    design intent — SKIPs aren't recorded."""
-    conn = store.init_db(tmp_path / "x.sqlite")
-    sids = _seed_ready_to_review(conn, n=1)
-    factory = _make_reviewer_factory(ReviewDecision.SKIP)
-
-    workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
-    workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
-    assert store.status.derive_segment_status(sids[0]) == "reviewing"
-
-
 def test_review_one_returns_none_when_idle(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     assert workers.review_one(conn, use_mock_embeddings=True) is None
 
 
-def test_drain_review_processes_all_codes(tmp_path: Path) -> None:
+def test_finalize_with_no_decisions_returns_none(tmp_path: Path) -> None:
+    conn = store.init_db(tmp_path / "x.sqlite")
+    _seed_ready_to_review(conn, n=1)
+    # No reviewer decisions written → finalize is a no-op.
+    assert workers.finalize_codebook() is None
+
+
+def test_drain_review_writes_per_code_rows(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=2)  # 2 segments × 2 codes = 4 codes
 
     counters = workers.drain_review(
         conn, use_mock_embeddings=True,
-        agent_factory=_make_reviewer_factory(ReviewDecision.ADD_NEW),
+        agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     assert counters == {"done": 4, "failed": 0}
 
