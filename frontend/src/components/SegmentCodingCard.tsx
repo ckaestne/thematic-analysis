@@ -230,27 +230,13 @@ function HighlightedText({
             const inHover = hoveredKey !== null && s.codes.includes(hoveredKey);
             const primaryKey = inHover ? hoveredKey! : s.codes[0];
             const color = colorByKey[primaryKey];
-            // Faded vs full strength.
             const bgShade = isHoverActive && !inHover ? 0 : 2;
             const opacity = isHoverActive && !inHover ? 0.55 : 1;
-            // Multiple codes → stack underlines via box-shadow.
-            const underlines = s.codes
-              .filter((k) =>
-                isHoverActive ? k === hoveredKey : true,
-              )
-              .slice(0, 3)
-              .map((k, idx) => {
-                const yOffset = -(idx * 3);
-                const sh = isHoverActive && k !== hoveredKey ? 3 : 6;
-                return `inset 0 ${yOffset - 2}px 0 -${idx === 0 ? 0 : 1}px var(--mantine-color-${colorByKey[k]}-${sh})`;
-              })
-              .join(", ");
             const style: CSSProperties = {
               backgroundColor:
                 bgShade === 0
                   ? "transparent"
                   : `var(--mantine-color-${color}-${bgShade})`,
-              boxShadow: underlines || undefined,
               opacity,
               cursor: "pointer",
               transition: "background-color 120ms, opacity 120ms",
