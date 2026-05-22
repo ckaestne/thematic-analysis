@@ -102,9 +102,12 @@ export type DocumentDetail = {
 
 export type CoderCode = {
   position: number;
+  code_id?: number;
   code: string;
   rationale: string | null;
+  description?: string | null;
   is_new: 0 | 1 | null;
+  quotes?: Array<{ quote_id: string; text: string }>;
 };
 
 export type CoderRun = {
@@ -123,6 +126,7 @@ export type CoderRun = {
 export type AggregatedCode = {
   id: number;
   code: string;
+  codebook_used_id?: number;
   quotes: Array<{ quote_id: string; text: string }>;
   source_coders: string[];
   review: null | {
@@ -178,6 +182,7 @@ export type ApiSegmentPayload = {
       code: string;
       rationale: string | null;
       description: string | null;
+      quotes?: Array<{ quote_id: string; text: string }>;
     }>;
   }>;
   aggregator_codes: Array<{
@@ -185,6 +190,7 @@ export type ApiSegmentPayload = {
     code: string;
     description: string | null;
     rationale: string | null;
+    codebook_used_id?: number;
     quotes: Array<{ quote_id: string; text: string }>;
     review: null | {
       new_code_id: number;
@@ -208,14 +214,18 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
     error: null,
     codes: cc.codes.map((c, i) => ({
       position: i,
+      code_id: c.code_id,
       code: c.code,
       rationale: c.rationale,
+      description: c.description,
       is_new: null,
+      quotes: c.quotes ?? [],
     })),
   }));
   const aggregated_codes: AggregatedCode[] = p.aggregator_codes.map((ac) => ({
     id: ac.code_id,
     code: ac.code,
+    codebook_used_id: ac.codebook_used_id,
     quotes: ac.quotes,
     source_coders: [],
     review: ac.review
