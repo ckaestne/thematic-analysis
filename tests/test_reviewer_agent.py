@@ -333,6 +333,145 @@ class TestReviewCodeDecisions:
         assert {q.quote_id for q in target.supporting_quotes} == original_quote_ids
 
 
+class TestReviewMergePersistence:
+    """End-to-end: seed codebook code A (quote B) and aggregator code C
+    (quote D), run reviewer with the LLM mocked to merge A+C, check that
+    ``review_code`` returns a fresh in-memory Code (not yet persisted),
+    then persist it and verify the DB has the new reviewer code wired to
+    both predecessors A and C and to both quotes B and D."""
+
+    def test_merge_returns_unwritten_then_persists(
+        self, db_setup, embedding_service
+    ):
+        from sqlmodel import select
+
+        from thematic_analysis_inc.db.connection import session
+        from thematic_analysis_inc.db.models import (
+            Code,
+            CodesDerived,
+            CodesSupportingQuotes,
+            DERIVATION_REVIEW,
+        )
+
+        seg_id = _seed_segment()
+        # Aggregator source for the codebook code A (needed for provenance).
+        agg_for_A = _add_agg_code(
+            segment_id=seg_id, code="A", version=1, quotes=["B"]
+        )
+        # Codebook code A with quote B (reviewer code, derived from agg_for_A).
+        code_A = _seed_reviewer_code(
+            segment_id=seg_id,
+            code="A",
+            version=1,
+            quotes=["B"],
+            embedding_service=embedding_service,
+            source_code_from_aggregator=agg_for_A,
+        )
+        new_cb = store.materialize_codebook_revision(
+            store.get_codebook_with_codes_and_research_context(1)
+        )
+        parent = store.get_codebook_with_codes_and_research_context(
+            new_cb.version
+        )
+
+        # Aggregator code C with quote D — the input to the review.
+        code_C = _add_agg_code(
+            segment_id=seg_id,
+            code="C",
+            version=parent.version,
+            quotes=["D"],
+        )
+        quote_B_id = code_A.supporting_quotes[0].quote_id
+        quote_D_id = code_C.supporting_quotes[0].quote_id
+
+        agent = ReviewerAgent(
+            codebook=parent,
+            live_codes=list(parent.codes),
+            embedding_service=embedding_service,
+            # Force the LLM path (skip auto-merge + no-similar shortcuts).
+            config=ReviewerConfig(
+                similarity_threshold=-1.1, merge_threshold=1.1
+            ),
+        )
+        with patch.object(
+            ReviewerAgent,
+            "_call_llm",
+            return_value=json.dumps({
+                "decision": "merge",
+                "target_code": "A",
+                "rationale": "same concept",
+            }),
+        ):
+            result = agent.review_code(code_C)
+
+        # ── before save: result is in-memory only ──────────────────────
+        assert result.code_id is None
+        assert result.code == "A"  # MERGE keeps the target's label
+        edges = list(result.derivation_sources)
+        assert len(edges) == 2
+        assert [e.decision for e in edges] == [DECISION_MERGE, DECISION_MERGE]
+        source_code_ids = {e.source_code.code_id for e in edges}
+        assert source_code_ids == {code_A.code_id, code_C.code_id}
+        quote_ids = {q.quote_id for q in result.supporting_quotes}
+        assert quote_ids == {quote_B_id, quote_D_id}
+
+        # Nothing was written: no reviewer Code rows beyond the seeded A,
+        # no 'R' edges out of C yet.
+        with session() as s:
+            r_edges_from_C = list(
+                s.exec(
+                    select(CodesDerived).where(
+                        CodesDerived.source_code_id == code_C.code_id,
+                        CodesDerived.derivation_type == DERIVATION_REVIEW,
+                    )
+                ).all()
+            )
+            assert r_edges_from_C == []
+            reviewer_count_before = len(
+                list(
+                    s.exec(
+                        select(Code).where(Code.coder_id == SYSTEM_REVIEWER_ID)
+                    ).all()
+                )
+            )
+            assert reviewer_count_before == 1  # only the seeded A
+
+        # ── save and verify DB state ────────────────────────────────────
+        saved = save_reviewer_decision(result)
+        assert saved.code_id is not None
+
+        with session() as s:
+            persisted = s.get(Code, saved.code_id)
+            assert persisted is not None
+            assert persisted.code == "A"
+            assert persisted.coder_id == SYSTEM_REVIEWER_ID
+
+            persisted_edges = list(
+                s.exec(
+                    select(CodesDerived).where(
+                        CodesDerived.new_code_id == saved.code_id,
+                        CodesDerived.derivation_type == DERIVATION_REVIEW,
+                    )
+                ).all()
+            )
+            assert len(persisted_edges) == 2
+            assert {e.source_code_id for e in persisted_edges} == {
+                code_A.code_id,
+                code_C.code_id,
+            }
+            assert {e.decision for e in persisted_edges} == {DECISION_MERGE}
+
+            persisted_quote_ids = {
+                row.quote_id
+                for row in s.exec(
+                    select(CodesSupportingQuotes).where(
+                        CodesSupportingQuotes.code_id == saved.code_id
+                    )
+                ).all()
+            }
+            assert persisted_quote_ids == {quote_B_id, quote_D_id}
+
+
 class TestResponseSchema:
     def test_schema_drops_skip(self):
         decision_enum = REVIEWER_RESPONSE_SCHEMA["json_schema"]["schema"][
