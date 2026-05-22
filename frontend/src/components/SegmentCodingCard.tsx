@@ -82,6 +82,24 @@ function colorFor(i: number): string {
   return PALETTE[i % PALETTE.length];
 }
 
+/** Human-readable explanation of the review-decision letter on an
+ * aggregated code. Mirrors `DECISION_ADD/MERGE/MERGE_AND_RENAME` in
+ * `db/models.py`. */
+function decisionTooltip(decision: string): string {
+  switch (decision) {
+    case "A":
+      return "Add — promote as a new code in the codebook";
+    case "M":
+      return "Merge — fold into an existing codebook code";
+    case "U":
+      return "Merge & rename — fold into an existing code under a new name";
+    case "skip":
+      return "Skip — no codebook change";
+    default:
+      return `Decision: ${decision}`;
+  }
+}
+
 // Blog-post-style prose container. Wider serif stack with good rendering
 // hints, a comfortable line length, and slightly off-black text.
 const PROSE_STYLE: CSSProperties = {
@@ -901,35 +919,58 @@ function AggregatedTabBody({
                     </Badge>
                   ))}
                   {ac.review && (
-                    <Badge
-                      size="xs"
-                      color={
-                        ac.review.applied
-                          ? "teal"
-                          : ac.review.decision === "skip"
-                            ? "gray"
-                            : "yellow"
-                      }
-                      variant="light"
+                    <Tooltip label={decisionTooltip(ac.review.decision)} withArrow>
+                      <Badge
+                        size="xs"
+                        color={
+                          ac.review.applied
+                            ? "teal"
+                            : ac.review.decision === "skip"
+                              ? "gray"
+                              : "yellow"
+                        }
+                        variant="light"
+                        style={{ cursor: "help" }}
+                      >
+                        {ac.review.decision}
+                        {ac.review.target_code
+                          ? ` → ${ac.review.target_code}`
+                          : ""}
+                      </Badge>
+                    </Tooltip>
+                  )}
+                  {ac.codebook_used_id != null && (
+                    <Tooltip
+                      label={`Created against codebook v${ac.codebook_used_id}`}
+                      withArrow
                     >
-                      {ac.review.decision}
-                      {ac.review.target_code
-                        ? ` → ${ac.review.target_code}`
-                        : ""}
-                    </Badge>
+                      <Anchor
+                        component={Link}
+                        to={`/codebook/${ac.codebook_used_id}`}
+                        size="xs"
+                        c="dimmed"
+                      >
+                        v{ac.codebook_used_id}
+                      </Anchor>
+                    </Tooltip>
                   )}
                   {ac.review?.resulting_version && (
-                    <Anchor
-                      component={Link}
-                      to={`/codebook/${ac.review.resulting_version}`}
-                      size="xs"
+                    <Tooltip
+                      label={`Review produced codebook v${ac.review.resulting_version}`}
+                      withArrow
                     >
-                      v{ac.review.resulting_version}{" "}
-                      <IconExternalLink
-                        size={12}
-                        style={{ verticalAlign: "middle" }}
-                      />
-                    </Anchor>
+                      <Anchor
+                        component={Link}
+                        to={`/codebook/${ac.review.resulting_version}`}
+                        size="xs"
+                      >
+                        → v{ac.review.resulting_version}{" "}
+                        <IconExternalLink
+                          size={12}
+                          style={{ verticalAlign: "middle" }}
+                        />
+                      </Anchor>
+                    </Tooltip>
                   )}
                 </Group>
               }

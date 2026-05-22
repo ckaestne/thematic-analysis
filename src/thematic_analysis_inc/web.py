@@ -207,6 +207,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                 "code": ac.code,
                 "description": ac.description,
                 "rationale": ac.rationale,
+                "codebook_used_id": ac.codebook_used_id,
                 "quotes": quotes,
                 "review": edge_payload,
             }
