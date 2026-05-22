@@ -817,9 +817,11 @@ def create_app(db_path: str | Path) -> FastAPI:
     def get_codebook_version(version: int) -> dict[str, Any]:
         _ensure_connected()
         from sqlmodel import select
+        from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
         from thematic_analysis_inc.db.models import (
             Code,
             CodebookCode,
+            DERIVATION_REVIEW,
             Document,
             Segment,
         )
@@ -838,6 +840,41 @@ def create_app(db_path: str | Path) -> FastAPI:
                     .order_by(Code.code)
                 ).all()
             )
+
+            def _change_tags(c: Code) -> list[str]:
+                # Codes carried forward from before the parent revision
+                # weren't touched in this update -> no tags.
+                if (
+                    cv.parent_version is not None
+                    and c.codebook_used_id < cv.parent_version
+                ):
+                    return []
+                review_edges = [
+                    e
+                    for e in c.derivation_sources
+                    if e.derivation_type == DERIVATION_REVIEW
+                ]
+                if not review_edges:
+                    return []
+                decisions = {e.decision for e in review_edges}
+                tags: list[str] = []
+                if "A" in decisions:
+                    tags.append("new")
+                if decisions & {"M", "U"}:
+                    prev = next(
+                        (
+                            e.source_code
+                            for e in review_edges
+                            if e.source_code is not None
+                            and e.source_code.coder_id == SYSTEM_REVIEWER_ID
+                        ),
+                        None,
+                    )
+                    if prev is not None and prev.code != c.code:
+                        tags.append("renamed")
+                    tags.append("new_quotes")
+                return tags
+
             codes_payload = []
             for c in codes:
                 quotes = []
@@ -871,6 +908,7 @@ def create_app(db_path: str | Path) -> FastAPI:
                         "rationale": c.rationale,
                         "coder_id": c.coder_id,
                         "quotes": quotes,
+                        "change_tags": _change_tags(c),
                     }
                 )
             return {
