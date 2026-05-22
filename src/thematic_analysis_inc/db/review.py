@@ -14,6 +14,7 @@ from thematic_analysis_inc.db.models import (
     CodebookCode,
     CodesDerived,
     DERIVATION_REVIEW,
+    SENTINEL_CODE_LABEL,
 )
 
 
@@ -32,7 +33,11 @@ def next_aggregated_code_to_review() -> Code | None:
         )
         row = s.exec(
             select(Code)
-            .where(Code.coder_id == 0, ~outgoing_r)
+            .where(
+                Code.coder_id == 0,
+                Code.code != SENTINEL_CODE_LABEL,
+                ~outgoing_r,
+            )
             .options(selectinload(Code.supporting_quotes))
             .order_by(Code.code_id)
             .limit(1)
@@ -57,7 +62,11 @@ def pending_review_count() -> int:
         return s.exec(
             select(func.count())
             .select_from(Code)
-            .where(Code.coder_id == 0, ~outgoing_r)
+            .where(
+                Code.coder_id == 0,
+                Code.code != SENTINEL_CODE_LABEL,
+                ~outgoing_r,
+            )
         ).one()
 
 
@@ -174,6 +183,7 @@ def segment_review_remaining(segment_id: int) -> int:
                 .where(
                     Code.segment_id == segment_id,
                     Code.coder_id == 0,
+                    Code.code != SENTINEL_CODE_LABEL,
                     ~outgoing_r,
                 )
             ).one()
