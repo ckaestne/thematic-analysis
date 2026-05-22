@@ -169,7 +169,7 @@ def _add_agg_code(
 
 def _do_review_decision(
     *,
-    source_agg_code_id: int,
+    source_code_from_aggregator_code_id: int,
     parent_version: int,
     decision: str,
     new_code_text: str,
@@ -178,7 +178,7 @@ def _do_review_decision(
 ) -> int:
     """Persist one reviewer decision (no finalize). Returns new reviewer
     code_id."""
-    agg = _code_obj(source_agg_code_id)
+    agg = _code_obj(source_code_from_aggregator_code_id)
     target = _code_obj(target_code_id) if target_code_id is not None else None
     quotes = list(agg.supporting_quotes or [])
     if target is not None:
@@ -239,7 +239,7 @@ def _review_add_and_finalize(
 ) -> tuple[int, int]:
     """ADD-style review followed by finalize. Returns (new_version, new_code_id)."""
     new_code_id = _do_review_decision(
-        source_agg_code_id=agg_code_id,
+        source_code_from_aggregator_code_id=agg_code_id,
         parent_version=parent_version,
         decision=DECISION_ADD,
         new_code_text=code_text,
@@ -380,7 +380,7 @@ def test_update_replaces_target_in_new_version_only(tmp_path: Path) -> None:
         quote_texts=["q2"],
     )
     new_code_id = _do_review_decision(
-        source_agg_code_id=a2,
+        source_code_from_aggregator_code_id=a2,
         parent_version=v2,
         decision=DECISION_UPDATE,
         new_code_text="refined",
@@ -421,7 +421,7 @@ def test_merge_replaces_target_with_quote_union(tmp_path: Path) -> None:
         conn, segment_id=seg, version=v2, code="dup-source", quote_texts=["b"]
     )
     new_code_id = _do_review_decision(
-        source_agg_code_id=a2,
+        source_code_from_aggregator_code_id=a2,
         parent_version=v2,
         decision=DECISION_MERGE,
         new_code_text="orig",
@@ -480,7 +480,7 @@ def test_live_codes_for_batch_reflects_in_progress_adds(
     # Now stage a second ADD against v2 without finalizing.
     a2 = _add_agg_code(conn, segment_id=seg, version=v2, code="B")
     code_B = _do_review_decision(
-        source_agg_code_id=a2,
+        source_code_from_aggregator_code_id=a2,
         parent_version=v2,
         decision=DECISION_ADD,
         new_code_text="B",

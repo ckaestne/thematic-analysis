@@ -61,7 +61,7 @@ def _add_agg_code(*, segment_id: int, code: str, version: int, quotes: list[str]
 def _seed_reviewer_code(
     *, segment_id: int, code: str, version: int, quotes: list[str],
     embedding_service: db_embeddings.EmbeddingService,
-    source_agg: Code,
+    source_code_from_aggregator: Code,
 ) -> Code:
     """Write a reviewer Code via save_reviewer_decision (no finalize)."""
     seg = store.get_segment(segment_id)
@@ -76,7 +76,7 @@ def _seed_reviewer_code(
     c.supporting_quotes = qrows
     c.derivation_sources = [
         CodesDerived(
-            source_code=source_agg,
+            source_code=source_code_from_aggregator,
             derivation_type=DERIVATION_REVIEW,
             decision=DECISION_ADD,
         )
@@ -101,7 +101,7 @@ def _load_parent_with_one_reviewer_code(
         version=1,
         quotes=[f"q-{label}"],
         embedding_service=embedding_service,
-        source_agg=agg1,
+        source_code_from_aggregator=agg1,
     )
     new_cb = store.materialize_codebook_revision(
         store.get_codebook_with_codes_and_research_context(1)

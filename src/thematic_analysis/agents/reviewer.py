@@ -163,7 +163,7 @@ class ReviewerAgent(BaseAgent):
 
     def _new_reviewer_code(
         self,
-        source_agg: Code,
+        source_code_from_aggregator: Code,
         label: str,
         rationale: str,
         quotes: list,
@@ -173,7 +173,7 @@ class ReviewerAgent(BaseAgent):
     ) -> Code:
         """Build a fresh reviewer Code with provenance edges wired up."""
         new_code = Code(
-            segment_id=source_agg.segment_id,
+            segment_id=source_code_from_aggregator.segment_id,
             coder_id=SYSTEM_REVIEWER_ID,
             codebook_used_id=self.codebook.version,
             code=label,
@@ -184,7 +184,7 @@ class ReviewerAgent(BaseAgent):
         new_code.supporting_quotes = list(quotes)
         edges = [
             CodesDerived(
-                source_code=source_agg,
+                source_code=source_code_from_aggregator,
                 derivation_type=DERIVATION_REVIEW,
                 decision=decision,
                 rationale=rationale,
@@ -202,12 +202,12 @@ class ReviewerAgent(BaseAgent):
         new_code.derivation_sources = edges
         return new_code
 
-    def _add(self, source_agg: Code, label: str, rationale: str) -> Code:
+    def _add(self, source_code_from_aggregator: Code, label: str, rationale: str) -> Code:
         return self._new_reviewer_code(
-            source_agg=source_agg,
+            source_code_from_aggregator=source_code_from_aggregator,
             label=label,
             rationale=rationale,
-            quotes=list(source_agg.supporting_quotes or []),
+            quotes=list(source_code_from_aggregator.supporting_quotes or []),
             embedding=self._embed(label),
             prev_target=None,
             decision=DECISION_ADD,
@@ -215,15 +215,15 @@ class ReviewerAgent(BaseAgent):
 
     def _merge_or_update(
         self,
-        source_agg: Code,
+        source_code_from_aggregator: Code,
         target: Code,
         label: str,
         rationale: str,
         decision: str,
     ) -> Code:
-        quotes = self._union_quotes(target, source_agg)
+        quotes = self._union_quotes(target, source_code_from_aggregator)
         return self._new_reviewer_code(
-            source_agg=source_agg,
+            source_code_from_aggregator=source_code_from_aggregator,
             label=label,
             rationale=rationale,
             quotes=quotes,
@@ -233,14 +233,14 @@ class ReviewerAgent(BaseAgent):
         )
 
     @staticmethod
-    def _union_quotes(target: Code, source_agg: Code) -> list:
+    def _union_quotes(target: Code, source_code_from_aggregator: Code) -> list:
         # SQLModel Quote rows are unhashable; key on PK in a dict so the
         # identity map's canonical instance is preserved.
         out: dict[int, object] = {}
         for q in (target.supporting_quotes or []):
             if q.quote_id is not None:
                 out[q.quote_id] = q
-        for q in (source_agg.supporting_quotes or []):
+        for q in (source_code_from_aggregator.supporting_quotes or []):
             if q.quote_id is not None and q.quote_id not in out:
                 out[q.quote_id] = q
         return list(out.values())
@@ -319,7 +319,7 @@ class ReviewerAgent(BaseAgent):
             if top_score >= self.reviewer_config.merge_threshold:
                 self.last_shortcut = "auto_merge"
                 return self._merge_or_update(
-                    source_agg=code,
+                    source_code_from_aggregator=code,
                     target=top_entry,
                     label=top_entry.code,
                     rationale=f"Automatic merge: {top_score:.2f} similarity",
@@ -335,7 +335,7 @@ class ReviewerAgent(BaseAgent):
         if not above:
             self.last_shortcut = "no_similar"
             return self._add(
-                source_agg=code,
+                source_code_from_aggregator=code,
                 label=code.code,
                 rationale="No similar codes found",
             )
@@ -365,7 +365,7 @@ class ReviewerAgent(BaseAgent):
 
         if decision_str == "merge" and target is not None:
             return self._merge_or_update(
-                source_agg=code,
+                source_code_from_aggregator=code,
                 target=target,
                 label=target.code,
                 rationale=rationale,
@@ -373,7 +373,7 @@ class ReviewerAgent(BaseAgent):
             )
         if decision_str == "update" and target is not None:
             return self._merge_or_update(
-                source_agg=code,
+                source_code_from_aggregator=code,
                 target=target,
                 label=code.code,  # the LLM's chosen new label
                 rationale=rationale,
@@ -381,7 +381,7 @@ class ReviewerAgent(BaseAgent):
             )
         # add_new, or merge/update with an unresolvable target.
         return self._add(
-            source_agg=code,
+            source_code_from_aggregator=code,
             label=code.code,
             rationale=rationale or "Add as new code",
         )
