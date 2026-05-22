@@ -14,7 +14,12 @@ import { IconGitBranch } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, type CodebookCode, type CodebookQuote } from "../api";
+import {
+  api,
+  type CodebookChangeTag,
+  type CodebookCode,
+  type CodebookQuote,
+} from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 
 const QUOTES_VISIBLE = 3;
@@ -49,6 +54,28 @@ function QuoteLink({ q }: { q: CodebookQuote }) {
   );
 }
 
+const CHANGE_TAG_META: Record<
+  CodebookChangeTag,
+  { label: string; color: string }
+> = {
+  new: { label: "new", color: "green" },
+  renamed: { label: "renamed", color: "orange" },
+  new_quotes: { label: "new quotes", color: "blue" },
+};
+
+function ChangeTagBadges({ tags }: { tags: CodebookChangeTag[] }) {
+  if (!tags.length) return null;
+  return (
+    <Group gap={4} wrap="nowrap">
+      {tags.map((t) => (
+        <Badge key={t} color={CHANGE_TAG_META[t].color} variant="light" size="sm">
+          {CHANGE_TAG_META[t].label}
+        </Badge>
+      ))}
+    </Group>
+  );
+}
+
 function CodeCard({ c }: { c: CodebookCode }) {
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? c.quotes : c.quotes.slice(0, QUOTES_VISIBLE);
@@ -57,7 +84,10 @@ function CodeCard({ c }: { c: CodebookCode }) {
     <Card padding="md" withBorder>
       <Group justify="space-between" mb="xs" align="flex-start">
         <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
-          <Code style={{ fontSize: 15, fontWeight: 600 }}>{c.code}</Code>
+          <Group gap="xs" wrap="nowrap" align="center">
+            <Code style={{ fontSize: 15, fontWeight: 600 }}>{c.code}</Code>
+            <ChangeTagBadges tags={c.change_tags} />
+          </Group>
           {c.description && (
             <Text size="sm" c="dimmed">
               {c.description}

@@ -278,6 +278,8 @@ export type CodebookQuote = {
   document_filename: string | null;
 };
 
+export type CodebookChangeTag = "new" | "renamed" | "new_quotes";
+
 export type CodebookCode = {
   code_id: number;
   code: string;
@@ -285,6 +287,7 @@ export type CodebookCode = {
   rationale: string;
   coder_id: number;
   quotes: CodebookQuote[];
+  change_tags: CodebookChangeTag[];
 };
 
 export type CodebookVersionDetail = {
