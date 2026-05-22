@@ -553,32 +553,41 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
         # a re-run simply re-attempts any segment that has no aggregator code.
         pass
 
+    total_todo = store.aggregation.pending_aggregation_count()
+    bar_total = min(total_todo, args.limit) if args.limit else total_todo
+
     print(
-        "[aggregate] starting"
+        f"[aggregate] todo={total_todo}"
         + (f" limit={args.limit}" if args.limit else "")
     )
+    if total_todo == 0:
+        return 0
 
-    def on_event(res: dict, c: dict) -> None:
-        n = c["done"] + c["failed"]
-        if res["ok"]:
-            print(
-                f"[aggregate] {res['segment_id']} in={res['n_in']} "
-                f"out={res['n_out']} new={res['n_new']} "
-                f"({n} ok={c['done']} failed={c['failed']} "
-                f"{res['elapsed']:.1f}s)"
-            )
-        else:
-            print(
-                f"[aggregate] {res['segment_id']} FAILED: {res['error']}",
-                file=sys.stderr,
-            )
+    with _make_progress("[aggregate]") as prog:
+        task = prog.add_task("", total=bar_total)
 
-    counters = workers.drain_aggregate(
-        None,
-        limit=args.limit,
-        use_mock_embeddings=args.mock_embeddings,
-        on_event=on_event,
-    )
+        def on_event(res: dict, c: dict) -> None:
+            n = c["done"] + c["failed"]
+            if res["ok"]:
+                print(
+                    f"[aggregate] {res['segment_id']} in={res['n_in']} "
+                    f"out={res['n_out']} new={res['n_new']} "
+                    f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
+                    f"{res['elapsed']:.1f}s)"
+                )
+            else:
+                print(
+                    f"[aggregate] {res['segment_id']} FAILED: {res['error']}",
+                    file=sys.stderr,
+                )
+            prog.advance(task)
+
+        counters = workers.drain_aggregate(
+            None,
+            limit=args.limit,
+            use_mock_embeddings=args.mock_embeddings,
+            on_event=on_event,
+        )
     print(
         f"[aggregate] done: {counters['done']} ok, "
         f"{counters['failed']} failed"
@@ -589,27 +598,36 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
 def _cmd_review(args: SimpleNamespace) -> int:
     store.connect(args.db)
 
+    total_todo = store.review.pending_review_count()
+    bar_total = min(total_todo, args.limit) if args.limit else total_todo
+
     print(
-        "[review] starting"
+        f"[review] todo={total_todo}"
         + (f" limit={args.limit}" if args.limit else "")
     )
+    if total_todo == 0:
+        return 0
 
-    def on_event(res: dict, c: dict) -> None:
-        n = c["done"] + c["failed"]
-        new_label = res.get("new_code") or res.get("code")
-        print(
-            f"[review] {res['segment_id']} code={res['code']!r} "
-            f"decision={res['decision']} new={new_label!r} "
-            f"({n} ok={c['done']} failed={c['failed']} "
-            f"{res['elapsed']:.1f}s)"
+    with _make_progress("[review]") as prog:
+        task = prog.add_task("", total=bar_total)
+
+        def on_event(res: dict, c: dict) -> None:
+            n = c["done"] + c["failed"]
+            new_label = res.get("new_code") or res.get("code")
+            print(
+                f"[review] {res['segment_id']} code={res['code']!r} "
+                f"decision={res['decision']} new={new_label!r} "
+                f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
+                f"{res['elapsed']:.1f}s)"
+            )
+            prog.advance(task)
+
+        counters = workers.drain_review(
+            None,
+            limit=args.limit,
+            use_mock_embeddings=args.mock_embeddings,
+            on_event=on_event,
         )
-
-    counters = workers.drain_review(
-        None,
-        limit=args.limit,
-        use_mock_embeddings=args.mock_embeddings,
-        on_event=on_event,
-    )
     print(
         f"[review] done: {counters['done']} ok, "
         f"{counters['failed']} failed"

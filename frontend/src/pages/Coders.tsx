@@ -1,6 +1,5 @@
 import {
   ActionIcon,
-  Anchor,
   Button,
   Card,
   Checkbox,
@@ -16,7 +15,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { IconPlus, IconTrash } from "@tabler/icons-react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
@@ -137,11 +135,7 @@ export function Coders() {
             )}
             {data?.map((c) => (
               <Table.Tr key={c.coder_id}>
-                <Table.Td>
-                  <Anchor component={Link} to={`/coder-runs?coder_id=${c.coder_id}`}>
-                    {c.coder_id}
-                  </Anchor>
-                </Table.Td>
+                <Table.Td>{c.coder_id}</Table.Td>
                 <Table.Td>
                   <Text size="sm">{c.identity}</Text>
                 </Table.Td>

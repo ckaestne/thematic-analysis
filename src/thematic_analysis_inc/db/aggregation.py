@@ -80,6 +80,48 @@ def next_segment_codebook_to_aggregate() -> tuple[Segment, int] | None:
         return seg, codebook_version
 
 
+def pending_aggregation_count() -> int:
+    """Count (segment, codebook_version) pairs awaiting aggregation."""
+    with session() as s:
+        Q = aliased(CodingQueueEntry)
+        QInner = aliased(CodingQueueEntry)
+
+        has_unfinished = (
+            select(QInner.segment_id)  # type: ignore[union-attr]
+            .where(
+                QInner.segment_id == Q.segment_id,
+                QInner.codebook_used_id == Q.codebook_used_id,
+                (QInner.finished_at.is_(None))  # type: ignore[union-attr]
+                | (QInner.error.is_not(None)),  # type: ignore[union-attr]
+            )
+            .exists()
+        )
+        has_agg = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == Q.segment_id,
+                Code.coder_id == SYSTEM_AGGREGATOR_ID,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        has_coder_code = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == Q.segment_id,
+                Code.coder_id >= 1,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        rows = s.exec(
+            select(Q.segment_id, Q.codebook_used_id)  # type: ignore[union-attr]
+            .where(~has_unfinished, ~has_agg, has_coder_code)
+            .distinct()
+        ).all()
+        return len(rows)
+
+
 def next_segment_to_aggregate() -> Segment | None:
     """Return the next Segment that needs aggregation, or None.
 
@@ -220,6 +262,9 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
         for c in codes:
             if c.code_id is not None:
                 continue
+            # Add c before wiring relationships so back-population of
+            # Quote.codes sees c as session-resident (avoids SAWarning).
+            s.add(c)
             c.supporting_quotes = [
                 s.merge(q) if q.quote_id is not None else q
                 for q in (c.supporting_quotes or [])
@@ -227,7 +272,6 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
             for edge in c.derivation_sources or []:
                 if edge.source_code is not None and edge.source_code.code_id is not None:
                     edge.source_code = s.merge(edge.source_code)
-            s.add(c)
             written.append(c)
         s.commit()
         out: list[Code] = []
