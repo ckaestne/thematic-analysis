@@ -188,6 +188,47 @@ class TestCoderAgent:
         result = agent._parse_response(_resp([]), _seg(SEG_TEXT))
         assert len(result) == 1 and is_sentinel_code(result[0])
 
+    def test_parse_response_dedups_near_identical_quotes(
+        self, agent: CoderAgent
+    ):
+        # Two codes claim the same span with trivial punctuation/casing
+        # differences; both should end up linked to one Quote object.
+        response = _resp([
+            {
+                "code": "c1",
+                "description": "d1",
+                "quotes": ["felt supported"],
+            },
+            {
+                "code": "c2",
+                "description": "d2",
+                "quotes": [" felt supported "],
+            },
+        ])
+        result = agent._parse_response(response, _seg(SEG_TEXT))
+        assert len(result) == 2
+        q1 = result[0].supporting_quotes[0]
+        q2 = result[1].supporting_quotes[0]
+        assert q1 is q2
+
+    def test_parse_response_reuses_existing_segment_quote(
+        self, agent: CoderAgent
+    ):
+        from thematic_analysis_inc.db.models import Quote
+
+        existing = Quote(quote_id=42, text="Felt Supported", segment_id=1)
+        response = _resp([
+            {
+                "code": "c1",
+                "description": "d1",
+                "quotes": ["felt supported"],
+            }
+        ])
+        result = agent._parse_response(
+            response, _seg(SEG_TEXT, quotes=[existing])
+        )
+        assert result[0].supporting_quotes[0] is existing
+
     @patch.object(CoderAgent, "_call_llm")
     def test_code_segment(self, mock_llm, agent: CoderAgent):
         mock_llm.return_value = _resp([
