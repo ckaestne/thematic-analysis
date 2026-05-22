@@ -85,6 +85,7 @@ function colorFor(i: number): string {
 type HighlightCode = {
   key: string;
   color: string;
+  label: string;
   quotes: string[];
 };
 
@@ -158,31 +159,48 @@ function HighlightedText({
     for (const c of codes) m[c.key] = c.color;
     return m;
   }, [codes]);
+  const labelByKey = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const c of codes) m[c.key] = c.label;
+    return m;
+  }, [codes]);
+  // For each global span index, list of code keys whose coverage ends
+  // here (i.e. the next span doesn't include them). We render a small
+  // anchor-chip after the span for each ending code.
+  const endingByIndex = useMemo(() => {
+    const m: Record<number, string[]> = {};
+    for (let i = 0; i < spans.length; i++) {
+      const here = spans[i].codes;
+      const next = spans[i + 1]?.codes ?? [];
+      const ending = here.filter((k) => !next.includes(k));
+      if (ending.length > 0) m[i] = ending;
+    }
+    return m;
+  }, [spans]);
 
   // Group consecutive spans into paragraphs by splitting the text on
-  // double newlines (blog-style paragraph breaks).
-  // Find paragraph break offsets.
-  const paragraphs: Array<Array<Span>> = [];
-  let current: Span[] = [];
-  for (const s of spans) {
+  // double newlines (blog-style paragraph breaks). Carry the original
+  // span index so we can look up ending-code chips per render row.
+  type PSpan = Span & { gi: number };
+  const paragraphs: Array<Array<PSpan>> = [];
+  let current: PSpan[] = [];
+  for (let gi = 0; gi < spans.length; gi++) {
+    const s = spans[gi];
     const slice = text.slice(s.start, s.end);
     const parts = slice.split(/\n\n+/);
     if (parts.length === 1) {
-      current.push(s);
+      current.push({ ...s, gi });
       continue;
     }
-    // First part stays in current paragraph.
     let cursor = s.start;
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
       const segEnd = cursor + p.length;
       if (segEnd > cursor) {
-        current.push({ start: cursor, end: segEnd, codes: s.codes });
+        current.push({ start: cursor, end: segEnd, codes: s.codes, gi });
       }
       cursor = segEnd;
       if (i < parts.length - 1) {
-        // Match the literal "\n\n+" separator length by advancing
-        // through any run of newlines.
         while (cursor < s.end && text[cursor] === "\n") cursor++;
         paragraphs.push(current);
         current = [];
@@ -239,15 +257,70 @@ function HighlightedText({
               borderRadius: 2,
               padding: "0 1px",
             };
+            const tooltipLabel = (
+              <Stack gap={2}>
+                {s.codes.map((k) => (
+                  <Group key={k} gap={6} wrap="nowrap">
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: `var(--mantine-color-${colorByKey[k]}-5)`,
+                      }}
+                    />
+                    <Text size="xs">{labelByKey[k]}</Text>
+                  </Group>
+                ))}
+              </Stack>
+            );
+            const ending = endingByIndex[s.gi] ?? [];
             return (
-              <span
-                key={si}
-                style={style}
-                onMouseEnter={() => onHover(s.codes[0])}
-                onMouseLeave={() => onHover(null)}
-                title={s.codes.length > 1 ? `${s.codes.length} codes` : undefined}
-              >
-                {slice}
+              <span key={si}>
+                <Tooltip
+                  label={tooltipLabel}
+                  withArrow
+                  multiline
+                  position="top"
+                  openDelay={120}
+                >
+                  <span
+                    style={style}
+                    onMouseEnter={() => onHover(s.codes[0])}
+                    onMouseLeave={() => onHover(null)}
+                  >
+                    {slice}
+                  </span>
+                </Tooltip>
+                {ending.map((k) => {
+                  const chipHovered =
+                    hoveredKey === null || hoveredKey === k;
+                  return (
+                    <sup
+                      key={k}
+                      onMouseEnter={() => onHover(k)}
+                      onMouseLeave={() => onHover(null)}
+                      style={{
+                        marginLeft: 2,
+                        padding: "1px 5px",
+                        fontSize: 10,
+                        fontFamily:
+                          "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        background: `var(--mantine-color-${colorByKey[k]}-${chipHovered ? 3 : 1})`,
+                        color: `var(--mantine-color-${colorByKey[k]}-9)`,
+                        border: `1px solid var(--mantine-color-${colorByKey[k]}-${chipHovered ? 5 : 3})`,
+                        borderRadius: 8,
+                        cursor: "pointer",
+                        verticalAlign: "baseline",
+                        opacity: hoveredKey && hoveredKey !== k ? 0.45 : 1,
+                        transition: "background-color 120ms, opacity 120ms",
+                      }}
+                    >
+                      {labelByKey[k]}
+                    </sup>
+                  );
+                })}
               </span>
             );
           })}
@@ -415,6 +488,7 @@ export function SegmentCodingCard({
         highlightCodes: segment.aggregated_codes.map((ac, i) => ({
           key: `agg-${ac.id}`,
           color: colorFor(i),
+          label: ac.code,
           quotes: ac.quotes.map((q) => q.text),
         })),
       });
@@ -428,6 +502,7 @@ export function SegmentCodingCard({
         highlightCodes: run.codes.map((c, i) => ({
           key: `c-${run.coder_id}-${c.position}`,
           color: colorFor(i),
+          label: c.code,
           quotes: (c.quotes ?? []).map((q) => q.text),
         })),
       });
