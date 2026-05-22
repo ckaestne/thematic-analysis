@@ -220,6 +220,9 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
         for c in codes:
             if c.code_id is not None:
                 continue
+            # Add c before wiring relationships so back-population of
+            # Quote.codes sees c as session-resident (avoids SAWarning).
+            s.add(c)
             c.supporting_quotes = [
                 s.merge(q) if q.quote_id is not None else q
                 for q in (c.supporting_quotes or [])
@@ -227,7 +230,6 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
             for edge in c.derivation_sources or []:
                 if edge.source_code is not None and edge.source_code.code_id is not None:
                     edge.source_code = s.merge(edge.source_code)
-            s.add(c)
             written.append(c)
         s.commit()
         out: list[Code] = []
