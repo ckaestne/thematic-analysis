@@ -42,7 +42,9 @@ entry point sharing one SQLite file:
 | Subcommand group | Stage |
 |---|---|
 | `code`, `aggregate`, `review`, `status` | Stage 1: Coding → Aggregation → Review → Codebook |
-| `theme-code`, `theme-aggregate`, `theme-status` | Stage 2: Theme coding → Theme aggregation → Final themes |
+
+Stage 2 (theme development) is being rewritten and currently has no
+subcommands.
 
 Run `ta --help` to see every subcommand. Pass `--debug` for full
 tracebacks on unexpected errors.
@@ -62,7 +64,7 @@ uv run ta-web --db analysis.sqlite
 ```
 
 The UI shows progress at every stage (segments → coder runs → aggregation →
-review → codebook → theme coders → themes), lets you edit code text, and lets
+review → codebook), lets you edit code text, and lets
 you delete results so the pipeline re-computes them on the next worker run.
 
 For frontend development, run `npm install && npm run dev` inside `frontend/`
@@ -82,8 +84,8 @@ The pipeline uses a multi-agent architecture:
 1. **Coders** — multiple independent agents analyse text segments and assign codes.
 2. **Aggregator** — merges similar codes from different coders.
 3. **Reviewer** — validates each aggregated code and updates the versioned codebook.
-4. **Theme Coders** — group codes into higher-level themes.
-5. **Theme Aggregator** — produces the final consolidated themes.
+
+Stage 2 (theme development) is being rewritten.
 
 ## License
 

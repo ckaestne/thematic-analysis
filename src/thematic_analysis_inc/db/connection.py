@@ -133,14 +133,13 @@ def _migrate_sqlmodel_tables(engine: Engine) -> None:
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open an autocommit sqlite3 connection AND set up the SQLAlchemy
-    engine, both pointing at ``path``. Both layers' schemas are applied
-    so a fresh DB is usable immediately.
+    engine, both pointing at ``path``. The Stage-1 schema is applied so a
+    fresh DB is usable immediately.
 
-    The sqlite3 connection is only needed by Stage-2 helpers in
-    ``db/theme.py``. Stage-1 callers should ignore the return value.
+    Stage-1 callers go through the SQLModel session and don't need the
+    sqlite3 connection; it is returned for the few raw-SQL call sites
+    that still want it.
     """
-    from thematic_analysis_inc.db.schema import create_schema
-
     engine = _ensure_engine(path)
     _create_sqlmodel_tables(engine)
     _migrate_sqlmodel_tables(engine)
@@ -150,7 +149,6 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
-    create_schema(conn)
     return conn
 
 

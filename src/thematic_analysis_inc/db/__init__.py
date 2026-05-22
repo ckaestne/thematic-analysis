@@ -1,8 +1,7 @@
-"""DB layer for the Stage 1 + Stage 2 pipeline.
+"""DB layer for the Stage 1 pipeline.
 
 Stage-1 tables are owned by SQLModel (see :mod:`db.models`); all
-Stage-1 helpers take and return SQLModel objects. Stage-2 (``theme_*``)
-tables still use a raw-SQL DAL in :mod:`db.theme`.
+Stage-1 helpers take and return SQLModel objects.
 """
 
 from __future__ import annotations
@@ -16,9 +15,7 @@ from thematic_analysis_inc.db import (
     documents,
     research_context,
     review,
-    schema,
     status,
-    theme,
 )
 from thematic_analysis_inc.db.aggregation import (
     load_segment_and_codebook_for_aggregation,
@@ -82,29 +79,9 @@ from thematic_analysis_inc.db.research_context import (
     list_research_context_versions,
     to_domain as research_context_to_domain,
 )
-from thematic_analysis_inc.db.schema import create_schema
 from thematic_analysis_inc.db.status import (
-    Stage2StatusCounts,
     StatusCounts,
-    stage2_status_counts,
     status_counts,
-)
-from thematic_analysis_inc.db.theme import (
-    ThemeCoder,
-    add_theme_coder,
-    all_theme_coders_done,
-    get_theme_coder,
-    latest_theme_aggregation,
-    list_theme_coders,
-    record_theme_aggregation_failure,
-    record_theme_coder_failure,
-    record_theme_coder_result,
-    remove_theme_coder,
-    reset_unfinished_theme_aggregations,
-    reset_unfinished_theme_coder_runs,
-    start_theme_aggregation,
-    start_theme_coder_run,
-    theme_coders_to_run,
 )
 
 
@@ -118,9 +95,7 @@ __all__ = [
     "documents",
     "research_context",
     "review",
-    "schema",
     "status",
-    "theme",
     # connection
     "connect",
     "init_db",
@@ -178,25 +153,5 @@ __all__ = [
     "link_code_quote",
     # status
     "StatusCounts",
-    "Stage2StatusCounts",
     "status_counts",
-    "stage2_status_counts",
-    # schema
-    "create_schema",
-    # theme (Stage 2)
-    "ThemeCoder",
-    "add_theme_coder",
-    "remove_theme_coder",
-    "get_theme_coder",
-    "list_theme_coders",
-    "theme_coders_to_run",
-    "start_theme_coder_run",
-    "record_theme_coder_result",
-    "record_theme_coder_failure",
-    "reset_unfinished_theme_coder_runs",
-    "all_theme_coders_done",
-    "start_theme_aggregation",
-    "record_theme_aggregation_failure",
-    "reset_unfinished_theme_aggregations",
-    "latest_theme_aggregation",
 ]

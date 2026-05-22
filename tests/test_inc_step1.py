@@ -18,7 +18,6 @@ import pytest
 from thematic_analysis_inc import cli, workers
 from thematic_analysis_inc import db as store
 from thematic_analysis_inc.db.models import Code, Quote
-from thematic_analysis_inc.db.schema import create_schema
 
 
 def _add_segments(conn, doc, n: int):
@@ -74,12 +73,6 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
     latest = store.latest_codebook()
     assert latest is not None
     assert latest.version == 1
-
-
-def test_create_schema_idempotent(tmp_path: Path) -> None:
-    conn = store.connect(tmp_path / "x.sqlite")
-    create_schema(conn)
-    create_schema(conn)
 
 
 def test_insert_codebook_version_appends(tmp_path: Path) -> None:

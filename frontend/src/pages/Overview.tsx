@@ -14,7 +14,6 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import {
   IconBook2,
-  IconCategory,
   IconClipboardCheck,
   IconDatabase,
   IconStack2,
@@ -41,7 +40,7 @@ export function Overview() {
   if (error) return <ErrorAlert error={error} />;
   if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
 
-  const { stage1, stage2, per_coder, per_theme_coder } = data;
+  const { stage1, per_coder } = data;
 
   return (
     <Stack gap="md">
@@ -63,7 +62,7 @@ export function Overview() {
         </div>
       </Group>
 
-      <SimpleGrid cols={{ base: 2, sm: 3, md: 6 }} spacing="md">
+      <SimpleGrid cols={{ base: 2, sm: 3, md: 5 }} spacing="md">
         <StatCard
           label="Segments"
           value={stage1.segments_total}
@@ -91,16 +90,10 @@ export function Overview() {
           hint={`${stage1.codebook_codes} codes`}
           icon={<IconBook2 size={28} />}
         />
-        <StatCard
-          label="Themes"
-          value={stage2.themes_in_result}
-          hint={`v${stage2.codebook_version}`}
-          icon={<IconCategory size={28} />}
-        />
       </SimpleGrid>
 
       <Grid>
-        <Grid.Col span={{ base: 12, md: 6 }}>
+        <Grid.Col span={{ base: 12, md: 12 }}>
           <Card padding="md">
             <Stack gap="sm">
               <Title order={4}>Stage 1 progress</Title>
@@ -116,21 +109,6 @@ export function Overview() {
                 Aggregations
               </Text>
               <StatusBar counts={stage1.aggregations_by_status} />
-            </Stack>
-          </Card>
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, md: 6 }}>
-          <Card padding="md">
-            <Stack gap="sm">
-              <Title order={4}>Stage 2 progress</Title>
-              <Text size="sm" c="dimmed">
-                Theme coder runs (codebook v{stage2.codebook_version})
-              </Text>
-              <StatusBar counts={stage2.theme_coder_runs_by_status} />
-              <Text size="sm" c="dimmed" mt="xs">
-                Theme aggregations
-              </Text>
-              <StatusBar counts={stage2.theme_aggregations_by_status} />
             </Stack>
           </Card>
         </Grid.Col>
@@ -207,43 +185,6 @@ export function Overview() {
         )}
       </Card>
 
-      <Card padding="md">
-        <Title order={4} mb="sm">
-          Per-theme-coder progress (Stage 2)
-        </Title>
-        {per_theme_coder.length === 0 ? (
-          <Text c="dimmed" size="sm">
-            No theme coders registered.
-          </Text>
-        ) : (
-          <Table verticalSpacing="xs" striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Coder</Table.Th>
-                <Table.Th>Identity</Table.Th>
-                <Table.Th>Status</Table.Th>
-                <Table.Th>Finished</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {per_theme_coder.map((c) => (
-                <Table.Tr key={c.theme_coder_id}>
-                  <Table.Td>{c.theme_coder_id}</Table.Td>
-                  <Table.Td>
-                    <Tooltip label={c.identity} multiline w={300}>
-                      <Text size="sm" lineClamp={1}>
-                        {c.identity}
-                      </Text>
-                    </Tooltip>
-                  </Table.Td>
-                  <Table.Td>{c.run?.status ?? "not started"}</Table.Td>
-                  <Table.Td>{c.run?.finished_at ?? "—"}</Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        )}
-      </Card>
     </Stack>
   );
 }

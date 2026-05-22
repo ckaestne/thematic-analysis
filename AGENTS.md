@@ -2,9 +2,9 @@
 
 ## Designing or modifying agents
 
-When adding a new agent role (Coder, Aggregator, Reviewer, ThemeCoder,
-ThemeAggregator, …), changing an agent's public method, or wiring an
-agent into the worker layer, follow the conventions in
+When adding a new agent role (Coder, Aggregator, Reviewer, …),
+changing an agent's public method, or wiring an agent into the worker
+layer, follow the conventions in
 [`.claude/skills/agent-design/SKILL.md`](.claude/skills/agent-design/SKILL.md):
 agents take and return SQLModel objects directly, navigate relationships
 instead of carrying parallel data, never touch the DB, and own their
@@ -20,7 +20,7 @@ This project uses [uv](https://docs.astral.sh/uv/). Do **not** use `pip`,
   or edit `pyproject.toml` then `uv sync`).
 - Remove: `uv remove <pkg>`.
 - Run any project command via `uv run`:
-  - `uv run ta ...`  (all Stage 1 + Stage 2 subcommands; see `ta --help`)
+  - `uv run ta ...`  (all subcommands; see `ta --help`)
   - `uv run ta-web --db analysis.sqlite`
   - `uv run pytest` — runs the offline unit suite. **Do not pass
     `--run-integration` unless the user explicitly asks.** That flag

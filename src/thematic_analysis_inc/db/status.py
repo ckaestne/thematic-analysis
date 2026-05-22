@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from dataclasses import dataclass
 
 from sqlalchemy import func
@@ -197,77 +195,3 @@ def status_counts() -> StatusCounts:
     )
 
 
-# Stage 2 status (unchanged; still raw-SQL because theme_* tables are raw) ----
-
-
-@dataclass
-class Stage2StatusCounts:
-    codebook_version: int
-    theme_coders_total: int
-    theme_coder_runs_total: int
-    theme_coder_runs_by_status: dict[str, int]
-    theme_aggregations_total: int
-    theme_aggregations_by_status: dict[str, int]
-    themes_in_result: int
-
-    def format(self) -> str:
-        def by_status(d: dict[str, int]) -> str:
-            if not d:
-                return "(none)"
-            return " | ".join(f"{k}={v}" for k, v in sorted(d.items()))
-
-        lines = [
-            f"codebook version:     v{self.codebook_version}",
-            f"theme_coders:         {self.theme_coders_total}",
-            f"theme_coder_runs:     {self.theme_coder_runs_total} total | "
-            f"{by_status(self.theme_coder_runs_by_status)}",
-            f"theme_aggregations:   {self.theme_aggregations_total} total | "
-            f"{by_status(self.theme_aggregations_by_status)}",
-            f"themes in result:     {self.themes_in_result}",
-        ]
-        return "\n".join(lines)
-
-
-def stage2_status_counts(
-    conn: sqlite3.Connection, codebook_version: int
-) -> Stage2StatusCounts:
-    tc_total = conn.execute(
-        "SELECT COUNT(*) AS n FROM theme_coders"
-    ).fetchone()["n"]
-
-    tcr_rows = conn.execute(
-        "SELECT status, COUNT(*) AS n FROM theme_coder_runs "
-        "WHERE codebook_version = ? GROUP BY status",
-        (codebook_version,),
-    ).fetchall()
-    tcr_by = {r["status"]: r["n"] for r in tcr_rows}
-    tcr_total = sum(tcr_by.values())
-
-    ta_rows = conn.execute(
-        "SELECT status, COUNT(*) AS n FROM theme_aggregations "
-        "WHERE codebook_version = ? GROUP BY status",
-        (codebook_version,),
-    ).fetchall()
-    ta_by = {r["status"]: r["n"] for r in ta_rows}
-    ta_total = sum(ta_by.values())
-
-    themes_in_result = 0
-    agg = conn.execute(
-        "SELECT result_json FROM theme_aggregations "
-        "WHERE codebook_version = ? ORDER BY id DESC LIMIT 1",
-        (codebook_version,),
-    ).fetchone()
-    if agg is not None and agg["result_json"]:
-        themes_in_result = len(
-            json.loads(agg["result_json"]).get("themes", [])
-        )
-
-    return Stage2StatusCounts(
-        codebook_version=codebook_version,
-        theme_coders_total=int(tc_total),
-        theme_coder_runs_total=int(tcr_total),
-        theme_coder_runs_by_status=tcr_by,
-        theme_aggregations_total=int(ta_total),
-        theme_aggregations_by_status=ta_by,
-        themes_in_result=int(themes_in_result),
-    )
