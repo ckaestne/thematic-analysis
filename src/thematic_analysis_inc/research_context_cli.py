@@ -97,7 +97,7 @@ def register_typer(app: typer.Typer, run, *, panel: str) -> None:
     @app.command(
         name="set-research-context",
         rich_help_panel=panel,
-        help="store the research context used by Stage 1 + Stage 2 prompts",
+        help="store the research context used by Stage 1 prompts",
     )
     def _set(
         ctx: typer.Context,

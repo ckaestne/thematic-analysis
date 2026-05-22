@@ -20,8 +20,6 @@ from thematic_analysis.prompts import (
     CoderPrompts,
     PromptConfig,
     ReviewerPrompts,
-    ThemeAggregatorPrompts,
-    ThemeCoderPrompts,
     create_domain_prompts,
     get_prompt_config,
 )
@@ -52,8 +50,6 @@ __all__ = [
     "CoderPrompts",
     "AggregatorPrompts",
     "ReviewerPrompts",
-    "ThemeCoderPrompts",
-    "ThemeAggregatorPrompts",
     "get_prompt_config",
     "create_domain_prompts",
     # Document loaders

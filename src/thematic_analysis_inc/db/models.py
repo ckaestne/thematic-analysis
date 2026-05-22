@@ -137,7 +137,7 @@ class ResearchContext(SQLModel, table=True):
     """One revision of the research context.
 
     Each `add_research_context_and_codebook_revision` inserts a new row; the latest is the
-    "current" context. The five `*_prompt` columns map to
+    "current" context. The `*_prompt` columns map to
     `thematic_analysis.research_context.AGENT_ROLES`; `NULL` means "no
     tailored prompt for this role — fall back to `description`".
 
@@ -154,8 +154,6 @@ class ResearchContext(SQLModel, table=True):
     coder_prompt: Optional[str] = None
     coding_critic_prompt: Optional[str] = None
     reviewer_prompt: Optional[str] = None
-    theme_coder_prompt: Optional[str] = None
-    theme_aggregator_prompt: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -367,75 +365,6 @@ class CodingQueueEntry(SQLModel, table=True):
 
 
 # ===========================================================================
-# Stage 2 — theme tables
-# ===========================================================================
-
-
-class ThemeCoder(SQLModel, table=True):
-    __tablename__ = "theme_coder"
-
-    theme_coder_id: str = Field(primary_key=True)
-    identity: str
-    created_at: datetime = Field(default_factory=_utcnow)
-
-
-class ThemeCoderRun(SQLModel, table=True):
-    """One theme-coding run per (theme_coder, codebook)."""
-
-    __tablename__ = "theme_coder_run"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    theme_coder_id: str = Field(foreign_key="theme_coder.theme_coder_id")
-    codebook_used_id: int = Field(
-        foreign_key="codebook.version", index=True
-    )
-    status: str = Field(default="running", index=True)
-    claimed_at: datetime = Field(default_factory=_utcnow)
-    finished_at: Optional[datetime] = None
-    result_json: Optional[str] = None
-    raw_response: Optional[str] = None
-    error: Optional[str] = None
-
-    theme_coder: ThemeCoder = Relationship()
-    codebook_used: Codebook = Relationship()
-
-    contributed_to: list["ThemeAggregation"] = Relationship(
-        back_populates="input_runs",
-        sa_relationship_kwargs={"secondary": "theme_aggregation_input"},
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "theme_coder_id", "codebook_used_id",
-            name="uq_theme_coder_run",
-        ),
-    )
-
-
-class ThemeAggregation(SQLModel, table=True):
-    """One theme-aggregation per Codebook revision."""
-
-    __tablename__ = "theme_aggregation"
-
-    id: Optional[int] = Field(default=None, primary_key=True)
-    codebook_used_id: int = Field(
-        foreign_key="codebook.version", unique=True
-    )
-    status: str = Field(default="running", index=True)
-    created_at: datetime = Field(default_factory=_utcnow)
-    finished_at: Optional[datetime] = None
-    result_json: Optional[str] = None
-    error: Optional[str] = None
-
-    codebook_used: Codebook = Relationship()
-
-    input_runs: list[ThemeCoderRun] = Relationship(
-        back_populates="contributed_to",
-        sa_relationship_kwargs={"secondary": "theme_aggregation_input"},
-    )
-
-
-# ===========================================================================
 # Link tables
 #
 # Pure structural glue between entities. Kept at the bottom because each
@@ -518,19 +447,6 @@ class CodesDerived(SQLModel, table=True):
     )
 
 
-class ThemeAggregationInput(SQLModel, table=True):
-    """n:m link: which ThemeCoderRuns contributed to a ThemeAggregation."""
-
-    __tablename__ = "theme_aggregation_input"
-
-    theme_aggregation_id: int = Field(
-        foreign_key="theme_aggregation.id", primary_key=True
-    )
-    theme_coder_run_id: int = Field(
-        foreign_key="theme_coder_run.id", primary_key=True
-    )
-
-
 # ---------------------------------------------------------------------------
 
 
@@ -544,15 +460,10 @@ __all__ = [
     "Code",
     "Quote",
     "CodingQueueEntry",
-    # Stage 2
-    "ThemeCoder",
-    "ThemeCoderRun",
-    "ThemeAggregation",
     # Link tables
     "CodebookCode",
     "CodesSupportingQuotes",
     "CodesDerived",
-    "ThemeAggregationInput",
     # Enum-ish constants
     "DERIVATION_AGGREGATION",
     "DERIVATION_REVIEW",

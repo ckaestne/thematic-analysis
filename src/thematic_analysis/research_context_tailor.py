@@ -46,15 +46,6 @@ _ROLE_BRIEFS: dict[str, str] = {
         "research question(s); the critic must not invent relevance to "
         "justify keeping codes."
     ),
-    "theme_coder": (
-        "The downstream agent is a *theme coder*. It takes the full "
-        "codebook (codes plus example quotes) and proposes themes that "
-        "organise the codes into patterns of meaning. Emphasise the "
-        "topic-vs-theme distinction (a theme is not a topic heading; it is "
-        "a pattern of meaning organised around a central concept that "
-        "speaks to the research question). Emphasise what would count as a "
-        "theme answering, refining, or complicating the research question."
-    ),
     "reviewer": (
         "The downstream agent is a *reviewer*. It judges, code-by-code, "
         "whether an aggregated candidate code should be added to the "
@@ -62,14 +53,6 @@ _ROLE_BRIEFS: dict[str, str] = {
         "Emphasise how to decide that a code is on-topic for the research "
         "question(s) vs. off-topic; how to spot codes that are merely "
         "descriptive of the segment rather than analytically relevant."
-    ),
-    "theme_aggregator": (
-        "The downstream agent is a *theme aggregator*. It receives themes "
-        "from multiple theme coders and merges them into a final coherent "
-        "set. Emphasise how to judge whether the merged theme set tells a "
-        "coherent story about the research question(s); when to merge "
-        "themes that overlap, when to keep them distinct, and when to drop "
-        "themes that drift away from the research focus."
     ),
 }
 

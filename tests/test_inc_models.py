@@ -32,9 +32,6 @@ from thematic_analysis_inc.db.models import (
     Quote,
     ResearchContext,
     Segment,
-    ThemeAggregation,
-    ThemeCoder,
-    ThemeCoderRun,
 )
 
 
@@ -50,10 +47,6 @@ EXPECTED_TABLES = {
     "quote",
     "research_context",
     "segment",
-    "theme_aggregation",
-    "theme_aggregation_input",
-    "theme_coder",
-    "theme_coder_run",
 }
 
 
@@ -152,25 +145,9 @@ def _seed_world(session: Session) -> dict:
     )
     session.commit()
 
-    tc = ThemeCoder(theme_coder_id="t1", identity="critic")
-    session.add(tc)
-    session.commit()
-    tcr = ThemeCoderRun(
-        theme_coder_id="t1",
-        codebook_used_id=cb1.version,
-    )
-    session.add(tcr)
-    session.commit()
-    ta = ThemeAggregation(codebook_used_id=cb1.version)
-    session.add(ta)
-    session.commit()
-    ta.input_runs.append(tcr)
-    session.commit()
-
     return {
         "cb1": cb1, "rc1": rc1, "alice": alice, "doc": doc, "seg": seg,
-        "coder_code": coder_code, "agg": agg, "rev": rev, "tcr": tcr,
-        "ta": ta,
+        "coder_code": coder_code, "agg": agg, "rev": rev,
     }
 
 
@@ -296,15 +273,6 @@ def test_codebook_parent_chain(session: Session) -> None:
     assert cb1.parent is None
     # children walks forward
     assert [c.version for c in cb1.children] == [cb2.version]
-
-
-def test_theme_aggregation_navigates(session: Session) -> None:
-    world = _seed_world(session)
-    ta = session.exec(select(ThemeAggregation)).one()
-    assert len(ta.input_runs) == 1
-    assert ta.input_runs[0].theme_coder.identity == "critic"
-    assert ta.codebook_used.version == world["cb1"].version
-    assert ta.codebook_used.research_context.description == "initial"
 
 
 def test_quote_back_ref_to_codes(session: Session) -> None:

@@ -19,9 +19,7 @@ from dataclasses import dataclass, field
 AGENT_ROLES: tuple[str, ...] = (
     "coder",
     "coding_critic",
-    "theme_coder",
     "reviewer",
-    "theme_aggregator",
 )
 
 

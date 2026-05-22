@@ -1,14 +1,12 @@
-# Stage 1 / Stage 2 SQLite schema
+# Stage 1 SQLite schema
 
-This is the authoritative reference for the Stage 1 + Stage 2 SQLite
-schema. The DDL itself lives in `db/schema.py`; all helpers that read or
-write these tables live in `db/`. Nothing outside the `db/` package
-should contain raw SQL.
+This is the authoritative reference for the Stage 1 SQLite schema.
+Stage-1 tables are owned by SQLModel (see `db/models.py`); all helpers
+that read or write these tables live in `db/`. Nothing outside the
+`db/` package should contain raw SQL.
 
 The pipeline is **incremental and resumable**: each run is recorded, and
-status is derived from row presence rather than stored explicitly. Where
-status columns remain (Stage 2 `theme_*`), they're carried over verbatim
-from the previous schema.
+status is derived from row presence rather than stored explicitly.
 
 ---
 
@@ -234,21 +232,6 @@ Index: `(coder_id)`.
 
 ---
 
-## Stage 2 — theme tables
-
-The research context active for a Stage-2 row is reachable via its
-`codebook_version` (which pins one):
-
-- `theme_coders(theme_coder_id, identity, created_at)`
-- `theme_coder_runs(id, theme_coder_id, codebook_version, status, claimed_at, finished_at, result_json, raw_response, error)`
-- `theme_aggregations(id, codebook_version UNIQUE, status, created_at, finished_at, result_json, error)`
-- `theme_aggregation_inputs(theme_aggregation_id, theme_coder_run_id)`
-
-These keep their explicit `status` column; the surrounding pipeline
-expectations are unchanged.
-
----
-
 ## Pipeline state machine
 
 The four pipeline stages — coding, aggregation, review, codebook — are
@@ -302,9 +285,9 @@ The research context evolves over time; each `set_research_context`
 call creates a new row in `research_context` with a fresh
 `research_context_version` **and** a new `codebook` revision pinned to
 it (membership copied from the previous codebook). Downstream tables —
-`codes`, `coding_queue`, `theme_coder_runs`, `theme_aggregations` —
-only carry `codebook_version`; the research context for any row is
-`codebook.research_context_version` of the referenced codebook.
+`codes`, `coding_queue` — only carry `codebook_version`; the research
+context for any row is `codebook.research_context_version` of the
+referenced codebook.
 
 ---
 

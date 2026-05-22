@@ -3,7 +3,6 @@
 from thematic_analysis.agents import (
     CoderAgent,
     ReviewerAgent,
-    ThemeCoderAgent,
 )
 from thematic_analysis.codebook import Codebook
 
@@ -43,16 +42,6 @@ class TestCodebookIdentityBug:
             live_codes=[],
             embedding_service=db_embeddings.EmbeddingService(use_mock=True),
         )
-
-        assert id(agent.codebook) == original_id
-        assert agent.codebook is codebook
-
-    def test_theme_coder_agent_preserves_codebook_identity(self):
-        """ThemeCoderAgent should use the exact codebook passed to it."""
-        codebook = Codebook(use_mock_embeddings=True)
-        original_id = id(codebook)
-
-        agent = ThemeCoderAgent(codebook=codebook)
 
         assert id(agent.codebook) == original_id
         assert agent.codebook is codebook

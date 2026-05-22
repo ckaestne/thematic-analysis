@@ -80,7 +80,6 @@ def test_status_endpoints_reachable(client: TestClient) -> None:
         "/api/coders",
         "/api/documents",
         "/api/research-context",
-        "/api/theme-coders",
     ]:
         r = client.get(ep)
         assert r.status_code == 200, (

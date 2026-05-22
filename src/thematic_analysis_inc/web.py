@@ -1,9 +1,7 @@
 """FastAPI web server for inspecting and editing the thematic-analysis pipeline.
 
-Stage-1 endpoints use the SQLModel-backed helpers in
+Endpoints use the SQLModel-backed helpers in
 :mod:`thematic_analysis_inc.db` directly (no ``conn`` threading).
-Stage-2 endpoints still open a ``sqlite3.Connection`` for the
-``theme_*`` tables.
 """
 
 from __future__ import annotations
@@ -32,7 +30,6 @@ from thematic_analysis_inc.db import (
     documents as db_documents,
     review as db_review,
     status as db_status,
-    theme as db_theme,
 )
 
 
@@ -106,25 +103,6 @@ def _coder_progress() -> list[dict[str, Any]]:
                 "runs_done": prog.get("done", 0),
                 "runs_running": prog.get("running", 0),
                 "runs_failed": prog.get("failed", 0),
-            }
-        )
-    return out
-
-
-def _theme_coder_progress(
-    conn: sqlite3.Connection, codebook_version: int
-) -> list[dict[str, Any]]:
-    coders = db_theme.list_theme_coders_rows(conn)
-    out = []
-    for c in coders:
-        run = db_theme.latest_theme_coder_run(
-            conn, c["theme_coder_id"], codebook_version
-        )
-        out.append(
-            {
-                "theme_coder_id": c["theme_coder_id"],
-                "identity": c["identity"],
-                "run": dict(run) if run else None,
             }
         )
     return out
@@ -266,69 +244,52 @@ def create_app(db_path: str | Path) -> FastAPI:
 
     @app.get("/api/status")
     def get_status() -> dict[str, Any]:
-        conn = _conn()
-        try:
-            s1 = store.status_counts()
-            latest = store.latest_codebook()
-            codebook_version = latest.version if latest else 0
-            s2 = store.stage2_status_counts(conn, codebook_version)
-            rc_row = store.get_research_context()
-            ctx = (
-                store.research_context_to_domain(rc_row)
-                if rc_row is not None
-                else None
-            )
-            latest_rc_version = (
-                rc_row.research_context_version if rc_row is not None else None
-            )
-            db_size = _DB_PATH.stat().st_size if _DB_PATH and _DB_PATH.exists() else 0
-            return {
-                "db_path": str(_DB_PATH),
-                "db_size_bytes": db_size,
-                "research_context_set": ctx is not None,
-                "latest_research_context_version": latest_rc_version,
-                "stage1": {
-                    "segments_total": s1.segments_total,
-                    "segments_by_status": s1.segments_by_status,
-                    "coders_total": s1.coders_total,
-                    "coding_queue_total": s1.coding_queue_total,
-                    "coding_queue_by_status": s1.coding_queue_by_status,
-                    "aggregator_codes_total": s1.aggregator_codes_total,
-                    "aggregator_segments_total": s1.aggregator_segments_total,
-                    "reviewer_codes_total": s1.reviewer_codes_total,
-                    "review_decisions_by_kind": s1.review_decisions_by_kind,
-                    "codebook_version": s1.codebook_version,
-                    "codebook_codes": s1.codebook_codes,
-                    # Legacy aliases the bundled SPA references.
-                    "coder_runs_total": s1.coding_queue_total,
-                    "coder_runs_by_status": s1.coding_queue_by_status,
-                    "aggregations_total": s1.aggregator_segments_total,
-                    "aggregations_by_status": (
-                        {"done": s1.aggregator_segments_total}
-                        if s1.aggregator_segments_total
-                        else {}
-                    ),
-                    "review_decisions_total": sum(
-                        s1.review_decisions_by_kind.values()
-                    ),
-                    "review_decisions_applied": sum(
-                        s1.review_decisions_by_kind.values()
-                    ),
-                },
-                "stage2": {
-                    "codebook_version": s2.codebook_version,
-                    "theme_coders_total": s2.theme_coders_total,
-                    "theme_coder_runs_total": s2.theme_coder_runs_total,
-                    "theme_coder_runs_by_status": s2.theme_coder_runs_by_status,
-                    "theme_aggregations_total": s2.theme_aggregations_total,
-                    "theme_aggregations_by_status": s2.theme_aggregations_by_status,
-                    "themes_in_result": s2.themes_in_result,
-                },
-                "per_coder": _coder_progress(),
-                "per_theme_coder": _theme_coder_progress(conn, codebook_version),
-            }
-        finally:
-            conn.close()
+        s1 = store.status_counts()
+        rc_row = store.get_research_context()
+        ctx = (
+            store.research_context_to_domain(rc_row)
+            if rc_row is not None
+            else None
+        )
+        latest_rc_version = (
+            rc_row.research_context_version if rc_row is not None else None
+        )
+        db_size = _DB_PATH.stat().st_size if _DB_PATH and _DB_PATH.exists() else 0
+        return {
+            "db_path": str(_DB_PATH),
+            "db_size_bytes": db_size,
+            "research_context_set": ctx is not None,
+            "latest_research_context_version": latest_rc_version,
+            "stage1": {
+                "segments_total": s1.segments_total,
+                "segments_by_status": s1.segments_by_status,
+                "coders_total": s1.coders_total,
+                "coding_queue_total": s1.coding_queue_total,
+                "coding_queue_by_status": s1.coding_queue_by_status,
+                "aggregator_codes_total": s1.aggregator_codes_total,
+                "aggregator_segments_total": s1.aggregator_segments_total,
+                "reviewer_codes_total": s1.reviewer_codes_total,
+                "review_decisions_by_kind": s1.review_decisions_by_kind,
+                "codebook_version": s1.codebook_version,
+                "codebook_codes": s1.codebook_codes,
+                # Legacy aliases the bundled SPA references.
+                "coder_runs_total": s1.coding_queue_total,
+                "coder_runs_by_status": s1.coding_queue_by_status,
+                "aggregations_total": s1.aggregator_segments_total,
+                "aggregations_by_status": (
+                    {"done": s1.aggregator_segments_total}
+                    if s1.aggregator_segments_total
+                    else {}
+                ),
+                "review_decisions_total": sum(
+                    s1.review_decisions_by_kind.values()
+                ),
+                "review_decisions_applied": sum(
+                    s1.review_decisions_by_kind.values()
+                ),
+            },
+            "per_coder": _coder_progress(),
+        }
 
     def _rc_payload(rc) -> dict[str, Any]:
         ctx = store.research_context_to_domain(rc)
@@ -1300,128 +1261,6 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "derivation_sources": sources,
                 "in_codebook_versions": in_codebooks,
             }
-
-    # ── stage 2: theme coders ────────────────────────────────────────────
-    @app.get("/api/theme-coders")
-    def get_theme_coders() -> list[dict[str, Any]]:
-        conn = _conn()
-        try:
-            return [vars(c) for c in store.list_theme_coders(conn)]
-        finally:
-            conn.close()
-
-    @app.post("/api/theme-coders")
-    def post_theme_coder(body: dict) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            name = body.get("name") or body.get("coder_id") or ""
-            identity = body.get("identity", "")
-            if not name:
-                raise HTTPException(status_code=422, detail="name required")
-            inserted = store.add_theme_coder(conn, name, identity)
-            return {"inserted": inserted, "theme_coder_id": name}
-        finally:
-            conn.close()
-
-    @app.delete("/api/theme-coders/{theme_coder_id}")
-    def delete_theme_coder(
-        theme_coder_id: str, force: bool = False
-    ) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            try:
-                removed, n = store.remove_theme_coder(
-                    conn, theme_coder_id, force=force
-                )
-            except RuntimeError as e:
-                raise HTTPException(status_code=409, detail=str(e))
-            if not removed:
-                raise HTTPException(
-                    status_code=404, detail="theme coder not found"
-                )
-            return {"removed": True, "runs_deleted": n}
-        finally:
-            conn.close()
-
-    @app.get("/api/theme-coder-runs")
-    def list_theme_coder_runs(
-        codebook_version: int | None = None,
-    ) -> list[dict[str, Any]]:
-        conn = _conn()
-        try:
-            if codebook_version is None:
-                latest = store.latest_codebook()
-                codebook_version = latest.version if latest else 0
-            rows = db_theme.list_theme_coder_runs_for_version(
-                conn, codebook_version
-            )
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-    @app.get("/api/theme-coder-runs/{run_id}")
-    def get_theme_coder_run(run_id: int) -> dict[str, Any]:
-        conn = _conn()
-        try:
-            row = db_theme.get_theme_coder_run(conn, run_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="run not found")
-            d = dict(row)
-            d["result"] = (
-                json.loads(d.pop("result_json"))
-                if d.get("result_json")
-                else None
-            )
-            return d
-        finally:
-            conn.close()
-
-    @app.delete("/api/theme-coder-runs/{run_id}")
-    def delete_theme_coder_run(run_id: int) -> dict[str, str]:
-        conn = _conn()
-        try:
-            ok = db_theme.delete_theme_coder_run(conn, run_id)
-            if not ok:
-                raise HTTPException(status_code=404, detail="run not found")
-            return {"status": "ok"}
-        finally:
-            conn.close()
-
-    @app.get("/api/theme-aggregation")
-    def get_theme_aggregation(
-        codebook_version: int | None = None,
-    ) -> dict[str, Any] | None:
-        conn = _conn()
-        try:
-            if codebook_version is None:
-                latest = store.latest_codebook()
-                codebook_version = latest.version if latest else 0
-            row = store.latest_theme_aggregation(conn, codebook_version)
-            if row is None:
-                return None
-            d = dict(row)
-            d["result"] = (
-                json.loads(d.pop("result_json"))
-                if d.get("result_json")
-                else None
-            )
-            return d
-        finally:
-            conn.close()
-
-    @app.delete("/api/theme-aggregations/{agg_id}")
-    def delete_theme_aggregation(agg_id: int) -> dict[str, str]:
-        conn = _conn()
-        try:
-            ok = db_theme.delete_theme_aggregation(conn, agg_id)
-            if not ok:
-                raise HTTPException(
-                    status_code=404, detail="aggregation not found"
-                )
-            return {"status": "ok"}
-        finally:
-            conn.close()
-
     # ── static SPA ───────────────────────────────────────────────────────
     static_dir = Path(__file__).parent / "web_static"
     if static_dir.exists() and (static_dir / "index.html").exists():

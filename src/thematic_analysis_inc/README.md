@@ -10,9 +10,12 @@ A single `ta` CLI exposes every step as a subcommand:
 | Subcommand group | Stage |
 |---|---|
 | `code`, `aggregate`, `review` | Coding → Aggregation → Review → Codebook |
-| `generate-themes` | Theme coding → Theme aggregation → Final themes |
 
 All subcommands share the same SQLite file (`--db <path>`).
+
+Stage 2 (theme development) is being rewritten and currently has no
+subcommands; see `stage2_notes.md` and `stage2_backup.txt` at the repo
+root for the previous implementation and design notes.
 
 ---
 
@@ -169,101 +172,6 @@ ta --db analysis.sqlite export-codebook --version 30 -o codebook_v30.json
 
 ---
 
-## Stage 2 — Theme Development
-
-Stage 2 reads the codebook built by Stage 1 from the same database and
-develops higher-level themes. Run it after Stage 1 `review` is complete.
-
-### 0. (Recommended) Set the research context
-
-Without a research context, theme coders and the aggregator have nothing
-to anchor on and produce themes that drift away from the research
-question. Set it once on the database — it is shared with Stage 1 too:
-
-```bash
-ta --db analysis.sqlite set-research-context \
-    --aim "Understand how lay users justify climate-policy skepticism" \
-    --research-question "What rhetorical strategies do skeptics use to justify inaction?" \
-    --domain "climate change" \
-    --theoretical-framework "critical discourse analysis"
-
-ta --db analysis.sqlite show-research-context
-```
-
-You can also pass `--file context.json` with the same field names.
-
-### 1. Register theme coders
-
-```bash
-ta --db analysis.sqlite add-theme-coder t1 "critical discourse analyst"
-ta --db analysis.sqlite add-theme-coder t2 "phenomenological researcher"
-ta --db analysis.sqlite list-theme-coders
-```
-
-### 2. Generate themes
-
-Each theme coder independently reads the codebook and proposes a set of
-themes; once all coders have finished, their themes are merged into a
-final consolidated set. Multiple coders can run in parallel.
-
-```bash
-# Uses the latest codebook version by default
-ta --db analysis.sqlite generate-themes --workers 2
-
-# Pin to a specific codebook version
-ta --db analysis.sqlite generate-themes --codebook-version 30
-
-# Retry failed runs and aggregations
-ta --db analysis.sqlite generate-themes --retry-failed
-```
-
-### 3. Check progress
-
-```bash
-ta --db analysis.sqlite theme-status
-# codebook version:     v52
-# theme_coders:         2
-# theme_coder_runs:     2 total | done=2
-# theme_aggregations:   1 total | done=1
-# themes in result:     5
-```
-
-### 5. Export themes
-
-```bash
-ta --db analysis.sqlite export-themes -o themes.json
-
-# From a specific codebook version
-ta --db analysis.sqlite export-themes --codebook-version 30 -o themes_v30.json
-```
-
-For a human-readable, interactive report, export to HTML instead. The output is
-a self-contained page (Bulma is loaded from CDN) with a live search filter and
-collapsible theme cards — just open it in a browser:
-
-```bash
-ta --db analysis.sqlite export-themes-html -o themes.html
-```
-
-The output is a JSON object:
-
-```json
-{
-  "themes": [
-    {
-      "name": "Identity and Power",
-      "description": "...",
-      "original_themes": ["Identity", "Power Dynamics"],
-      "codes": ["code-a", "code-b", "code-c"],
-      "quotes": [{"quote_id": "seg_0001", "text": "..."}],
-      "merge_rationale": "Both themes describe..."
-    }
-  ]
-}
-```
-
----
-
 ## Database schema overview
 
 See [`data-schema.md`](./data-schema.md) for the authoritative reference.
@@ -282,9 +190,6 @@ codes_supporting_quotes  — n:m link from codes to quotes
 codes_derived       — provenance edges: 'A' = aggregation, 'R' = review (decision A/M/U)
 codebook            — which reviewer codes belong to which codebook version
 coding_queue        — replaces coder_runs; status derived from claimed_at/finished_at/error
-
-theme_coders, theme_coder_runs, theme_aggregations, theme_aggregation_inputs
-                    — Stage 2 (unchanged)
 ```
 
 ---
@@ -303,13 +208,4 @@ ta --db DB code            ID [--workers K] [--limit N] [--retry-failed]
 ta --db DB update-codebook [--limit N] [--retry-failed] [--mock-embeddings]
 ta --db DB status
 ta --db DB export-codebook [--version N] [-o FILE]
-
-ta --db DB add-theme-coder   ID IDENTITY
-ta --db DB rm-theme-coder    ID [--force]
-ta --db DB list-theme-coders
-ta --db DB generate-themes   [--codebook-version N] [--workers K] [--limit N]
-                                    [--retry-failed] [--mock-embeddings]
-ta --db DB theme-status      [--codebook-version N]
-ta --db DB export-themes        [--codebook-version N] [-o FILE]
-ta --db DB export-themes-html   [--codebook-version N] [-o FILE]
 ```

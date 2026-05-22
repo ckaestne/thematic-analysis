@@ -55,9 +55,8 @@ class TestResearchContext:
 
     def test_agent_roles_expected(self):
         assert "coder" in AGENT_ROLES
-        assert "theme_coder" in AGENT_ROLES
+        assert "coding_critic" in AGENT_ROLES
         assert "reviewer" in AGENT_ROLES
-        assert "theme_aggregator" in AGENT_ROLES
 
 
 class TestMethodologyPrompt:

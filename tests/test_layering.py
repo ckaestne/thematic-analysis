@@ -57,8 +57,6 @@ def test_workers_does_not_open_sessions_directly():
         "coder.py",
         "aggregator.py",
         "reviewer.py",
-        "theme_coder.py",
-        "theme_aggregator.py",
     ],
 )
 def test_agents_do_not_touch_the_database(agent_file: str):

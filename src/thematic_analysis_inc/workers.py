@@ -1,15 +1,12 @@
-"""Worker functions for the incremental Stage 1 + Stage 2 pipelines.
+"""Worker functions for the incremental Stage 1 pipeline.
 
 These compose the helpers in :mod:`thematic_analysis_inc.db`. Stage-1
-helpers are SQLModel-backed and no longer take a ``conn`` parameter;
-Stage-2 helpers (``theme_*``) still need a ``sqlite3.Connection``.
+helpers are SQLModel-backed and no longer take a ``conn`` parameter.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import sqlite3
 import time
 from typing import Any, Callable
 
@@ -22,19 +19,6 @@ from thematic_analysis.agents.reviewer import (
     ReviewerAgent,
     ReviewerConfig,
 )
-from thematic_analysis.agents.theme_aggregator import (
-    ThemeAggregatorAgent,
-    ThemeAggregatorConfig,
-    ThemeAggregationResult,
-)
-from thematic_analysis.agents.theme_coder import (
-    Theme,
-    ThemeCoderAgent,
-    ThemeCoderConfig,
-    ThemeResult,
-)
-from thematic_analysis.codebook import Codebook as DomainCodebook
-from thematic_analysis.codebook.codebook import Quote as DomainQuote
 
 from thematic_analysis_inc import db
 from thematic_analysis_inc.db import (
@@ -45,7 +29,6 @@ from thematic_analysis_inc.db import (
     coding as db_coding,
     embeddings as db_embeddings,
     review as db_review,
-    theme as db_theme,
 )
 from thematic_analysis_inc.db.models import (
     Code,
@@ -59,15 +42,6 @@ from thematic_analysis_inc.db.models import (
 from thematic_analysis_inc.refinement import wrap_with_refinement
 
 
-# In-memory codebook cache (Stage-2 only — Stage-1 reviewer now reads
-# codebook membership directly from the DB).
-_codebook_cache: dict[int, DomainCodebook] = {}
-
-
-def clear_codebook_cache() -> None:
-    _codebook_cache.clear()
-
-
 def _apply_research_context(agent: Any) -> None:
     if not hasattr(agent, "research_context"):
         return
@@ -78,19 +52,6 @@ def _apply_research_context(agent: Any) -> None:
     if ctx.is_empty():
         return
     agent.research_context = ctx
-
-
-def _get_codebook(version: int, use_mock_embeddings: bool) -> DomainCodebook:
-    """In-memory snapshot of a codebook revision (Stage-2 only)."""
-    cb = _codebook_cache.get(version)
-    if cb is not None:
-        return cb
-    snapshot = db_codebook.codebook_to_json_for_version(version)
-    cb = DomainCodebook.from_json(
-        snapshot, use_mock_embeddings=use_mock_embeddings
-    )
-    _codebook_cache[version] = cb
-    return cb
 
 
 # ── Stage-A coder worker ─────────────────────────────────────────────────────
@@ -709,186 +670,3 @@ def finalize_codebook() -> int | None:
         return None
     new_cb = db_codebook.materialize_codebook_revision(parent_full)
     return new_cb.version if new_cb is not None else None
-
-
-# ── Stage 2 helpers (raw-SQL theme tables) ───────────────────────────────────
-
-
-def _theme_result_from_json(json_str: str) -> ThemeResult:
-    data = json.loads(json_str)
-    themes = [
-        Theme(
-            name=t["name"],
-            description=t["description"],
-            codes=t.get("codes", []),
-            quotes=[
-                DomainQuote(quote_id=q["quote_id"], text=q["text"])
-                for q in t.get("quotes", [])
-            ],
-        )
-        for t in data.get("themes", [])
-    ]
-    return ThemeResult(themes=themes)
-
-
-ThemeCoderFactory = Callable[[DomainCodebook, db_theme.ThemeCoder], Any]
-
-
-def default_theme_coder_factory(
-    codebook: DomainCodebook, theme_coder: db_theme.ThemeCoder
-) -> ThemeCoderAgent:
-    return ThemeCoderAgent(
-        config=ThemeCoderConfig(identity=theme_coder.identity),
-        codebook=codebook,
-    )
-
-
-def theme_code_one(
-    conn: sqlite3.Connection,
-    theme_coder_id: str,
-    codebook_version: int,
-    *,
-    use_mock_embeddings: bool = False,
-    agent_factory: ThemeCoderFactory | None = None,
-) -> dict | None:
-    theme_coder = db_theme.get_theme_coder(conn, theme_coder_id)
-    if theme_coder is None:
-        raise ValueError(f"unknown theme_coder_id: {theme_coder_id!r}")
-
-    existing_status = db_theme.get_existing_theme_coder_run_status(
-        conn, theme_coder_id, codebook_version
-    )
-    if existing_status == "done":
-        return None
-
-    run_id = db_theme.start_theme_coder_run(
-        conn, theme_coder_id, codebook_version
-    )
-    if run_id is None:
-        return None
-
-    factory = agent_factory or default_theme_coder_factory
-    try:
-        codebook = _get_codebook(codebook_version, use_mock_embeddings)
-        agent = factory(codebook, theme_coder)
-        _apply_research_context(agent)
-        t0 = time.monotonic()
-        result = agent.develop_themes()
-        result_json = result.to_json()
-        db_theme.record_theme_coder_result(conn, run_id, result_json)
-        return {
-            "ok": True,
-            "run_id": run_id,
-            "theme_coder_id": theme_coder_id,
-            "codebook_version": codebook_version,
-            "n_themes": len(result.themes),
-            "elapsed": time.monotonic() - t0,
-        }
-    except Exception as exc:
-        msg = f"{type(exc).__name__}: {exc}"
-        db_theme.record_theme_coder_failure(conn, run_id, msg)
-        return {
-            "ok": False,
-            "run_id": run_id,
-            "theme_coder_id": theme_coder_id,
-            "codebook_version": codebook_version,
-            "error": msg,
-        }
-
-
-async def drain_theme_code_async(
-    conn: sqlite3.Connection,
-    codebook_version: int,
-    *,
-    workers: int = 1,
-    limit: int | None = None,
-    use_mock_embeddings: bool = False,
-    agent_factory: ThemeCoderFactory | None = None,
-    on_event: Callable[[dict, dict], None] | None = None,
-) -> dict:
-    pending = [
-        r["theme_coder_id"]
-        for r in db_theme.theme_coders_to_run(conn, codebook_version)
-    ]
-    if limit is not None:
-        pending = pending[:limit]
-
-    counters: dict[str, int] = {"done": 0, "failed": 0}
-    sem = asyncio.Semaphore(max(1, workers))
-
-    async def run_one(coder_id: str) -> None:
-        async with sem:
-            res = theme_code_one(
-                conn,
-                coder_id,
-                codebook_version,
-                use_mock_embeddings=use_mock_embeddings,
-                agent_factory=agent_factory,
-            )
-            if res is None:
-                return
-            if res["ok"]:
-                counters["done"] += 1
-            else:
-                counters["failed"] += 1
-            if on_event is not None:
-                on_event(res, counters)
-
-    await asyncio.gather(*[run_one(cid) for cid in pending])
-    return counters
-
-
-# ── Stage 2 theme-aggregator worker ──────────────────────────────────────────
-
-ThemeAggregatorFactory = Callable[[], Any]
-
-
-def default_theme_aggregator_factory() -> ThemeAggregatorAgent:
-    return ThemeAggregatorAgent(config=ThemeAggregatorConfig())
-
-
-def theme_aggregate_one(
-    conn: sqlite3.Connection,
-    codebook_version: int,
-    *,
-    use_mock_embeddings: bool = False,
-    agent_factory: ThemeAggregatorFactory | None = None,
-) -> dict | None:
-    if not db_theme.all_theme_coders_done(conn, codebook_version):
-        return None
-
-    agg_id = db_theme.start_theme_aggregation(conn, codebook_version)
-    if agg_id is None:
-        return None
-
-    runs = db_theme.load_done_theme_coder_runs(conn, codebook_version)
-    theme_results = [_theme_result_from_json(r.result_json) for r in runs]
-    run_ids = [r.run_id for r in runs]
-
-    factory = agent_factory or default_theme_aggregator_factory
-    try:
-        agent = factory()
-        _apply_research_context(agent)
-        t0 = time.monotonic()
-        result: ThemeAggregationResult = agent.aggregate(theme_results)
-        result_json = result.to_json()
-        db_theme.record_theme_aggregation_result(
-            conn, agg_id, result_json, run_ids
-        )
-        return {
-            "ok": True,
-            "aggregation_id": agg_id,
-            "codebook_version": codebook_version,
-            "n_input_results": len(theme_results),
-            "n_themes": len(result.themes),
-            "elapsed": time.monotonic() - t0,
-        }
-    except Exception as exc:
-        msg = f"{type(exc).__name__}: {exc}"
-        db_theme.record_theme_aggregation_failure(conn, agg_id, msg)
-        return {
-            "ok": False,
-            "aggregation_id": agg_id,
-            "codebook_version": codebook_version,
-            "error": msg,
-        }

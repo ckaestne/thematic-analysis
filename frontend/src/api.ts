@@ -17,15 +17,6 @@ export type Status = {
     codebook_version: number;
     codebook_codes: number;
   };
-  stage2: {
-    codebook_version: number;
-    theme_coders_total: number;
-    theme_coder_runs_total: number;
-    theme_coder_runs_by_status: Record<string, number>;
-    theme_aggregations_total: number;
-    theme_aggregations_by_status: Record<string, number>;
-    themes_in_result: number;
-  };
   per_coder: Array<{
     coder_id: string;
     identity: string;
@@ -33,17 +24,6 @@ export type Status = {
     runs_done: number;
     runs_running: number;
     runs_failed: number;
-  }>;
-  per_theme_coder: Array<{
-    theme_coder_id: string;
-    identity: string;
-    run: null | {
-      id: number;
-      status: string;
-      claimed_at: string | null;
-      finished_at: string | null;
-      error: string | null;
-    };
   }>;
 };
 
@@ -354,42 +334,6 @@ export type Coder = {
   created_at: string;
 };
 
-export type ThemeCoder = {
-  theme_coder_id: string;
-  identity: string;
-  created_at: string;
-};
-
-export type ThemeCoderRun = {
-  id: number;
-  theme_coder_id: string;
-  codebook_version: number;
-  status: string;
-  claimed_at: string | null;
-  finished_at: string | null;
-  error: string | null;
-  result_bytes: number;
-};
-
-export type ThemeAggregation = {
-  id: number;
-  codebook_version: number;
-  status: string;
-  created_at: string;
-  finished_at: string | null;
-  error: string | null;
-  result: null | {
-    themes: Array<{
-      name: string;
-      description?: string;
-      original_themes?: string[];
-      codes?: string[];
-      quotes?: Array<{ quote_id: string; text: string }>;
-      merge_rationale?: string;
-    }>;
-  };
-};
-
 async function jsonFetch<T>(
   url: string,
   init?: RequestInit,
@@ -636,42 +580,4 @@ export const api = {
       },
     ),
   quote: (id: number) => jsonFetch<CodebookQuote>(`/api/quotes/${id}`),
-
-  themeCoders: () => jsonFetch<ThemeCoder[]>("/api/theme-coders"),
-  addThemeCoder: (coder_id: string, identity: string) =>
-    jsonFetch("/api/theme-coders", {
-      method: "POST",
-      body: JSON.stringify({ coder_id, identity }),
-    }),
-  deleteThemeCoder: (id: string, force: boolean) =>
-    jsonFetch(`/api/theme-coders/${id}?force=${force}`, {
-      method: "DELETE",
-    }),
-
-  themeCoderRuns: (codebook_version?: number) => {
-    const qs = new URLSearchParams();
-    if (codebook_version) qs.set("codebook_version", String(codebook_version));
-    return jsonFetch<ThemeCoderRun[]>(
-      `/api/theme-coder-runs?${qs.toString()}`,
-    );
-  },
-  themeCoderRun: (id: number) =>
-    jsonFetch<
-      ThemeCoderRun & {
-        result: ThemeAggregation["result"];
-        raw_response: string | null;
-      }
-    >(`/api/theme-coder-runs/${id}`),
-  deleteThemeCoderRun: (id: number) =>
-    jsonFetch(`/api/theme-coder-runs/${id}`, { method: "DELETE" }),
-
-  themeAggregation: (codebook_version?: number) => {
-    const qs = new URLSearchParams();
-    if (codebook_version) qs.set("codebook_version", String(codebook_version));
-    return jsonFetch<ThemeAggregation | null>(
-      `/api/theme-aggregation?${qs.toString()}`,
-    );
-  },
-  deleteThemeAggregation: (id: number) =>
-    jsonFetch(`/api/theme-aggregations/${id}`, { method: "DELETE" }),
 };

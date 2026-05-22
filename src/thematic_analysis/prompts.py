@@ -210,98 +210,6 @@ Please review this code and decide how to handle it.
 Provide your response as JSON."""
 
 
-@dataclass
-class ThemeCoderPrompts:
-    """Prompts for the Theme Coder agent."""
-
-    system_prompt: str = """\
-You are an expert qualitative researcher responsible for developing themes from
-a codebook. Your task is to identify patterns and groupings among codes to create
-meaningful themes that capture the essence of the data.
-
-## Guidelines for Theme Development:
-1. **Pattern recognition**: Look for codes that relate to similar concepts
-2. **Meaningful groupings**: Create themes that tell a coherent story
-3. **Clear naming**: Theme names should be descriptive and evocative
-4. **Grounded in data**: Themes must be supported by the coded data
-
-{identity_section}
-
-## Output Format:
-Respond with a JSON object containing:
-- "themes": List of themes, each with:
-  - "name": A clear, descriptive name for the theme
-  - "description": Brief description of what the theme captures
-  - "codes": List of codes that belong to this theme
-
-Example:
-```json
-{{
-  "themes": [
-    {{
-      "name": "Support Systems",
-      "description": "Various forms of support students rely on",
-      "codes": ["peer support", "family help", "counseling services"]
-    }}
-  ]
-}}
-```"""
-
-    user_prompt: str = """\
-## Available Codes:
-{codes_section}
-
-Please analyze these codes and develop meaningful themes.
-Provide your response as JSON."""
-
-
-@dataclass
-class ThemeAggregatorPrompts:
-    """Prompts for the Theme Aggregator agent."""
-
-    system_prompt: str = """\
-You are an expert qualitative researcher responsible for synthesizing themes
-from multiple theme coders. Your task is to identify similar themes that should
-be merged and create a final set of coherent, well-defined themes.
-
-## Guidelines for Theme Aggregation:
-1. **Identify overlaps**: Find themes that capture similar concepts
-2. **Preserve distinctness**: Keep themes separate if they represent different ideas
-3. **Create clarity**: When merging, create clear, comprehensive theme descriptions
-4. **Maintain coverage**: Ensure all important concepts are represented
-
-## Output Format:
-Respond with a JSON object containing:
-- "merge_groups": List of theme groups to merge, each with:
-  - "merged_name": Name for the merged theme
-  - "original_themes": List of themes being merged
-  - "merged_description": Description for the merged theme
-- "retain_themes": List of theme names to keep unchanged
-
-Example:
-```json
-{{
-  "merge_groups": [
-    {{
-      "merged_name": "Support Networks",
-      "original_themes": ["Peer Support", "Community Help"],
-      "merged_description": "Various support systems available to individuals"
-    }}
-  ],
-  "retain_themes": ["Academic Challenges", "Personal Growth"]
-}}
-```"""
-
-    user_prompt: str = """\
-## Themes to Organize:
-{themes_section}
-
-## Potentially Similar Theme Groups:
-{similar_groups_section}
-
-Please analyze these themes and decide which should be merged and which retained.
-Provide your response as JSON."""
-
 
 @dataclass
 class PromptConfig:
@@ -310,10 +218,6 @@ class PromptConfig:
     coder: CoderPrompts = field(default_factory=CoderPrompts)
     aggregator: AggregatorPrompts = field(default_factory=AggregatorPrompts)
     reviewer: ReviewerPrompts = field(default_factory=ReviewerPrompts)
-    theme_coder: ThemeCoderPrompts = field(default_factory=ThemeCoderPrompts)
-    theme_aggregator: ThemeAggregatorPrompts = field(
-        default_factory=ThemeAggregatorPrompts
-    )
 
 
 # Default prompt configuration
@@ -355,10 +259,6 @@ concepts, and research conventions when coding and developing themes.
     config.coder.system_prompt = config.coder.system_prompt.replace(
         "## Guidelines for Coding:",
         f"{domain_guidance}\n## Guidelines for Coding:",
-    )
-    config.theme_coder.system_prompt = config.theme_coder.system_prompt.replace(
-        "## Guidelines for Theme Development:",
-        f"{domain_guidance}\n## Guidelines for Theme Development:",
     )
 
     return config
