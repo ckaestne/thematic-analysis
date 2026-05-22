@@ -265,6 +265,7 @@ export type CodebookQuote = {
   text: string;
   segment_id: number;
   document_id: number | null;
+  document_filename: string | null;
 };
 
 export type CodebookCode = {
@@ -297,6 +298,7 @@ export type CodeDerivationSource = {
   codebook_used_id: number | null;
   segment_id: number | null;
   document_id: number | null;
+  document_filename: string | null;
   has_more_sources: boolean;
 };
 
@@ -313,6 +315,7 @@ export type CodeDetail = {
     segment_id: number;
     title: string | null;
     document_id: number;
+    document_filename: string | null;
     line_from: number;
     line_to: number;
     preview: string;

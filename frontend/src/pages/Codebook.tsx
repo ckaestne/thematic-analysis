@@ -37,8 +37,12 @@ function QuoteLink({ q }: { q: CodebookQuote }) {
         color: "inherit",
       }}
     >
-      <Text size="xs" c="dimmed" ff="monospace">
-        quote {q.quote_id} · segment {q.segment_id}
+      <Text size="xs" ff="monospace">
+        {q.document_filename ?? "(no document)"}#{q.segment_id}
+        <Text span size="xs" c="dimmed">
+          {" "}
+          · quote {q.quote_id}
+        </Text>
       </Text>
       <Text size="sm">{q.text}</Text>
     </Anchor>

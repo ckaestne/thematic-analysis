@@ -820,6 +820,7 @@ def create_app(db_path: str | Path) -> FastAPI:
         from thematic_analysis_inc.db.models import (
             Code,
             CodebookCode,
+            Document,
             Segment,
         )
 
@@ -844,6 +845,11 @@ def create_app(db_path: str | Path) -> FastAPI:
                     c.supporting_quotes, key=lambda x: x.quote_id
                 ):
                     qseg = s.get(Segment, q.segment_id)
+                    qdoc = (
+                        s.get(Document, qseg.document_id)
+                        if qseg is not None
+                        else None
+                    )
                     quotes.append(
                         {
                             "quote_id": q.quote_id,
@@ -851,6 +857,9 @@ def create_app(db_path: str | Path) -> FastAPI:
                             "segment_id": q.segment_id,
                             "document_id": (
                                 qseg.document_id if qseg else None
+                            ),
+                            "document_filename": (
+                                qdoc.filename if qdoc else None
                             ),
                         }
                     )
@@ -878,18 +887,20 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.get("/api/quotes/{quote_id}")
     def get_quote(quote_id: int) -> dict[str, Any]:
         _ensure_connected()
-        from thematic_analysis_inc.db.models import Quote, Segment
+        from thematic_analysis_inc.db.models import Document, Quote, Segment
 
         with store.session() as s:
             q = s.get(Quote, quote_id)
             if q is None:
                 raise HTTPException(status_code=404, detail="quote not found")
             seg = s.get(Segment, q.segment_id)
+            doc = s.get(Document, seg.document_id) if seg else None
             return {
                 "quote_id": q.quote_id,
                 "text": q.text,
                 "segment_id": q.segment_id,
                 "document_id": seg.document_id if seg else None,
+                "document_filename": doc.filename if doc else None,
             }
 
     @app.get("/api/codes/{code_id}")
@@ -907,6 +918,7 @@ def create_app(db_path: str | Path) -> FastAPI:
             CodebookCode,
             CodesDerived,
             Coder,
+            Document,
             Segment,
         )
 
@@ -915,17 +927,26 @@ def create_app(db_path: str | Path) -> FastAPI:
             if c is None:
                 raise HTTPException(status_code=404, detail="code not found")
             seg = s.get(Segment, c.segment_id) if c.segment_id else None
+            seg_doc = (
+                s.get(Document, seg.document_id) if seg is not None else None
+            )
             coder = s.get(Coder, c.coder_id)
 
             quotes = []
             for q in sorted(c.supporting_quotes, key=lambda x: x.quote_id):
                 qseg = s.get(Segment, q.segment_id)
+                qdoc = (
+                    s.get(Document, qseg.document_id)
+                    if qseg is not None
+                    else None
+                )
                 quotes.append(
                     {
                         "quote_id": q.quote_id,
                         "text": q.text,
                         "segment_id": q.segment_id,
                         "document_id": qseg.document_id if qseg else None,
+                        "document_filename": qdoc.filename if qdoc else None,
                     }
                 )
 
@@ -982,6 +1003,12 @@ def create_app(db_path: str | Path) -> FastAPI:
                         "document_id": (
                             src_seg.document_id if src_seg else None
                         ),
+                        "document_filename": (
+                            s.get(Document, src_seg.document_id).filename
+                            if src_seg is not None
+                            and s.get(Document, src_seg.document_id) is not None
+                            else None
+                        ),
                         "has_more_sources": has_more,
                     }
                 )
@@ -1008,6 +1035,9 @@ def create_app(db_path: str | Path) -> FastAPI:
                         "segment_id": seg.segment_id,
                         "title": seg.title,
                         "document_id": seg.document_id,
+                        "document_filename": (
+                            seg_doc.filename if seg_doc else None
+                        ),
                         "line_from": seg.line_from,
                         "line_to": seg.line_to,
                         "preview": seg.content[:240],

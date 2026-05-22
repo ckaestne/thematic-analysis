@@ -54,8 +54,12 @@ function QuoteLink({ q }: { q: CodebookQuote }) {
         color: "inherit",
       }}
     >
-      <Text size="xs" c="dimmed" ff="monospace">
-        quote {q.quote_id} · segment {q.segment_id}
+      <Text size="xs" ff="monospace">
+        {q.document_filename ?? "(no document)"}#{q.segment_id}
+        <Text span size="xs" c="dimmed">
+          {" "}
+          · quote {q.quote_id}
+        </Text>
       </Text>
       <Text size="sm">{q.text}</Text>
     </Anchor>
@@ -127,8 +131,10 @@ function LineageNode({
                       : `/segments/${source.segment_id}`
                   }
                   size="xs"
+                  ff="monospace"
                 >
-                  segment {source.segment_id}
+                  {source.document_filename ?? "(no document)"}#
+                  {source.segment_id}
                 </Anchor>
               )}
             </Group>
@@ -222,6 +228,7 @@ function selfAsSource(d: CodeDetail): CodeDerivationSource {
     codebook_used_id: d.codebook_used_id,
     segment_id: d.segment_id,
     document_id: d.segment?.document_id ?? null,
+    document_filename: d.segment?.document_filename ?? null,
     has_more_sources: d.derivation_sources.length > 0,
   };
 }
@@ -278,8 +285,10 @@ export function CodePage() {
                   component={Link}
                   to={`/documents/${d.segment.document_id}?segment=${d.segment.segment_id}`}
                   size="sm"
+                  ff="monospace"
                 >
-                  segment {d.segment.segment_id} (lines {d.segment.line_from}–
+                  {d.segment.document_filename ?? "(no document)"}#
+                  {d.segment.segment_id} (lines {d.segment.line_from}–
                   {d.segment.line_to})
                 </Anchor>
               )}
