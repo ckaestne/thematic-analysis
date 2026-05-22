@@ -784,36 +784,271 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.get("/api/codebook/versions")
     def list_codebook_versions() -> list[dict[str, Any]]:
         _ensure_connected()
+        from sqlalchemy import func
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import CodebookCode
+
         out = []
-        for cv in store.list_codebooks():
-            snap = json.loads(store.codebook_to_json_for_version(cv.version))
-            out.append(
-                {
-                    "version": cv.version,
-                    "parent_version": cv.parent_version,
-                    "created_at": (
-                        cv.created_at.isoformat() if cv.created_at else None
-                    ),
-                    "n_codes": len(snap.get("codes", [])),
-                }
-            )
+        with store.session() as s:
+            for cv in store.list_codebooks():
+                n = int(
+                    s.exec(
+                        select(func.count())
+                        .select_from(CodebookCode)
+                        .where(CodebookCode.codebook_version == cv.version)
+                    ).one()
+                )
+                out.append(
+                    {
+                        "version": cv.version,
+                        "parent_version": cv.parent_version,
+                        "research_context_version": cv.research_context_version,
+                        "created_at": (
+                            cv.created_at.isoformat()
+                            if cv.created_at
+                            else None
+                        ),
+                        "n_codes": n,
+                    }
+                )
         return out
 
     @app.get("/api/codebook/versions/{version}")
     def get_codebook_version(version: int) -> dict[str, Any]:
         _ensure_connected()
-        cv = store.get_codebook(version)
-        if cv is None:
-            raise HTTPException(status_code=404, detail="version not found")
-        snapshot = store.codebook_to_json_for_version(version)
-        return {
-            "version": cv.version,
-            "parent_version": cv.parent_version,
-            "created_at": (
-                cv.created_at.isoformat() if cv.created_at else None
-            ),
-            "codebook": json.loads(snapshot),
-        }
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import (
+            Code,
+            CodebookCode,
+            Document,
+            Segment,
+        )
+
+        with store.session() as s:
+            cv = s.get(store.Codebook, version)
+            if cv is None:
+                raise HTTPException(
+                    status_code=404, detail="version not found"
+                )
+            codes = list(
+                s.exec(
+                    select(Code)
+                    .join(CodebookCode, CodebookCode.code_id == Code.code_id)
+                    .where(CodebookCode.codebook_version == version)
+                    .order_by(Code.code)
+                ).all()
+            )
+            codes_payload = []
+            for c in codes:
+                quotes = []
+                for q in sorted(
+                    c.supporting_quotes, key=lambda x: x.quote_id
+                ):
+                    qseg = s.get(Segment, q.segment_id)
+                    qdoc = (
+                        s.get(Document, qseg.document_id)
+                        if qseg is not None
+                        else None
+                    )
+                    quotes.append(
+                        {
+                            "quote_id": q.quote_id,
+                            "text": q.text,
+                            "segment_id": q.segment_id,
+                            "document_id": (
+                                qseg.document_id if qseg else None
+                            ),
+                            "document_filename": (
+                                qdoc.filename if qdoc else None
+                            ),
+                        }
+                    )
+                codes_payload.append(
+                    {
+                        "code_id": c.code_id,
+                        "code": c.code,
+                        "description": c.description,
+                        "rationale": c.rationale,
+                        "coder_id": c.coder_id,
+                        "quotes": quotes,
+                    }
+                )
+            return {
+                "version": cv.version,
+                "parent_version": cv.parent_version,
+                "research_context_version": cv.research_context_version,
+                "created_at": (
+                    cv.created_at.isoformat() if cv.created_at else None
+                ),
+                "n_codes": len(codes_payload),
+                "codes": codes_payload,
+            }
+
+    @app.get("/api/quotes/{quote_id}")
+    def get_quote(quote_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        from thematic_analysis_inc.db.models import Document, Quote, Segment
+
+        with store.session() as s:
+            q = s.get(Quote, quote_id)
+            if q is None:
+                raise HTTPException(status_code=404, detail="quote not found")
+            seg = s.get(Segment, q.segment_id)
+            doc = s.get(Document, seg.document_id) if seg else None
+            return {
+                "quote_id": q.quote_id,
+                "text": q.text,
+                "segment_id": q.segment_id,
+                "document_id": seg.document_id if seg else None,
+                "document_filename": doc.filename if doc else None,
+            }
+
+    @app.get("/api/codes/{code_id}")
+    def get_code(code_id: int) -> dict[str, Any]:
+        """Full details for one Code with one level of derivation sources.
+
+        The tree-walk on the client is one HTTP call per node: each
+        source row carries enough to render, and following its
+        ``code_id`` to ``/api/codes/{id}`` returns its own sources.
+        """
+        _ensure_connected()
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import (
+            Code,
+            CodebookCode,
+            CodesDerived,
+            Coder,
+            Document,
+            Segment,
+        )
+
+        with store.session() as s:
+            c = s.get(Code, code_id)
+            if c is None:
+                raise HTTPException(status_code=404, detail="code not found")
+            seg = s.get(Segment, c.segment_id) if c.segment_id else None
+            seg_doc = (
+                s.get(Document, seg.document_id) if seg is not None else None
+            )
+            coder = s.get(Coder, c.coder_id)
+
+            quotes = []
+            for q in sorted(c.supporting_quotes, key=lambda x: x.quote_id):
+                qseg = s.get(Segment, q.segment_id)
+                qdoc = (
+                    s.get(Document, qseg.document_id)
+                    if qseg is not None
+                    else None
+                )
+                quotes.append(
+                    {
+                        "quote_id": q.quote_id,
+                        "text": q.text,
+                        "segment_id": q.segment_id,
+                        "document_id": qseg.document_id if qseg else None,
+                        "document_filename": qdoc.filename if qdoc else None,
+                    }
+                )
+
+            edges = list(
+                s.exec(
+                    select(CodesDerived).where(
+                        CodesDerived.new_code_id == code_id
+                    )
+                ).all()
+            )
+            sources: list[dict[str, Any]] = []
+            for e in edges:
+                src = s.get(Code, e.source_code_id)
+                src_coder = (
+                    s.get(Coder, src.coder_id) if src is not None else None
+                )
+                src_seg = (
+                    s.get(Segment, src.segment_id)
+                    if src is not None and src.segment_id
+                    else None
+                )
+                # Does this source itself have any further sources?
+                has_more = False
+                if src is not None:
+                    from sqlalchemy import func as _func
+                    has_more = (
+                        int(
+                            s.exec(
+                                select(_func.count())
+                                .select_from(CodesDerived)
+                                .where(
+                                    CodesDerived.new_code_id == src.code_id
+                                )
+                            ).one()
+                        )
+                        > 0
+                    )
+                sources.append(
+                    {
+                        "code_id": e.source_code_id,
+                        "derivation_type": e.derivation_type,
+                        "decision": e.decision,
+                        "rationale": e.rationale,
+                        "code": src.code if src else None,
+                        "description": src.description if src else None,
+                        "coder_id": src.coder_id if src else None,
+                        "coder_identity": (
+                            src_coder.identity if src_coder else None
+                        ),
+                        "codebook_used_id": (
+                            src.codebook_used_id if src else None
+                        ),
+                        "segment_id": src.segment_id if src else None,
+                        "document_id": (
+                            src_seg.document_id if src_seg else None
+                        ),
+                        "document_filename": (
+                            s.get(Document, src_seg.document_id).filename
+                            if src_seg is not None
+                            and s.get(Document, src_seg.document_id) is not None
+                            else None
+                        ),
+                        "has_more_sources": has_more,
+                    }
+                )
+
+            in_codebooks = [
+                int(v)
+                for v in s.exec(
+                    select(CodebookCode.codebook_version).where(
+                        CodebookCode.code_id == code_id
+                    )
+                ).all()
+            ]
+            return {
+                "code_id": c.code_id,
+                "code": c.code,
+                "description": c.description,
+                "rationale": c.rationale,
+                "coder_id": c.coder_id,
+                "coder_identity": coder.identity if coder else None,
+                "codebook_used_id": c.codebook_used_id,
+                "segment_id": c.segment_id,
+                "segment": (
+                    {
+                        "segment_id": seg.segment_id,
+                        "title": seg.title,
+                        "document_id": seg.document_id,
+                        "document_filename": (
+                            seg_doc.filename if seg_doc else None
+                        ),
+                        "line_from": seg.line_from,
+                        "line_to": seg.line_to,
+                        "preview": seg.content[:240],
+                    }
+                    if seg is not None
+                    else None
+                ),
+                "quotes": quotes,
+                "derivation_sources": sources,
+                "in_codebook_versions": in_codebooks,
+            }
 
     # ── stage 2: theme coders ────────────────────────────────────────────
     @app.get("/api/theme-coders")

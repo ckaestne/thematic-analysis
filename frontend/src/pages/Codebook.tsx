@@ -1,21 +1,112 @@
 import {
   Anchor,
   Badge,
+  Button,
   Card,
   Code,
-  Grid,
   Group,
-  ScrollArea,
+  Select,
   Stack,
-  Table,
   Text,
   Title,
 } from "@mantine/core";
+import { IconGitBranch } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, type CodebookCode, type CodebookQuote } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+
+const QUOTES_VISIBLE = 3;
+
+function QuoteLink({ q }: { q: CodebookQuote }) {
+  const to = q.document_id
+    ? `/documents/${q.document_id}?segment=${q.segment_id}&quote=${q.quote_id}`
+    : `/segments/${q.segment_id}?quote=${q.quote_id}`;
+  return (
+    <Anchor
+      component={Link}
+      to={to}
+      style={{
+        display: "block",
+        borderLeft: "3px solid var(--mantine-color-indigo-6)",
+        padding: "4px 10px",
+        background: "var(--mantine-color-default-hover)",
+        borderRadius: 3,
+        textDecoration: "none",
+        color: "inherit",
+      }}
+    >
+      <Text size="xs" ff="monospace">
+        {q.document_filename ?? "(no document)"}#{q.segment_id}
+        <Text span size="xs" c="dimmed">
+          {" "}
+          · quote {q.quote_id}
+        </Text>
+      </Text>
+      <Text size="sm">{q.text}</Text>
+    </Anchor>
+  );
+}
+
+function CodeCard({ c }: { c: CodebookCode }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? c.quotes : c.quotes.slice(0, QUOTES_VISIBLE);
+  const hidden = c.quotes.length - visible.length;
+  return (
+    <Card padding="md" withBorder>
+      <Group justify="space-between" mb="xs" align="flex-start">
+        <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
+          <Code style={{ fontSize: 15, fontWeight: 600 }}>{c.code}</Code>
+          {c.description && (
+            <Text size="sm" c="dimmed">
+              {c.description}
+            </Text>
+          )}
+        </Stack>
+        <Group gap="xs" wrap="nowrap">
+          <Text size="xs" c="dimmed">
+            {c.quotes.length} quote{c.quotes.length === 1 ? "" : "s"}
+          </Text>
+          <Button
+            component={Link}
+            to={`/code/${c.code_id}`}
+            variant="light"
+            size="xs"
+            leftSection={<IconGitBranch size={14} />}
+          >
+            Lineage
+          </Button>
+        </Group>
+      </Group>
+      <Stack gap={6}>
+        {visible.map((q) => (
+          <QuoteLink key={q.quote_id} q={q} />
+        ))}
+        {hidden > 0 && (
+          <Button
+            variant="subtle"
+            size="xs"
+            onClick={() => setShowAll(true)}
+            style={{ alignSelf: "flex-start" }}
+          >
+            Show {hidden} more quote{hidden === 1 ? "" : "s"}
+          </Button>
+        )}
+        {showAll && c.quotes.length > QUOTES_VISIBLE && (
+          <Button
+            variant="subtle"
+            size="xs"
+            onClick={() => setShowAll(false)}
+            style={{ alignSelf: "flex-start" }}
+          >
+            Show fewer
+          </Button>
+        )}
+      </Stack>
+    </Card>
+  );
+}
 
 export function CodebookPage() {
   const navigate = useNavigate();
@@ -25,9 +116,16 @@ export function CodebookPage() {
     queryFn: api.codebookVersions,
   });
 
+  // Latest is the highest version number.
+  const latestVersion = versions.data
+    ? versions.data
+        .map((v) => v.version)
+        .reduce((a, b) => (a > b ? a : b), 0)
+    : undefined;
+
   const selectedVersion = versionParam
     ? parseInt(versionParam, 10)
-    : versions.data?.[0]?.version;
+    : latestVersion;
 
   const detail = useQuery({
     queryKey: ["codebook-version", selectedVersion],
@@ -36,147 +134,88 @@ export function CodebookPage() {
   });
 
   useEffect(() => {
-    if (!versionParam && versions.data && versions.data.length > 0) {
-      navigate(`/codebook/${versions.data[0].version}`, { replace: true });
+    if (!versionParam && latestVersion) {
+      navigate(`/codebook/${latestVersion}`, { replace: true });
     }
-  }, [versionParam, versions.data, navigate]);
+  }, [versionParam, latestVersion, navigate]);
 
   if (versions.error) return <ErrorAlert error={versions.error} />;
 
+  const versionOptions = (versions.data ?? [])
+    .slice()
+    .sort((a, b) => b.version - a.version)
+    .map((v) => ({
+      value: String(v.version),
+      label: `v${v.version} · ${v.n_codes} codes${
+        v.version === latestVersion ? " · latest" : ""
+      }${v.created_at ? ` · ${v.created_at.slice(0, 10)}` : ""}`,
+    }));
+
   return (
     <Stack gap="md">
-      <Title order={2}>Codebook</Title>
-      <Grid>
-        <Grid.Col span={{ base: 12, md: 4 }}>
-          <Card padding={0}>
-            <ScrollArea h={600}>
-              <Table verticalSpacing="xs" highlightOnHover>
-                <Table.Thead>
-                  <Table.Tr>
-                    <Table.Th>Version</Table.Th>
-                    <Table.Th ta="right">Codes</Table.Th>
-                    <Table.Th>By</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {versions.data?.map((v) => (
-                    <Table.Tr
-                      key={v.version}
-                      bg={
-                        v.version === selectedVersion
-                          ? "var(--mantine-color-indigo-light)"
-                          : undefined
-                      }
-                    >
-                      <Table.Td>
-                        <Anchor component={Link} to={`/codebook/${v.version}`}>
-                          v{v.version}
-                        </Anchor>
-                      </Table.Td>
-                      <Table.Td ta="right">
-                        <Badge variant="light">{v.n_codes}</Badge>
-                      </Table.Td>
-                      <Table.Td>
-                        <Text size="xs" c="dimmed" lineClamp={1}>
-                          {v.created_by}
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
-                  ))}
-                  {versions.data && versions.data.length === 0 && (
-                    <Table.Tr>
-                      <Table.Td colSpan={3}>
-                        <Text c="dimmed" ta="center" py="md">
-                          No codebook versions.
-                        </Text>
-                      </Table.Td>
-                    </Table.Tr>
+      <Group justify="space-between" align="flex-end" wrap="wrap">
+        <Title order={2}>Codebook</Title>
+        <Group gap="sm">
+          <Select
+            label="Version"
+            placeholder="Select version"
+            data={versionOptions}
+            value={selectedVersion ? String(selectedVersion) : null}
+            onChange={(v) => v && navigate(`/codebook/${v}`)}
+            w={320}
+            searchable
+            allowDeselect={false}
+          />
+        </Group>
+      </Group>
+
+      {detail.error ? (
+        <ErrorAlert error={detail.error} />
+      ) : !detail.data ? (
+        <Text c="dimmed">Select a version.</Text>
+      ) : (
+        <Stack gap="sm">
+          <Card padding="md" withBorder>
+            <Group justify="space-between">
+              <Stack gap={2}>
+                <Title order={3}>Version {detail.data.version}</Title>
+                <Text size="xs" c="dimmed">
+                  {detail.data.created_at} · research context v
+                  {detail.data.research_context_version}
+                  {detail.data.parent_version != null && (
+                    <>
+                      {" "}
+                      · parent{" "}
+                      <Anchor
+                        component={Link}
+                        to={`/codebook/${detail.data.parent_version}`}
+                        size="xs"
+                      >
+                        v{detail.data.parent_version}
+                      </Anchor>
+                    </>
                   )}
-                </Table.Tbody>
-              </Table>
-            </ScrollArea>
+                </Text>
+              </Stack>
+              <Badge variant="light" size="lg">
+                {detail.data.codes.length} codes
+              </Badge>
+            </Group>
           </Card>
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, md: 8 }}>
-          {detail.error ? (
-            <ErrorAlert error={detail.error} />
-          ) : !detail.data ? (
-            <Text c="dimmed">Select a version.</Text>
+
+          {detail.data.codes.length === 0 ? (
+            <Card padding="md" withBorder>
+              <Text c="dimmed" ta="center" py="md">
+                Empty codebook.
+              </Text>
+            </Card>
           ) : (
-            <Stack gap="sm">
-              <Card padding="md">
-                <Group justify="space-between">
-                  <Stack gap={2}>
-                    <Title order={3}>Version {detail.data.version}</Title>
-                    <Text size="xs" c="dimmed">
-                      {detail.data.created_at} · by {detail.data.created_by}
-                      {detail.data.parent_version != null && (
-                        <>
-                          {" "}
-                          · parent{" "}
-                          <Anchor
-                            component={Link}
-                            to={`/codebook/${detail.data.parent_version}`}
-                            size="xs"
-                          >
-                            v{detail.data.parent_version}
-                          </Anchor>
-                        </>
-                      )}
-                    </Text>
-                  </Stack>
-                  <Badge variant="light" size="lg">
-                    {detail.data.codebook.codes.length} codes
-                  </Badge>
-                </Group>
-              </Card>
-              {detail.data.codebook.codes.length === 0 ? (
-                <Card padding="md">
-                  <Text c="dimmed" ta="center" py="md">
-                    Empty codebook.
-                  </Text>
-                </Card>
-              ) : (
-                detail.data.codebook.codes.map((c, i) => (
-                  <Card key={i} padding="md">
-                    <Group justify="space-between" mb="xs">
-                      <Code style={{ fontSize: 14, fontWeight: 600 }}>
-                        {c.code}
-                      </Code>
-                      <Text size="xs" c="dimmed">
-                        {c.quotes.length} quote(s)
-                      </Text>
-                    </Group>
-                    <Stack gap={6}>
-                      {c.quotes.slice(0, 8).map((q, j) => (
-                        <div
-                          key={j}
-                          style={{
-                            borderLeft: "3px solid var(--mantine-color-indigo-6)",
-                            padding: "4px 10px",
-                            background: "var(--mantine-color-default-hover)",
-                            borderRadius: 3,
-                          }}
-                        >
-                          <Text size="xs" c="dimmed" ff="monospace">
-                            {q.quote_id}
-                          </Text>
-                          <Text size="sm">{q.text}</Text>
-                        </div>
-                      ))}
-                      {c.quotes.length > 8 && (
-                        <Text size="xs" c="dimmed">
-                          …and {c.quotes.length - 8} more
-                        </Text>
-                      )}
-                    </Stack>
-                  </Card>
-                ))
-              )}
-            </Stack>
+            detail.data.codes.map((c) => (
+              <CodeCard key={c.code_id} c={c} />
+            ))
           )}
-        </Grid.Col>
-      </Grid>
+        </Stack>
+      )}
     </Stack>
   );
 }

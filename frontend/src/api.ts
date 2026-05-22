@@ -255,25 +255,74 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
 export type CodebookVersionMeta = {
   version: number;
   parent_version: number | null;
-  created_by: string;
+  research_context_version: number;
   created_at: string;
-  bytes: number;
   n_codes: number;
 };
 
-export type Codebook = {
-  codes: Array<{
-    code: string;
-    quotes: Array<{ quote_id: string; text: string }>;
-  }>;
+export type CodebookQuote = {
+  quote_id: number;
+  text: string;
+  segment_id: number;
+  document_id: number | null;
+  document_filename: string | null;
+};
+
+export type CodebookCode = {
+  code_id: number;
+  code: string;
+  description: string;
+  rationale: string;
+  coder_id: number;
+  quotes: CodebookQuote[];
 };
 
 export type CodebookVersionDetail = {
   version: number;
   parent_version: number | null;
-  created_by: string;
+  research_context_version: number;
   created_at: string;
-  codebook: Codebook;
+  n_codes: number;
+  codes: CodebookCode[];
+};
+
+export type CodeDerivationSource = {
+  code_id: number;
+  derivation_type: "A" | "R";
+  decision: "A" | "M" | "U" | null;
+  rationale: string | null;
+  code: string | null;
+  description: string | null;
+  coder_id: number | null;
+  coder_identity: string | null;
+  codebook_used_id: number | null;
+  segment_id: number | null;
+  document_id: number | null;
+  document_filename: string | null;
+  has_more_sources: boolean;
+};
+
+export type CodeDetail = {
+  code_id: number;
+  code: string;
+  description: string;
+  rationale: string;
+  coder_id: number;
+  coder_identity: string | null;
+  codebook_used_id: number;
+  segment_id: number | null;
+  segment: null | {
+    segment_id: number;
+    title: string | null;
+    document_id: number;
+    document_filename: string | null;
+    line_from: number;
+    line_to: number;
+    preview: string;
+  };
+  quotes: CodebookQuote[];
+  derivation_sources: CodeDerivationSource[];
+  in_codebook_versions: number[];
 };
 
 export type Coder = {
@@ -530,6 +579,9 @@ export const api = {
     jsonFetch<CodebookVersionMeta[]>("/api/codebook/versions"),
   codebookVersion: (v: number) =>
     jsonFetch<CodebookVersionDetail>(`/api/codebook/versions/${v}`),
+
+  code: (id: number) => jsonFetch<CodeDetail>(`/api/codes/${id}`),
+  quote: (id: number) => jsonFetch<CodebookQuote>(`/api/quotes/${id}`),
 
   themeCoders: () => jsonFetch<ThemeCoder[]>("/api/theme-coders"),
   addThemeCoder: (coder_id: string, identity: string) =>
