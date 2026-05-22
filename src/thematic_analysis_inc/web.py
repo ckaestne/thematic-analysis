@@ -159,6 +159,10 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
                         "code": c.code,
                         "rationale": c.rationale,
                         "description": c.description,
+                        "quotes": [
+                            {"quote_id": str(q.quote_id), "text": q.text}
+                            for q in c.supporting_quotes
+                        ],
                     }
                     for c in real_codes
                 ],

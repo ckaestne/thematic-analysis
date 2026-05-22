@@ -102,9 +102,12 @@ export type DocumentDetail = {
 
 export type CoderCode = {
   position: number;
+  code_id?: number;
   code: string;
   rationale: string | null;
+  description?: string | null;
   is_new: 0 | 1 | null;
+  quotes?: Array<{ quote_id: string; text: string }>;
 };
 
 export type CoderRun = {
@@ -178,6 +181,7 @@ export type ApiSegmentPayload = {
       code: string;
       rationale: string | null;
       description: string | null;
+      quotes?: Array<{ quote_id: string; text: string }>;
     }>;
   }>;
   aggregator_codes: Array<{
@@ -208,9 +212,12 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
     error: null,
     codes: cc.codes.map((c, i) => ({
       position: i,
+      code_id: c.code_id,
       code: c.code,
       rationale: c.rationale,
+      description: c.description,
       is_new: null,
+      quotes: c.quotes ?? [],
     })),
   }));
   const aggregated_codes: AggregatedCode[] = p.aggregator_codes.map((ac) => ({
