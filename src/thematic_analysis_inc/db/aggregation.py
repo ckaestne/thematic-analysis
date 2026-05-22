@@ -262,16 +262,21 @@ def save_aggregator_codes(codes: list[Code]) -> list[Code]:
         for c in codes:
             if c.code_id is not None:
                 continue
-            # Add c before wiring relationships so back-population of
-            # Quote.codes sees c as session-resident (avoids SAWarning).
+            # Merge caller-detached refs under no_autoflush, then add c.
+            # no_autoflush prevents the Quote.codes back-population
+            # SAWarning that fires when autoflush runs during s.merge
+            # before c is in the session. Keeping s.add(c) AFTER the
+            # merges avoids dragging the caller's detached source Code
+            # instances into the session via save-update cascade.
+            with s.no_autoflush:
+                c.supporting_quotes = [
+                    s.merge(q) if q.quote_id is not None else q
+                    for q in (c.supporting_quotes or [])
+                ]
+                for edge in c.derivation_sources or []:
+                    if edge.source_code is not None and edge.source_code.code_id is not None:
+                        edge.source_code = s.merge(edge.source_code)
             s.add(c)
-            c.supporting_quotes = [
-                s.merge(q) if q.quote_id is not None else q
-                for q in (c.supporting_quotes or [])
-            ]
-            for edge in c.derivation_sources or []:
-                if edge.source_code is not None and edge.source_code.code_id is not None:
-                    edge.source_code = s.merge(edge.source_code)
             written.append(c)
         s.commit()
         out: list[Code] = []
