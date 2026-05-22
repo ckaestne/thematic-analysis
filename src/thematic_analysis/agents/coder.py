@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
@@ -34,6 +35,7 @@ from thematic_analysis_inc.db.models import (
     Coder,
     Quote,
     Segment,
+    create_quote,
 )
 from thematic_analysis_inc.db.research_context import (
     to_domain as _research_context_to_domain,
@@ -191,7 +193,14 @@ class CoderAgent(BaseAgent):
         except (json.JSONDecodeError, ValidationError):
             return [self._sentinel(segment)]
 
-        existing_by_text = {q.text: q for q in (segment.quotes or [])}
+        # Track quotes created within this parse so codes that claim the
+        # same (or near-identical) span share one Quote object.
+        local_pool: list[Quote] = list(segment.quotes or [])
+        local_seg = SimpleNamespace(
+            segment_id=segment.segment_id,
+            content=segment.content,
+            quotes=local_pool,
+        )
 
         out: list[Code] = []
         for item in parsed.codes[: self.coder_config.max_codes_per_segment]:
@@ -199,16 +208,18 @@ class CoderAgent(BaseAgent):
             if not code_text:
                 continue
             quotes: list[Quote] = []
-            seen: set[str] = set()
+            seen: set[int] = set()
             for q in item.quotes:
                 qt = q.strip()
-                if not qt or qt in seen or qt not in segment.content:
+                if not qt or qt not in segment.content:
                     continue
-                seen.add(qt)
-                quotes.append(
-                    existing_by_text.get(qt)
-                    or Quote(text=qt, segment_id=segment.segment_id)
-                )
+                quote = create_quote(local_seg, qt)
+                if id(quote) in seen:
+                    continue
+                seen.add(id(quote))
+                quotes.append(quote)
+                if quote.quote_id is None and quote not in local_pool:
+                    local_pool.append(quote)
             if not quotes:
                 continue
             code = self._new_code(

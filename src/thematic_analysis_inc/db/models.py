@@ -290,6 +290,38 @@ class Quote(SQLModel, table=True):
     )
 
 
+def _normalize_quote_text(text: str) -> str:
+    """Key used to detect near-duplicate quotes on the same segment.
+
+    Collapses whitespace, lowercases, and strips punctuation so that
+    "I felt supported." and "i felt supported" hash to the same key.
+    """
+    import re
+    import string
+
+    s = text.translate(str.maketrans("", "", string.punctuation))
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+
+def create_quote(segment: "Segment", text: str) -> Quote:
+    """Return an existing Quote on ``segment`` with the same (or
+    near-identical) text, or create a new transient one.
+
+    All Quote creation in the pipeline should go through this so that
+    different coders cannot produce duplicate Quote rows for the same
+    span. Matching ignores surrounding whitespace, casing, and
+    punctuation. The number of quotes per segment is small, so a linear
+    scan is fine.
+    """
+    qt = text.strip()
+    key = _normalize_quote_text(qt)
+    for existing in segment.quotes or []:
+        if _normalize_quote_text(existing.text) == key:
+            return existing
+    return Quote(text=qt, segment_id=segment.segment_id)
+
+
 class CodingQueueEntry(SQLModel, table=True):
     """One (Segment, Coder, Codebook revision) assignment.
 

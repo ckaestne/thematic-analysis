@@ -145,8 +145,18 @@ def list_segments(
 
 
 def add_quote(segment: Segment, text: str) -> Quote:
+    """Persist a Quote on ``segment``, reusing an existing near-identical
+    one if present (see ``create_quote``)."""
+    from thematic_analysis_inc.db.models import create_quote
+
     with session() as s:
-        q = Quote(segment_id=segment.segment_id, text=text)
+        seg = s.get(Segment, segment.segment_id)
+        if seg is None:
+            raise RuntimeError(f"segment {segment.segment_id} not found")
+        q = create_quote(seg, text)
+        if q.quote_id is not None:
+            s.expunge(q)
+            return q
         s.add(q)
         s.commit()
         s.refresh(q)

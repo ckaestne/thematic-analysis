@@ -230,11 +230,33 @@ def save_codes_and_finish_assignment(
             raise RuntimeError(
                 f"assignment {_assignment_pk(assignment)} not found"
             )
+        from thematic_analysis_inc.db.models import (
+            Quote,
+            _normalize_quote_text,
+        )
+
+        existing_quotes = list(
+            s.exec(select(Quote).where(Quote.segment_id == a.segment_id)).all()
+        )
+        by_key: dict[str, Quote] = {
+            _normalize_quote_text(q.text): q for q in existing_quotes
+        }
         for c in codes:
-            c.supporting_quotes = [
-                s.merge(q) if q.quote_id is not None else q
-                for q in (c.supporting_quotes or [])
-            ]
+            merged: list[Quote] = []
+            for q in (c.supporting_quotes or []):
+                if q.quote_id is not None:
+                    mq = s.merge(q)
+                    by_key.setdefault(_normalize_quote_text(mq.text), mq)
+                    merged.append(mq)
+                    continue
+                key = _normalize_quote_text(q.text)
+                hit = by_key.get(key)
+                if hit is not None:
+                    merged.append(hit)
+                else:
+                    by_key[key] = q
+                    merged.append(q)
+            c.supporting_quotes = merged
             s.add(c)
         a.finished_at = _utcnow()
         s.add(a)
