@@ -1,32 +1,55 @@
-import { AppShell, Burger, Group, NavLink, ScrollArea, Title } from "@mantine/core";
+import { AppShell, Burger, Group, NavLink, ScrollArea, Text, Title } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import {
   IconBook2,
   IconCategory,
   IconChartBar,
-  IconClipboardCheck,
-  IconCode,
   IconFile,
   IconFlag,
   IconLayoutDashboard,
-  IconStack2,
   IconUsers,
   IconUsersGroup,
 } from "@tabler/icons-react";
 import { NavLink as RouterLink, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
+import type { Icon } from "@tabler/icons-react";
 
-const navItems = [
-  { to: "/", label: "Overview", icon: IconLayoutDashboard, end: true },
-  { to: "/research-context", label: "Research context", icon: IconFlag },
-  { to: "/coders", label: "Coders", icon: IconUsers },
-  { to: "/documents", label: "Documents", icon: IconFile },
-  { to: "/coder-runs", label: "Coder runs", icon: IconCode },
-  { to: "/aggregations", label: "Aggregations", icon: IconStack2 },
-  { to: "/review-decisions", label: "Review decisions", icon: IconClipboardCheck },
-  { to: "/codebook", label: "Codebook", icon: IconBook2 },
-  { to: "/theme-coders", label: "Theme coders", icon: IconUsersGroup },
-  { to: "/themes", label: "Themes", icon: IconCategory },
+type NavItem = {
+  to: string;
+  label: string;
+  icon: Icon;
+  end?: boolean;
+};
+
+type NavGroup = {
+  label?: string;
+  items: NavItem[];
+};
+
+const navGroups: NavGroup[] = [
+  {
+    items: [{ to: "/", label: "Overview", icon: IconLayoutDashboard, end: true }],
+  },
+  {
+    items: [
+      { to: "/research-context", label: "Research context", icon: IconFlag },
+      { to: "/documents", label: "Documents", icon: IconFile },
+    ],
+  },
+  {
+    label: "Phase 1",
+    items: [
+      { to: "/coders", label: "Coders", icon: IconUsers },
+      { to: "/codebook", label: "Codebook", icon: IconBook2 },
+    ],
+  },
+  {
+    label: "Phase 2",
+    items: [
+      { to: "/theme-coders", label: "Theme coders", icon: IconUsersGroup },
+      { to: "/themes", label: "Themes", icon: IconCategory },
+    ],
+  },
 ];
 
 export function AppLayout({ children }: { children: ReactNode }) {
@@ -51,23 +74,39 @@ export function AppLayout({ children }: { children: ReactNode }) {
       </AppShell.Header>
       <AppShell.Navbar p="xs">
         <AppShell.Section grow component={ScrollArea}>
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const active = item.end
-              ? location.pathname === item.to
-              : location.pathname.startsWith(item.to);
-            return (
-              <NavLink
-                key={item.to}
-                component={RouterLink}
-                to={item.to}
-                label={item.label}
-                leftSection={<Icon size={18} />}
-                active={active}
-                variant="filled"
-              />
-            );
-          })}
+          {navGroups.map((group, idx) => (
+            <div key={group.label ?? `group-${idx}`} style={{ marginTop: idx === 0 ? 0 : 12 }}>
+              {group.label && (
+                <Text
+                  size="xs"
+                  fw={600}
+                  tt="uppercase"
+                  c="dimmed"
+                  px="sm"
+                  pb={4}
+                >
+                  {group.label}
+                </Text>
+              )}
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const active = item.end
+                  ? location.pathname === item.to
+                  : location.pathname.startsWith(item.to);
+                return (
+                  <NavLink
+                    key={item.to}
+                    component={RouterLink}
+                    to={item.to}
+                    label={item.label}
+                    leftSection={<Icon size={18} />}
+                    active={active}
+                    variant="filled"
+                  />
+                );
+              })}
+            </div>
+          ))}
         </AppShell.Section>
       </AppShell.Navbar>
       <AppShell.Main>{children}</AppShell.Main>

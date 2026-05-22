@@ -164,14 +164,7 @@ export function Overview() {
             <Table.Tbody>
               {per_coder.map((c) => (
                 <Table.Tr key={c.coder_id}>
-                  <Table.Td>
-                    <Anchor
-                      component={Link}
-                      to={`/coder-runs?coder_id=${c.coder_id}`}
-                    >
-                      {c.coder_id}
-                    </Anchor>
-                  </Table.Td>
+                  <Table.Td>{c.coder_id}</Table.Td>
                   <Table.Td>
                     <Tooltip label={c.identity} multiline w={300}>
                       <Text size="sm" lineClamp={1}>
