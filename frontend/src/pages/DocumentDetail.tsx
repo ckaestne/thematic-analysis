@@ -8,7 +8,8 @@ import {
   Title,
 } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { useEffect } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { SegmentCodingCard } from "../components/SegmentCodingCard";
@@ -16,11 +17,32 @@ import { SegmentCodingCard } from "../components/SegmentCodingCard";
 export function DocumentDetail() {
   const { id } = useParams<{ id: string }>();
   const documentId = Number(id);
+  const [params] = useSearchParams();
+  const focusSegmentId = params.get("segment");
+  const focusQuoteId = params.get("quote");
+
   const { data, error, isLoading } = useQuery({
     queryKey: ["document", documentId],
     queryFn: () => api.document(documentId),
     enabled: Number.isFinite(documentId),
   });
+
+  // Fetch the highlighted quote's text (if any) so we can <mark> it in
+  // the matching segment.
+  const quote = useQuery({
+    queryKey: ["quote", focusQuoteId],
+    queryFn: () => api.quote(Number(focusQuoteId)),
+    enabled: !!focusQuoteId,
+  });
+
+  // Scroll the focused segment into view once the data has rendered.
+  useEffect(() => {
+    if (!focusSegmentId || !data) return;
+    const el = document.getElementById(`segment-${focusSegmentId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [focusSegmentId, data]);
 
   if (error) return <ErrorAlert error={error} />;
   if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
@@ -62,14 +84,33 @@ export function DocumentDetail() {
         </Card>
       ) : (
         <Stack gap="sm">
-          {data.segments.map((s, i) => (
-            <SegmentCodingCard
-              key={s.segment_id}
-              segment={s}
-              invalidateKeys={invalidateKeys}
-              index={{ i, total: data.segments.length }}
-            />
-          ))}
+          {data.segments.map((s, i) => {
+            const isFocus = focusSegmentId === String(s.segment_id);
+            return (
+              <div
+                key={s.segment_id}
+                id={`segment-${s.segment_id}`}
+                style={
+                  isFocus
+                    ? {
+                        outline:
+                          "2px solid var(--mantine-color-yellow-5)",
+                        borderRadius: 6,
+                      }
+                    : undefined
+                }
+              >
+                <SegmentCodingCard
+                  segment={s}
+                  invalidateKeys={invalidateKeys}
+                  index={{ i, total: data.segments.length }}
+                  highlight={
+                    isFocus && quote.data ? [quote.data.text] : undefined
+                  }
+                />
+              </div>
+            );
+          })}
         </Stack>
       )}
     </Stack>

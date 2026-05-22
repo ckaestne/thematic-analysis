@@ -8,6 +8,7 @@ import { Segments } from "./pages/Segments";
 import { SegmentDetail } from "./pages/SegmentDetail";
 import { Coders } from "./pages/Coders";
 import { CodebookPage } from "./pages/Codebook";
+import { CodePage } from "./pages/Code";
 import { ThemeCoders } from "./pages/ThemeCoders";
 import { Themes } from "./pages/Themes";
 
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/coders" element={<Coders />} />
         <Route path="/codebook" element={<CodebookPage />} />
         <Route path="/codebook/:version" element={<CodebookPage />} />
+        <Route path="/code/:id" element={<CodePage />} />
         <Route path="/theme-coders" element={<ThemeCoders />} />
         <Route path="/themes" element={<Themes />} />
         <Route path="*" element={<Navigate to="/" replace />} />

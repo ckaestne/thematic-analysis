@@ -24,7 +24,7 @@ import {
   IconPlayerPlay,
   IconTrash,
 } from "@tabler/icons-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api, type AggregatedCode, type CoderRun, type SegmentDetail } from "../api";
@@ -50,13 +50,40 @@ type Props = {
   index?: { i: number; total: number };
   /** When true, show the raw segment text in a sub-card. */
   showText?: boolean;
+  /** Substring(s) of the segment text to wrap in `<mark>`. Used by quote
+   * deep-links (`?quote=…`) to highlight the matching span inside the
+   * segment. */
+  highlight?: string[];
 };
+
+/** Render `text`, wrapping every occurrence of any string in `needles`
+ * in a `<mark>` element. Falls back to plain text when no needle
+ * matches (which is fine — quote spans are not always a substring of
+ * the segment when the source extracted them lossy). */
+function highlightedText(text: string, needles: string[]): ReactNode {
+  const valid = needles.filter((n) => n && text.includes(n));
+  if (valid.length === 0) return text;
+  // Escape regex metacharacters and join with `|`.
+  const escaped = valid.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`(${escaped.join("|")})`, "g");
+  const parts = text.split(re);
+  return parts.map((p, i) =>
+    i % 2 === 1 ? (
+      <mark key={i} style={{ background: "var(--mantine-color-yellow-2)" }}>
+        {p}
+      </mark>
+    ) : (
+      <span key={i}>{p}</span>
+    ),
+  );
+}
 
 export function SegmentCodingCard({
   segment,
   invalidateKeys,
   index,
   showText = true,
+  highlight,
 }: Props) {
   const qc = useQueryClient();
   const confirm = useConfirmDelete();
@@ -266,7 +293,9 @@ export function SegmentCodingCard({
               fontFamily: "Georgia, serif",
             }}
           >
-            {segment.text}
+            {highlight && highlight.length > 0
+              ? highlightedText(segment.text, highlight)
+              : segment.text}
           </Text>
         </>
       )}
