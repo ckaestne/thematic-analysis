@@ -82,6 +82,22 @@ function colorFor(i: number): string {
   return PALETTE[i % PALETTE.length];
 }
 
+// Blog-post-style prose container. Wider serif stack with good rendering
+// hints, a comfortable line length, and slightly off-black text.
+const PROSE_STYLE: CSSProperties = {
+  fontFamily:
+    "Charter, 'Iowan Old Style', 'Sitka Text', Cambria, 'Source Serif Pro', Georgia, 'Times New Roman', serif",
+  fontSize: 18,
+  lineHeight: 1.65,
+  letterSpacing: "0.005em",
+  color: "var(--mantine-color-dark-8)",
+  maxWidth: "68ch",
+  margin: "0 auto",
+  WebkitFontSmoothing: "antialiased",
+  MozOsxFontSmoothing: "grayscale",
+  hyphens: "auto",
+};
+
 type HighlightCode = {
   key: string;
   color: string;
@@ -210,16 +226,9 @@ function HighlightedText({
   if (current.length > 0) paragraphs.push(current);
 
   return (
-    <div
-      style={{
-        fontFamily: "Georgia, 'Times New Roman', serif",
-        fontSize: 16,
-        lineHeight: 1.7,
-        maxWidth: "70ch",
-      }}
-    >
+    <div style={PROSE_STYLE}>
       {paragraphs.map((paraSpans, pi) => (
-        <p key={pi} style={{ margin: "0 0 0.9em 0", whiteSpace: "pre-wrap" }}>
+        <p key={pi} style={{ margin: "0 0 1em 0", whiteSpace: "pre-wrap" }}>
           {paraSpans.map((s, si) => {
             const slice = text.slice(s.start, s.end);
             if (s.codes.length === 0) {
@@ -592,15 +601,9 @@ export function SegmentCodingCard({
         <>
           <Divider my="xs" />
           {highlight && highlight.length > 0 ? (
-            <Text
-              size="sm"
-              style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "Georgia, serif",
-              }}
-            >
+            <div style={{ ...PROSE_STYLE, whiteSpace: "pre-wrap" }}>
               {legacyHighlightedText(segment.text, highlight)}
-            </Text>
+            </div>
           ) : active ? (
             <HighlightedText
               text={segment.text}
@@ -609,17 +612,9 @@ export function SegmentCodingCard({
               onHover={setHoveredKey}
             />
           ) : (
-            <Text
-              style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "Georgia, 'Times New Roman', serif",
-                fontSize: 16,
-                lineHeight: 1.7,
-                maxWidth: "70ch",
-              }}
-            >
+            <div style={{ ...PROSE_STYLE, whiteSpace: "pre-wrap" }}>
               {segment.text}
-            </Text>
+            </div>
           )}
         </>
       )}
