@@ -80,6 +80,48 @@ def next_segment_codebook_to_aggregate() -> tuple[Segment, int] | None:
         return seg, codebook_version
 
 
+def pending_aggregation_count() -> int:
+    """Count (segment, codebook_version) pairs awaiting aggregation."""
+    with session() as s:
+        Q = aliased(CodingQueueEntry)
+        QInner = aliased(CodingQueueEntry)
+
+        has_unfinished = (
+            select(QInner.segment_id)  # type: ignore[union-attr]
+            .where(
+                QInner.segment_id == Q.segment_id,
+                QInner.codebook_used_id == Q.codebook_used_id,
+                (QInner.finished_at.is_(None))  # type: ignore[union-attr]
+                | (QInner.error.is_not(None)),  # type: ignore[union-attr]
+            )
+            .exists()
+        )
+        has_agg = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == Q.segment_id,
+                Code.coder_id == SYSTEM_AGGREGATOR_ID,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        has_coder_code = (
+            select(Code.code_id)
+            .where(
+                Code.segment_id == Q.segment_id,
+                Code.coder_id >= 1,
+                Code.codebook_used_id == Q.codebook_used_id,
+            )
+            .exists()
+        )
+        rows = s.exec(
+            select(Q.segment_id, Q.codebook_used_id)  # type: ignore[union-attr]
+            .where(~has_unfinished, ~has_agg, has_coder_code)
+            .distinct()
+        ).all()
+        return len(rows)
+
+
 def next_segment_to_aggregate() -> Segment | None:
     """Return the next Segment that needs aggregation, or None.
 

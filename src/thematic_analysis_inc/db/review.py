@@ -43,6 +43,24 @@ def next_aggregated_code_to_review() -> Code | None:
         return row
 
 
+def pending_review_count() -> int:
+    """Count aggregator Codes (coder_id=0) without an outgoing 'R' edge."""
+    with session() as s:
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        return s.exec(
+            select(func.count())
+            .select_from(Code)
+            .where(Code.coder_id == 0, ~outgoing_r)
+        ).one()
+
+
 def resolve_target_code(codebook: Codebook, code_text: str) -> Code | None:
     """Reviewer Code with given text that belongs to ``codebook``."""
     with session() as s:
