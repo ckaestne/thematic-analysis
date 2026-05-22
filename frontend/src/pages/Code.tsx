@@ -66,10 +66,48 @@ function QuoteLink({ q }: { q: CodebookQuote }) {
   );
 }
 
+/** Label introducing a single edge, based on its derivation kind. */
+function sourceLabel(s: CodeDerivationSource): string {
+  if (s.derivation_type === "A") return "Aggregated from";
+  if (s.derivation_type === "R") {
+    if (s.decision === "A") return "New from";
+    // 'M' = merge, 'U' = merge & rename — both are merges from the
+    // user's point of view.
+    return "Merged from";
+  }
+  return "From";
+}
+
+/** One-sentence summary of how this code came into existence, shown at
+ * the top of the lineage section so the tree below has a frame of
+ * reference. */
+function originSentence(d: CodeDetail): string {
+  if (d.derivation_sources.length === 0) {
+    return "This code has no derivation sources — it is an originating coder code.";
+  }
+  if (d.coder_id === -1) {
+    const decisions = new Set(
+      d.derivation_sources.map((s) => s.decision).filter(Boolean),
+    );
+    if (decisions.has("A")) {
+      return "This code was created by adopting a new code from the aggregator.";
+    }
+    if (decisions.has("M") || decisions.has("U")) {
+      return "This code was created by merging two codes.";
+    }
+    return "This code was created from:";
+  }
+  if (d.coder_id === 0) {
+    return "This code was aggregated from one or more coder codes.";
+  }
+  return "Derived from:";
+}
+
 /**
- * One lineage tree node. Renders the source row inline and, when
- * expanded, fetches /api/codes/{id} for that source and recurses on
- * its own derivation_sources. Each expansion is its own query.
+ * One lineage tree node. Shows the edge label (e.g. "Aggregated from"),
+ * then the source card inline; when expanded, fetches /api/codes/{id}
+ * for that source and recurses on its own derivation_sources. Each
+ * expansion is its own query.
  */
 function LineageNode({
   source,
@@ -88,11 +126,6 @@ function LineageNode({
     enabled: open && expandable,
   });
 
-  const edgeLabel =
-    source.derivation_type === "R"
-      ? `review${source.decision ? ` · ${source.decision}` : ""}`
-      : "aggregation";
-
   return (
     <div
       style={{
@@ -100,19 +133,30 @@ function LineageNode({
         borderLeft:
           depth === 0 ? undefined : "2px solid var(--mantine-color-gray-3)",
         paddingLeft: depth === 0 ? 0 : 12,
-        marginTop: 6,
+        marginTop: 8,
       }}
     >
+      <Text size="xs" c="dimmed" mb={4}>
+        {sourceLabel(source)}
+      </Text>
       <Card padding="sm" withBorder shadow="none">
         <Group justify="space-between" wrap="nowrap" align="flex-start">
           <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
-            <Group gap="xs" wrap="wrap">
-              <Badge size="xs" variant="light">
-                {edgeLabel}
-              </Badge>
+            <Group gap="xs" wrap="nowrap">
+              <Anchor
+                component={Link}
+                to={`/code/${source.code_id}`}
+                style={{ minWidth: 0 }}
+              >
+                <CodeText style={{ fontSize: 14 }}>
+                  {source.code ?? `code #${source.code_id}`}
+                </CodeText>
+              </Anchor>
               <Badge size="xs" color={coderColor(source.coder_id)}>
                 {coderLabel(source.coder_id, source.coder_identity)}
               </Badge>
+            </Group>
+            <Group gap="xs" wrap="wrap">
               {source.codebook_used_id != null && (
                 <Anchor
                   component={Link}
@@ -138,17 +182,6 @@ function LineageNode({
                 </Anchor>
               )}
             </Group>
-            <Group gap="xs" wrap="nowrap">
-              <Anchor
-                component={Link}
-                to={`/code/${source.code_id}`}
-                style={{ minWidth: 0 }}
-              >
-                <CodeText style={{ fontSize: 14 }}>
-                  {source.code ?? `code #${source.code_id}`}
-                </CodeText>
-              </Anchor>
-            </Group>
             {source.description && (
               <Text size="xs" c="dimmed">
                 {source.description}
@@ -156,7 +189,7 @@ function LineageNode({
             )}
             {source.rationale && (
               <Text size="xs" c="dimmed" fs="italic">
-                edge: {source.rationale}
+                edge rationale: {source.rationale}
               </Text>
             )}
           </Stack>
@@ -193,15 +226,10 @@ function LineageNode({
               key={s.code_id}
               source={s}
               depth={depth + 1}
-              // Aggregator codes typically have many children; open the
-              // first level eagerly when an aggregator was just expanded
-              // so users see the merged coder codes without an extra
-              // click.
-              defaultOpen={
-                source.coder_id === 0 &&
-                depth === 0 &&
-                source.derivation_type === "R"
-              }
+              // When the user expands an aggregator, they almost always
+              // want to see its coder-code children — open them eagerly
+              // so a reviewer→aggregator→coders walk is one click.
+              defaultOpen={source.coder_id === 0}
             />
           ))}
           {detail.data && detail.data.derivation_sources.length === 0 && (
@@ -213,24 +241,6 @@ function LineageNode({
       )}
     </div>
   );
-}
-
-function selfAsSource(d: CodeDetail): CodeDerivationSource {
-  return {
-    code_id: d.code_id,
-    derivation_type: "R",
-    decision: null,
-    rationale: null,
-    code: d.code,
-    description: d.description,
-    coder_id: d.coder_id,
-    coder_identity: d.coder_identity,
-    codebook_used_id: d.codebook_used_id,
-    segment_id: d.segment_id,
-    document_id: d.segment?.document_id ?? null,
-    document_filename: d.segment?.document_filename ?? null,
-    has_more_sources: d.derivation_sources.length > 0,
-  };
 }
 
 export function CodePage() {
@@ -327,26 +337,12 @@ export function CodePage() {
         <Title order={5} mb="xs">
           Lineage
         </Title>
-        {d.derivation_sources.length === 0 ? (
-          <Text c="dimmed" size="sm">
-            This code has no derivation sources — it is an originating coder
-            code.
-          </Text>
-        ) : (
-          <>
-            <Text size="xs" c="dimmed" mb="xs">
-              {d.coder_id === -1
-                ? "Reviewer codes merge a prior reviewer code (in the parent codebook) with one or more aggregator codes."
-                : d.coder_id === 0
-                  ? "Aggregator codes merge codes from multiple coders on the same segment."
-                  : "Derived from:"}
-            </Text>
-            {/* Root node is the current code — render it as a non-expandable
-                header so the tree visually starts here, then show the
-                immediate sources expanded. */}
-            <LineageNode source={selfAsSource(d)} defaultOpen={true} />
-          </>
-        )}
+        <Text size="sm" mb="xs">
+          {originSentence(d)}
+        </Text>
+        {d.derivation_sources.map((s) => (
+          <LineageNode key={s.code_id} source={s} defaultOpen={false} />
+        ))}
       </Card>
     </Stack>
   );
