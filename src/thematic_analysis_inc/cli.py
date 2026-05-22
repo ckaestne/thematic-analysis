@@ -315,6 +315,12 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 f"inserted={len(inserted_segments)}"
             )
             print(f"created_document_id\t{new_doc.document_id}")
+            if args.enqueue:
+                n_enqueued = store.coding.enqueue_document(new_doc.document_id)
+                print(
+                    f"[add-document] {path.name}: enqueued={n_enqueued} "
+                    f"assignment(s) for coding"
+                )
             prog.advance(task)
     summary = (
         f"done: {total_files} file(s), inserted={total_inserted} "
@@ -1368,6 +1374,13 @@ def _cli_add_document(
         typer.Option("--model", help="litellm model id for --segmentation llm"),
     ] = "gemini/gemini-2.5-flash-lite",
     batch: Annotated[int | None, typer.Option("--batch")] = None,
+    enqueue: Annotated[
+        bool,
+        typer.Option(
+            "--enqueue",
+            help="enqueue all inserted segments for coding by every coder",
+        ),
+    ] = False,
 ) -> None:
     _run(
         ctx,
@@ -1378,6 +1391,7 @@ def _cli_add_document(
         max_words=max_words,
         model=model,
         batch=batch,
+        enqueue=enqueue,
     )
 
 
