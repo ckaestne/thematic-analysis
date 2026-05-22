@@ -1,15 +1,23 @@
 import { Anchor, Breadcrumbs, Stack, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { SegmentCodingCard } from "../components/SegmentCodingCard";
 
 export function SegmentDetail() {
   const { id = "" } = useParams();
+  const [params] = useSearchParams();
+  const focusQuoteId = params.get("quote");
+
   const { data, error, isLoading } = useQuery({
     queryKey: ["segment", id],
     queryFn: () => api.segment(id),
+  });
+  const quote = useQuery({
+    queryKey: ["quote", focusQuoteId],
+    queryFn: () => api.quote(Number(focusQuoteId)),
+    enabled: !!focusQuoteId,
   });
 
   if (error) return <ErrorAlert error={error} />;
@@ -33,6 +41,7 @@ export function SegmentDetail() {
       <SegmentCodingCard
         segment={data}
         invalidateKeys={[["segment", id], ["documents"]]}
+        highlight={quote.data ? [quote.data.text] : undefined}
       />
     </Stack>
   );
