@@ -289,27 +289,32 @@ function HighlightedText({
                   </span>
                 </Tooltip>
                 {ending.map((k) => {
-                  const chipHovered =
-                    hoveredKey === null || hoveredKey === k;
+                  const inactive = hoveredKey !== null && hoveredKey !== k;
+                  const bgShade = hoveredKey === k ? 7 : 6;
                   return (
-                    <sup
+                    <span
                       key={k}
                       onMouseEnter={() => onHover(k)}
                       onMouseLeave={() => onHover(null)}
                       style={{
-                        marginLeft: 2,
-                        padding: "1px 5px",
-                        fontSize: 10,
-                        fontFamily:
-                          "ui-monospace, SFMono-Regular, Menlo, monospace",
-                        background: `var(--mantine-color-${colorByKey[k]}-${chipHovered ? 3 : 1})`,
-                        color: `var(--mantine-color-${colorByKey[k]}-9)`,
-                        border: `1px solid var(--mantine-color-${colorByKey[k]}-${chipHovered ? 5 : 3})`,
-                        borderRadius: 8,
+                        display: "inline-block",
+                        marginLeft: 4,
+                        padding: "0 0.6em",
+                        fontSize: "0.75rem",
+                        lineHeight: 1.5,
+                        fontFamily: "inherit",
+                        fontWeight: 500,
+                        background: inactive
+                          ? "var(--mantine-color-gray-3)"
+                          : `var(--mantine-color-${colorByKey[k]}-${bgShade})`,
+                        color: inactive
+                          ? "var(--mantine-color-gray-7)"
+                          : "white",
+                        borderRadius: 4,
                         cursor: "pointer",
                         verticalAlign: "baseline",
-                        opacity: hoveredKey && hoveredKey !== k ? 0.45 : 1,
-                        transition: "background-color 120ms, opacity 120ms",
+                        whiteSpace: "nowrap",
+                        transition: "background-color 120ms, color 120ms",
                       }}
                     >
                       {labelByKey[k]}
