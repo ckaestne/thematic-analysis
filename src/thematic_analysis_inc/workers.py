@@ -53,7 +53,7 @@ from thematic_analysis_inc.db.models import (
     Coder,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     is_sentinel_code,
 )
 from thematic_analysis_inc.refinement import wrap_with_refinement
@@ -653,7 +653,7 @@ def review_one(
     decision_name = {
         DECISION_ADD: "add_new",
         DECISION_MERGE: "merge",
-        DECISION_UPDATE: "update",
+        DECISION_MERGE_AND_RENAME: "merge_and_rename",
     }.get(decision_char or "", "add_new")
 
     return {

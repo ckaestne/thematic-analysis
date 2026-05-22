@@ -25,7 +25,7 @@ from thematic_analysis_inc.db.models import (
     CodingQueueEntry,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_AGGREGATION,
     DERIVATION_REVIEW,
     Document,
@@ -355,7 +355,7 @@ def test_all_three_decisions_accepted(session: Session) -> None:
         )
     )
     session.commit()
-    for decision in (DECISION_ADD, DECISION_MERGE, DECISION_UPDATE):
+    for decision in (DECISION_ADD, DECISION_MERGE, DECISION_MERGE_AND_RENAME):
         session.add(
             CodesDerived(
                 new_code_id=rev.code_id, source_code_id=agg.code_id,

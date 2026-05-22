@@ -75,7 +75,7 @@ DERIVATION_REVIEW = "R"
 
 DECISION_ADD = "A"
 DECISION_MERGE = "M"
-DECISION_UPDATE = "U"
+DECISION_MERGE_AND_RENAME = "U"
 
 # Reserved `Code.code` label used as a sentinel for "this coder ran and
 # produced no codes" (or "this aggregation merged to nothing"). Persisted
@@ -526,7 +526,7 @@ __all__ = [
     "DERIVATION_REVIEW",
     "DECISION_ADD",
     "DECISION_MERGE",
-    "DECISION_UPDATE",
+    "DECISION_MERGE_AND_RENAME",
     "SENTINEL_CODE_LABEL",
     "is_sentinel_code",
 ]

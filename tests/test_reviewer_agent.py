@@ -23,7 +23,7 @@ from thematic_analysis_inc.db.models import (
     CodesDerived,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_REVIEW,
 )
 from thematic_analysis_inc.db.review import save_reviewer_decision
@@ -159,7 +159,7 @@ class TestSystemPrompt:
         )
         prompt = agent.get_system_prompt()
         assert "merge" in prompt
-        assert "update" in prompt
+        assert "merge_and_rename" in prompt
         assert "add_new" in prompt
         assert "skip" not in prompt  # SKIP is gone
 
@@ -250,13 +250,13 @@ class TestReviewCodeDecisions:
         assert [e.decision for e in edges] == [DECISION_MERGE, DECISION_MERGE]
         assert result.code == "emotional support"
 
-    def test_llm_update_renames_target(self, db_setup, embedding_service):
+    def test_llm_merge_and_rename_uses_llm_label(self, db_setup, embedding_service):
         parent, target = _load_parent_with_one_reviewer_code(
             embedding_service, "old label"
         )
         agg = _add_agg_code(
             segment_id=target.segment_id,
-            code="new better label",
+            code="incoming label",
             version=parent.version,
             quotes=["q"],
         )
@@ -272,15 +272,20 @@ class TestReviewCodeDecisions:
             ReviewerAgent,
             "_call_llm",
             return_value=json.dumps({
-                "decision": "update",
+                "decision": "merge_and_rename",
                 "target_code": "old label",
+                "new_label": "synthesized label",
                 "rationale": "better phrasing",
             }),
         ):
             result = agent.review_code(agg)
         edges = list(result.derivation_sources)
-        assert [e.decision for e in edges] == [DECISION_UPDATE, DECISION_UPDATE]
-        assert result.code == "new better label"
+        assert [e.decision for e in edges] == [
+            DECISION_MERGE_AND_RENAME, DECISION_MERGE_AND_RENAME,
+        ]
+        # The label is the LLM's proposed new name — neither the target's
+        # nor the aggregator's.
+        assert result.code == "synthesized label"
 
     def test_unparseable_response_falls_back_to_add(
         self, db_setup, embedding_service
@@ -346,14 +351,20 @@ class _Scenario:
     embedding_service: db_embeddings.EmbeddingService
 
     def review(
-        self, *, new_label: str, llm_decision: str, target_code: str | None
+        self,
+        *,
+        agg_label: str,
+        llm_decision: str,
+        target_code: str | None,
+        llm_new_label: str | None = None,
     ) -> tuple[Code, Code]:
-        """Add aggregator code C (label=``new_label``, quote=``"D"``), run
-        the reviewer with the LLM stubbed to ``(llm_decision, target_code)``.
-        Returns ``(result, code_C)``."""
+        """Add aggregator code C (label=``agg_label``, quote=``"D"``), run
+        the reviewer with the LLM stubbed to return
+        ``(llm_decision, target_code, llm_new_label)``. Returns
+        ``(result, code_C)``."""
         code_C = _add_agg_code(
             segment_id=self.seg_id,
-            code=new_label,
+            code=agg_label,
             version=self.parent.version,
             quotes=["D"],
         )
@@ -372,6 +383,7 @@ class _Scenario:
             return_value=json.dumps({
                 "decision": llm_decision,
                 "target_code": target_code,
+                "new_label": llm_new_label,
                 "rationale": "stub",
             }),
         ):
@@ -472,12 +484,13 @@ class TestReviewDecisionPersistence:
 
     def test_merge_keeps_target_label_and_unions_quotes(self, scenario):
         result, code_C = scenario.review(
-            new_label="C", llm_decision="merge", target_code="A"
+            agg_label="C", llm_decision="merge", target_code="A"
         )
         quote_D_id = code_C.supporting_quotes[0].quote_id
 
         # Before save: in memory only, nothing in the DB.
         assert result.code_id is None
+        assert result.codebook_used_id == scenario.parent.version
         assert result.code == "A"  # MERGE keeps the target's label
         assert {e.source_code.code_id for e in result.derivation_sources} == {
             scenario.code_A.code_id, code_C.code_id,
@@ -490,6 +503,7 @@ class TestReviewDecisionPersistence:
 
         # After save: persisted with the same two edges and both quotes.
         saved = save_reviewer_decision(result)
+        assert saved.codebook_used_id == scenario.parent.version
         edges = _persisted_edges(saved.code_id)
         assert {e.source_code_id for e in edges} == {
             scenario.code_A.code_id, code_C.code_id,
@@ -499,43 +513,50 @@ class TestReviewDecisionPersistence:
             scenario.quote_B_id, quote_D_id,
         }
 
-    def test_update_renames_to_aggregator_label(self, scenario):
-        # The aggregator carries the proposed new label ``X``; UPDATE
-        # uses that as the renamed code's label, with provenance back to
-        # both A (the previous target) and C (the new aggregator code).
+    def test_merge_and_rename_uses_llm_proposed_label(self, scenario):
+        # LLM proposes a fresh label "X" that's neither the target's (A) nor
+        # the aggregator's (C); the result keeps provenance to both.
         result, code_C = scenario.review(
-            new_label="X", llm_decision="update", target_code="A"
+            agg_label="C",
+            llm_decision="merge_and_rename",
+            target_code="A",
+            llm_new_label="X",
         )
         quote_D_id = code_C.supporting_quotes[0].quote_id
 
         assert result.code_id is None
+        assert result.codebook_used_id == scenario.parent.version
         assert result.code == "X"
         assert {e.source_code.code_id for e in result.derivation_sources} == {
             scenario.code_A.code_id, code_C.code_id,
         }
-        assert {e.decision for e in result.derivation_sources} == {DECISION_UPDATE}
+        assert {e.decision for e in result.derivation_sources} == {
+            DECISION_MERGE_AND_RENAME
+        }
         assert {q.quote_id for q in result.supporting_quotes} == {
             scenario.quote_B_id, quote_D_id,
         }
         assert _no_review_edge_from(code_C)
 
         saved = save_reviewer_decision(result)
+        assert saved.codebook_used_id == scenario.parent.version
         edges = _persisted_edges(saved.code_id)
         assert {e.source_code_id for e in edges} == {
             scenario.code_A.code_id, code_C.code_id,
         }
-        assert {e.decision for e in edges} == {DECISION_UPDATE}
+        assert {e.decision for e in edges} == {DECISION_MERGE_AND_RENAME}
         assert _persisted_quote_ids(saved.code_id) == {
             scenario.quote_B_id, quote_D_id,
         }
 
     def test_add_new_only_links_back_to_aggregator(self, scenario):
         result, code_C = scenario.review(
-            new_label="C", llm_decision="add_new", target_code=None
+            agg_label="C", llm_decision="add_new", target_code=None
         )
         quote_D_id = code_C.supporting_quotes[0].quote_id
 
         assert result.code_id is None
+        assert result.codebook_used_id == scenario.parent.version
         assert result.code == "C"
         # ADD has a single edge — A is untouched.
         assert [e.source_code.code_id for e in result.derivation_sources] == [
@@ -546,6 +567,7 @@ class TestReviewDecisionPersistence:
         assert _no_review_edge_from(code_C)
 
         saved = save_reviewer_decision(result)
+        assert saved.codebook_used_id == scenario.parent.version
         edges = _persisted_edges(saved.code_id)
         assert [e.source_code_id for e in edges] == [code_C.code_id]
         assert [e.decision for e in edges] == [DECISION_ADD]
@@ -558,4 +580,4 @@ class TestResponseSchema:
             "properties"
         ]["decision"]["enum"]
         assert "skip" not in decision_enum
-        assert set(decision_enum) == {"merge", "update", "add_new"}
+        assert set(decision_enum) == {"merge", "merge_and_rename", "add_new"}

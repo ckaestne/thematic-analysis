@@ -33,7 +33,7 @@ from thematic_analysis_inc.db.models import (
     CodesDerived,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_REVIEW,
 )
 
@@ -62,17 +62,22 @@ The user message is a JSON object:
   and `quotes` (the verbatim quote texts already associated with it).
 
 ## Decision Guidelines
-- **merge**: the new code captures the same concept as an existing one — just
-  with different wording. Set `target_code` to that existing code's label.
-- **update**: the new code is a clearly better label for an existing concept.
-  Set `target_code` to the existing code's label that should be renamed.
-- **add_new**: the code represents a genuinely new concept.
+- **add_new**: the code represents a genuinely new concept. No other fields
+  needed.
+- **merge**: the new code captures the same concept as an existing one. Set
+  `target_code` to the existing code's label (it is kept as the merged label).
+- **merge_and_rename**: same as merge, but neither the existing label nor the
+  new label is a good fit — propose a more representative label that captures
+  both. Set `target_code` to the existing code's label and `new_label` to your
+  proposed name.
 
 ## Output Format
 Respond with a single JSON object:
-- `decision`: one of "merge", "update", or "add_new"
-- `target_code`: the existing code label to merge with / rename (for merge or
-  update). Use the exact label from the input. `null` for add_new.
+- `decision`: one of "add_new", "merge", or "merge_and_rename"
+- `target_code`: the existing code label being merged into (exact label from
+  the input). `null` for add_new.
+- `new_label`: the proposed replacement label for merge_and_rename. `null` for
+  add_new and merge.
 - `rationale`: brief explanation for the decision."""
 
 REVIEWER_RESPONSE_SCHEMA = {
@@ -86,12 +91,15 @@ REVIEWER_RESPONSE_SCHEMA = {
             "properties": {
                 "decision": {
                     "type": "string",
-                    "enum": ["merge", "update", "add_new"],
+                    "enum": ["add_new", "merge", "merge_and_rename"],
                 },
                 "target_code": {"type": ["string", "null"]},
+                "new_label": {"type": ["string", "null"]},
                 "rationale": {"type": "string"},
             },
-            "required": ["decision", "target_code", "rationale"],
+            "required": [
+                "decision", "target_code", "new_label", "rationale",
+            ],
         },
     },
 }
@@ -269,18 +277,25 @@ class ReviewerAgent(BaseAgent):
             ],
         }
 
-    def _parse_response(self, response: str) -> tuple[str, str | None, str]:
-        """Return ``(decision_str, target_label, rationale)``.
+    def _parse_response(
+        self, response: str
+    ) -> tuple[str, str | None, str | None, str]:
+        """Return ``(decision_str, target_label, new_label, rationale)``.
 
-        Falls back to ``("add_new", None, …)`` on parse failure.
+        Falls back to ``("add_new", None, None, …)`` on parse failure.
         """
         data = extract_response_json(response)
         if data is None:
-            return "add_new", None, "Could not parse response"
+            return "add_new", None, None, "Could not parse response"
         decision_str = (data.get("decision") or "add_new").lower()
-        if decision_str not in {"add_new", "merge", "update"}:
+        if decision_str not in {"add_new", "merge", "merge_and_rename"}:
             decision_str = "add_new"
-        return decision_str, data.get("target_code"), data.get("rationale", "")
+        return (
+            decision_str,
+            data.get("target_code"),
+            data.get("new_label"),
+            data.get("rationale", ""),
+        )
 
     def _resolve_target(self, label: str | None) -> Code | None:
         if label is None:
@@ -357,10 +372,12 @@ class ReviewerAgent(BaseAgent):
         self.last_raw_response = response
         self.last_elapsed = time.monotonic() - t0
 
-        decision_str, target_label, rationale = self._parse_response(response)
+        decision_str, target_label, new_label, rationale = self._parse_response(
+            response
+        )
         target = self._resolve_target(target_label) if decision_str in {
             "merge",
-            "update",
+            "merge_and_rename",
         } else None
 
         if decision_str == "merge" and target is not None:
@@ -371,15 +388,20 @@ class ReviewerAgent(BaseAgent):
                 rationale=rationale,
                 decision=DECISION_MERGE,
             )
-        if decision_str == "update" and target is not None:
+        if (
+            decision_str == "merge_and_rename"
+            and target is not None
+            and new_label
+        ):
             return self._merge_or_update(
                 source_code_from_aggregator=code,
                 target=target,
-                label=code.code,  # the LLM's chosen new label
+                label=new_label,
                 rationale=rationale,
-                decision=DECISION_UPDATE,
+                decision=DECISION_MERGE_AND_RENAME,
             )
-        # add_new, or merge/update with an unresolvable target.
+        # add_new, or merge/merge_and_rename with an unresolvable target or
+        # (for rename) a missing new_label.
         return self._add(
             source_code_from_aggregator=code,
             label=code.code,

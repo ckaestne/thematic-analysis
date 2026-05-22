@@ -12,7 +12,7 @@ from thematic_analysis_inc.db.models import (
     CodesDerived,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_AGGREGATION,
     DERIVATION_REVIEW,
 )
@@ -303,7 +303,7 @@ def test_review_one_update_renames_target(tmp_path: Path) -> None:
 
     workers.review_one(
         conn, use_mock_embeddings=True,
-        agent_factory=_stub_reviewer_factory(DECISION_UPDATE, target_label="alpha"),
+        agent_factory=_stub_reviewer_factory(DECISION_MERGE_AND_RENAME, target_label="alpha"),
     )
     new_version = workers.finalize_codebook()
     assert new_version is not None

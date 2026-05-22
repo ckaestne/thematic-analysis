@@ -29,7 +29,7 @@ from thematic_analysis_inc.db.models import (
     CodesDerived,
     DECISION_ADD,
     DECISION_MERGE,
-    DECISION_UPDATE,
+    DECISION_MERGE_AND_RENAME,
     DERIVATION_REVIEW,
 )
 from thematic_analysis_inc.db.review import (
@@ -382,7 +382,7 @@ def test_update_replaces_target_in_new_version_only(tmp_path: Path) -> None:
     new_code_id = _do_review_decision(
         source_code_from_aggregator_code_id=a2,
         parent_version=v2,
-        decision=DECISION_UPDATE,
+        decision=DECISION_MERGE_AND_RENAME,
         new_code_text="refined",
         rationale="better wording",
         target_code_id=target_id,
