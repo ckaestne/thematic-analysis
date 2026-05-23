@@ -1006,6 +1006,135 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "codes": codes_payload,
             }
 
+    @app.get("/api/codes/{code_id}/similar")
+    def get_similar_codes(
+        code_id: int,
+        top_k: int = Query(default=30, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Top-k reviewer codes most similar to ``code_id`` by cosine
+        similarity over the embeddings the reviewer agent uses. Restricted
+        to codes that share at least one codebook revision with the
+        current code (so they're candidates for a merge in the same
+        codebook context)."""
+        _ensure_connected()
+        from sqlmodel import select
+        from thematic_analysis_inc.db import embeddings as db_embeddings
+        from thematic_analysis_inc.db.models import (
+            Code,
+            CodebookCode,
+            Segment,
+        )
+
+        with store.session() as s:
+            c = s.get(Code, code_id)
+            if c is None:
+                raise HTTPException(status_code=404, detail="code not found")
+            if c.embedding is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="code has no embedding (only reviewer codes have one)",
+                )
+            in_versions = [
+                int(v)
+                for v in s.exec(
+                    select(CodebookCode.codebook_version).where(
+                        CodebookCode.code_id == code_id
+                    )
+                ).all()
+            ]
+            if not in_versions:
+                return {"codebook_version": None, "items": []}
+            codebook_version = max(in_versions)
+            peer_ids = [
+                int(cid)
+                for cid in s.exec(
+                    select(CodebookCode.code_id).where(
+                        CodebookCode.codebook_version == codebook_version,
+                        CodebookCode.code_id != code_id,
+                    )
+                ).all()
+            ]
+            peers = [s.get(Code, pid) for pid in peer_ids]
+            peers = [p for p in peers if p is not None and p.embedding is not None]
+            query_emb = db_embeddings.decode(c.embedding)
+            similar = db_embeddings.find_similar(query_emb, peers, top_k=top_k)
+            items: list[dict[str, Any]] = []
+            for entry, score in similar:
+                seg = (
+                    s.get(Segment, entry.segment_id)
+                    if entry.segment_id
+                    else None
+                )
+                items.append(
+                    {
+                        "code_id": entry.code_id,
+                        "code": entry.code,
+                        "description": entry.description,
+                        "coder_id": entry.coder_id,
+                        "similarity": round(score, 4),
+                        "segment_id": entry.segment_id,
+                        "document_id": seg.document_id if seg else None,
+                        "n_quotes": len(entry.supporting_quotes or []),
+                    }
+                )
+            return {
+                "codebook_version": codebook_version,
+                "items": items,
+            }
+
+    class MergeIn(BaseModel):
+        selected_code_ids: list[int]
+        codebook_version: int | None = None
+
+    @app.post("/api/codes/{code_id}/merge")
+    def merge_codes(code_id: int, body: MergeIn) -> dict[str, Any]:
+        """Manually merge ``code_id`` with ``selected_code_ids``: create one
+        new reviewer Code (copy of the current label/embedding) with one
+        'R' edge per merged source, and a new codebook revision whose
+        membership replaces the merged codes with the new one."""
+        _ensure_connected()
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import Code, CodebookCode
+
+        if not body.selected_code_ids:
+            raise HTTPException(
+                status_code=400, detail="selected_code_ids must be non-empty"
+            )
+        with store.session() as s:
+            c = s.get(Code, code_id)
+            if c is None:
+                raise HTTPException(status_code=404, detail="code not found")
+            if body.codebook_version is not None:
+                codebook_version = body.codebook_version
+            else:
+                in_versions = [
+                    int(v)
+                    for v in s.exec(
+                        select(CodebookCode.codebook_version).where(
+                            CodebookCode.code_id == code_id
+                        )
+                    ).all()
+                ]
+                if not in_versions:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="code is not a member of any codebook revision",
+                    )
+                codebook_version = max(in_versions)
+
+        try:
+            new_code_id, new_version = db_review.manual_merge_reviewer_codes(
+                current_code_id=code_id,
+                selected_code_ids=body.selected_code_ids,
+                codebook_version=codebook_version,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "new_code_id": new_code_id,
+            "new_codebook_version": new_version,
+        }
+
     @app.get("/api/quotes/{quote_id}")
     def get_quote(quote_id: int) -> dict[str, Any]:
         _ensure_connected()

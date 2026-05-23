@@ -643,3 +643,104 @@ def test_codebook_versions_chain_records_parent(tmp_path: Path) -> None:
     assert by_version[1].parent_version is None
     assert by_version[v2].parent_version == 1
     assert by_version[v3].parent_version == v2
+
+
+# ---------------------------------------------------------------------------
+# Manual merge via the UI helper
+# ---------------------------------------------------------------------------
+
+
+def test_manual_merge_reviewer_codes(tmp_path: Path) -> None:
+    """Merge three reviewer codes inside a codebook revision: a new
+    reviewer code replaces them, with one R edge per merged source and a
+    union of supporting quotes."""
+    from thematic_analysis_inc.db.review import manual_merge_reviewer_codes
+
+    conn = _init(tmp_path)
+    seg = _seed_segment(conn)
+
+    a1 = _add_agg_code(
+        conn, segment_id=seg, version=1, code="A", quote_texts=["qa"]
+    )
+    v2, code_a = _review_add_and_finalize(
+        conn, agg_code_id=a1, code_text="A", parent_version=1
+    )
+    a2 = _add_agg_code(
+        conn, segment_id=seg, version=v2, code="B", quote_texts=["qb"]
+    )
+    v3, code_b = _review_add_and_finalize(
+        conn, agg_code_id=a2, code_text="B", parent_version=v2
+    )
+    a3 = _add_agg_code(
+        conn, segment_id=seg, version=v3, code="C", quote_texts=["qc"]
+    )
+    v4, code_c = _review_add_and_finalize(
+        conn, agg_code_id=a3, code_text="C", parent_version=v3
+    )
+
+    # v4 has all three reviewer codes as members.
+    members = {e.code_id for e in _get_codebook_codes(v4)}
+    assert members == {code_a, code_b, code_c}
+
+    # Merge B + C into A (the "current"). New revision should drop the
+    # three originals and contain just the new merged code.
+    new_code_id, new_version = manual_merge_reviewer_codes(
+        current_code_id=code_a,
+        selected_code_ids=[code_b, code_c],
+        codebook_version=v4,
+    )
+    assert new_version == v4 + 1
+    assert new_code_id not in {code_a, code_b, code_c}
+
+    new_members = {e.code_id for e in _get_codebook_codes(new_version)}
+    assert new_members == {new_code_id}
+
+    # v4 still has the original three.
+    assert {e.code_id for e in _get_codebook_codes(v4)} == {
+        code_a,
+        code_b,
+        code_c,
+    }
+
+    # New code has the union of all three sources' quotes.
+    new_code = _code_obj(new_code_id)
+    assert {q.text for q in new_code.supporting_quotes} == {
+        "qa",
+        "qb",
+        "qc",
+    }
+    # Three R/'M' derivation edges pointing at the merged sources.
+    sources = {e.source_code.code_id for e in new_code.derivation_sources}
+    assert sources == {code_a, code_b, code_c}
+    assert all(
+        e.derivation_type == DERIVATION_REVIEW
+        and e.decision == DECISION_MERGE
+        for e in new_code.derivation_sources
+    )
+
+
+def test_manual_merge_rejects_non_member(tmp_path: Path) -> None:
+    """Selected codes must be members of the target codebook revision."""
+    import pytest
+    from thematic_analysis_inc.db.review import manual_merge_reviewer_codes
+
+    conn = _init(tmp_path)
+    seg = _seed_segment(conn)
+    a1 = _add_agg_code(conn, segment_id=seg, version=1, code="A")
+    v2, code_a = _review_add_and_finalize(
+        conn, agg_code_id=a1, code_text="A", parent_version=1
+    )
+    a2 = _add_agg_code(conn, segment_id=seg, version=v2, code="B")
+    # Save B as a reviewer decision *without* finalizing, so it's not in v2.
+    code_b = _do_review_decision(
+        source_code_from_aggregator_code_id=a2,
+        parent_version=v2,
+        decision=DECISION_ADD,
+        new_code_text="B",
+    )
+    with pytest.raises(ValueError, match="not a member"):
+        manual_merge_reviewer_codes(
+            current_code_id=code_a,
+            selected_code_ids=[code_b],
+            codebook_version=v2,
+        )
