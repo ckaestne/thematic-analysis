@@ -24,7 +24,6 @@ import {
   IconChevronRight,
   IconEdit,
   IconExternalLink,
-  IconPlayerPlay,
   IconTrash,
 } from "@tabler/icons-react";
 import {
@@ -37,7 +36,14 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
-import { api, type AggregatedCode, type CoderRun, type SegmentDetail } from "../api";
+import {
+  api,
+  type AggregatedCode,
+  type CoderRun,
+  type QueueState,
+  type SegmentDetail,
+} from "../api";
+import { EnqueueButton } from "./EnqueueButton";
 import { StatusBadge } from "./StatusBadge";
 import { useConfirmDelete } from "./ConfirmDelete";
 
@@ -50,6 +56,7 @@ export type CodingSegment = {
   coder_runs: CoderRun[];
   aggregation: SegmentDetail["aggregation"];
   aggregated_codes: AggregatedCode[];
+  queue_state: QueueState;
 };
 
 type Props = {
@@ -605,16 +612,12 @@ export function SegmentCodingCard({
           )}
         </Stack>
         <Group gap="xs" wrap="nowrap">
-          <Tooltip label="Enqueue this segment for coding by all registered coders (at the latest codebook + research-context revisions)">
-            <ActionIcon
-              variant="subtle"
-              color="blue"
-              loading={enqueue.isPending}
-              onClick={() => enqueue.mutate()}
-            >
-              <IconPlayerPlay size={16} />
-            </ActionIcon>
-          </Tooltip>
+          <EnqueueButton
+            queueState={segment.queue_state}
+            kind="segment"
+            isLoading={enqueue.isPending}
+            onEnqueue={() => enqueue.mutate()}
+          />
           <StatusBadge status={segment.status} />
         </Group>
       </Group>

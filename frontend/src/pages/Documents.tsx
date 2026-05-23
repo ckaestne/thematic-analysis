@@ -12,12 +12,13 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconPlayerPlay, IconTrash, IconDice } from "@tabler/icons-react";
+import { IconTrash, IconDice } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { useConfirmDelete } from "../components/ConfirmDelete";
+import { EnqueueButton } from "../components/EnqueueButton";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "gray",
@@ -254,19 +255,16 @@ export function Documents() {
                   </Text>
                 </Table.Td>
                 <Table.Td>
-                  <Tooltip label="Enqueue every segment in this document for coding by all registered coders (at the latest codebook + research-context revisions)">
-                    <ActionIcon
-                      variant="subtle"
-                      color="blue"
-                      loading={
-                        enqueue.isPending &&
-                        enqueue.variables === d.document_id
-                      }
-                      onClick={() => enqueue.mutate(d.document_id)}
-                    >
-                      <IconPlayerPlay size={16} />
-                    </ActionIcon>
-                  </Tooltip>
+                  <EnqueueButton
+                    queueState={d.queue_state}
+                    kind="document"
+                    hoverLabel="Enqueue every segment in this document for coding by all registered coders (at the latest codebook + research-context revisions)"
+                    isLoading={
+                      enqueue.isPending &&
+                      enqueue.variables === d.document_id
+                    }
+                    onEnqueue={() => enqueue.mutate(d.document_id)}
+                  />
                   <Tooltip label="Delete document (and all its segments + derived data)">
                     <ActionIcon
                       variant="subtle"
