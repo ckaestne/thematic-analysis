@@ -67,6 +67,14 @@ def test_segment_payload_includes_finished_coder_with_zero_codes(
     assert block["finished_at"] is not None
 
 
+def test_segment_payload_includes_document_filename(tmp_path: Path) -> None:
+    client, _coder, sid = _seed(tmp_path)
+    r = client.get(f"/api/segments/{sid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["document_filename"] == "doc.md"
+
+
 def test_segment_payload_pending_coder_listed(tmp_path: Path) -> None:
     client, coder, sid = _seed(tmp_path)
     assert store.coding.enqueue_segment(sid) == 1

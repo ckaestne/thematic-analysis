@@ -149,6 +149,7 @@ export type SegmentDetail = {
   text: string;
   title: string | null;
   document_id: number | null;
+  document_filename: string | null;
   batch: number | null;
   status: string;
   coder_runs: CoderRun[];
@@ -170,6 +171,7 @@ export type SegmentDetail = {
 export type ApiSegmentPayload = {
   segment_id: number;
   document_id: number | null;
+  document_filename: string | null;
   title: string | null;
   content: string;
   line_from: number;
@@ -251,6 +253,7 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
     text: p.content,
     title: p.title,
     document_id: p.document_id,
+    document_filename: p.document_filename,
     batch: null,
     status: p.status,
     coder_runs,
