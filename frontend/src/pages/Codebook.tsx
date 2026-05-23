@@ -10,7 +10,7 @@ import {
   Text,
   Title,
 } from "@mantine/core";
-import { IconGitBranch } from "@tabler/icons-react";
+import { IconDownload, IconGitBranch } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -19,6 +19,7 @@ import {
   type CodebookChangeTag,
   type CodebookCode,
   type CodebookQuote,
+  type CodebookVersionDetail,
 } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 
@@ -138,9 +139,37 @@ function CodeCard({ c }: { c: CodebookCode }) {
   );
 }
 
+async function exportCodebook(detail: CodebookVersionDetail) {
+  const rc = await api.researchContextVersion(detail.research_context_version);
+  const payload = {
+    version: detail.version,
+    research_context: rc.description,
+    codes: detail.codes.map((c) => ({
+      code: c.code,
+      description: c.description,
+      quotes: c.quotes.map((q) => ({
+        text: q.text,
+        file: q.document_filename,
+      })),
+    })),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `codebook-v${detail.version}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function CodebookPage() {
   const navigate = useNavigate();
   const { version: versionParam } = useParams();
+  const [exporting, setExporting] = useState(false);
   const versions = useQuery({
     queryKey: ["codebook-versions"],
     queryFn: api.codebookVersions,
@@ -196,6 +225,23 @@ export function CodebookPage() {
             searchable
             allowDeselect={false}
           />
+          <Button
+            variant="light"
+            leftSection={<IconDownload size={16} />}
+            disabled={!detail.data || exporting}
+            loading={exporting}
+            onClick={async () => {
+              if (!detail.data) return;
+              setExporting(true);
+              try {
+                await exportCodebook(detail.data);
+              } finally {
+                setExporting(false);
+              }
+            }}
+          >
+            Export JSON
+          </Button>
         </Group>
       </Group>
 

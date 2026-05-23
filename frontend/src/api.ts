@@ -414,6 +414,10 @@ export const api = {
 
   researchContext: () =>
     jsonFetch<ResearchContext | null>("/api/research-context"),
+  researchContextVersion: (v: number) =>
+    jsonFetch<ResearchContext & { research_context_version: number }>(
+      `/api/research-context/versions/${v}`,
+    ),
   putResearchContext: (body: {
     description: string;
     tailored_prompts: Record<string, string>;
