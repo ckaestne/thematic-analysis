@@ -53,11 +53,10 @@ the adversarial code-refinement loop.
 
 ## Web inspector (`ta-web`)
 
-A React + FastAPI UI for inspecting and editing pipeline state. Install the
-optional `web` extras, then point it at any analysis database:
+A React + FastAPI UI for inspecting and editing pipeline state. Point it at
+any analysis database:
 
 ```bash
-uv sync --extra web
 uv run ta-web --db analysis.sqlite
 # → serving analysis.sqlite at http://127.0.0.1:8765
 ```

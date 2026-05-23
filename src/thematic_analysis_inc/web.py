@@ -1357,15 +1357,7 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         print(f"note: {db_path} does not exist; it will be created", flush=True)
 
-    try:
-        import uvicorn
-    except ImportError:
-        print(
-            "uvicorn is not installed. Install with:\n"
-            "  pip install 'thematic-analysis[web]'",
-            flush=True,
-        )
-        return 1
+    import uvicorn
 
     app = create_app(db_path)
     print(f"serving {db_path} at http://{args.host}:{args.port}", flush=True)
