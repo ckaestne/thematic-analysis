@@ -21,7 +21,7 @@ _SYSTEM_PROMPT = (
     "You receive a document with each line prefixed by its line number. "
     "Identify the line numbers where major topic shifts occur. "
     "Each segment must be at least paragraph-length (several sentences); "
-    "prefer fewer, larger segments over many small ones. "
+    "prefer fewer, larger segments over many small ones. Shorter documents have 1-5 segments, longer documents can have 10 to 50 segments, rarely much more than that. "
     "A boundary marks a genuine shift in what is being discussed, not a "
     "minor turn within the same topic. "
     "The first segment must start at line 1. "
