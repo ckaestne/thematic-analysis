@@ -477,6 +477,11 @@ export const api = {
       `/api/documents/${id}/enqueue`,
       { method: "POST", body: JSON.stringify({}) },
     ),
+  enqueueRandomDocuments: (n: number = 10) =>
+    jsonFetch<{ document_ids: number[]; enqueued: number }>(
+      `/api/documents/enqueue-random?n=${n}`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
   enqueueSegment: (id: number | string) =>
     jsonFetch<{ enqueued: number }>(
       `/api/segments/${id}/enqueue`,
