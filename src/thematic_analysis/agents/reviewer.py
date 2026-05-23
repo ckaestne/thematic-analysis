@@ -42,7 +42,7 @@ from thematic_analysis_inc.db.models import (
 class ReviewerConfig(AgentConfig):
     """Configuration for the Reviewer agent."""
 
-    similarity_threshold: float = 0.75  # Threshold for considering codes similar
+    similarity_threshold: float = 0.4  # Threshold for considering codes similar
     top_k_similar: int = 25  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging
     max_quotes_per_code: int = 5  # Quotes shown per code in the prompt
@@ -58,7 +58,7 @@ The user message is a JSON object:
 - `new_code`: an object with `code` (the new label) and `quotes` (the verbatim
   quote texts that support it).
 - `similar_codes`: a list of existing codes that may overlap. Each entry has
-  `code` (the existing label), `similarity` (cosine similarity to the new code),
+  `code` (the existing label), 
   and `quotes` (the verbatim quote texts already associated with it).
 
 ## Decision Guidelines
@@ -270,7 +270,6 @@ class ReviewerAgent(BaseAgent):
             "similar_codes": [
                 {
                     "code": entry.code,
-                    "similarity": round(score, 3),
                     "quotes": [q.text for q in (entry.supporting_quotes or [])[:n]],
                 }
                 for entry, score in similar
