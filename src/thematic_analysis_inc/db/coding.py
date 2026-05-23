@@ -173,13 +173,25 @@ def claim_next_assignment(coder: Coder | None = None) -> CodingQueueEntry | None
 
     If ``coder`` is given, restrict to that coder; otherwise claim any
     pending row across all coders.
+
+    Per-segment serialization: never hand out an assignment whose
+    ``segment_id`` is already in flight in another (unfinished) claim.
+    Two workers must not code the same segment concurrently — they
+    would race on Quote insertion and could produce duplicate Quote
+    rows for the same span (the persistence step dedupes against
+    quotes visible at query time, which is not race-proof on its own).
     """
     while True:
         with session() as s:
+            in_flight = select(CodingQueueEntry.segment_id).where(  # type: ignore[arg-type]
+                CodingQueueEntry.claimed_at.is_not(None),  # type: ignore[union-attr]
+                CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+            )
             stmt = select(CodingQueueEntry).where(
                 CodingQueueEntry.claimed_at.is_(None),  # type: ignore[union-attr]
                 CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
                 CodingQueueEntry.error.is_(None),  # type: ignore[union-attr]
+                CodingQueueEntry.segment_id.not_in(in_flight),  # type: ignore[attr-defined]
             )
             if coder is not None:
                 stmt = stmt.where(CodingQueueEntry.coder_id == coder.coder_id)
@@ -193,6 +205,22 @@ def claim_next_assignment(coder: Coder | None = None) -> CodingQueueEntry | None
             row.claimed_at = now_ts
             s.add(row)
             try:
+                s.flush()
+                # Re-verify per-segment exclusivity inside the same
+                # transaction: if another worker claimed any row on this
+                # segment between our SELECT and our flush, back off.
+                conflict = s.exec(
+                    select(func.count()).select_from(CodingQueueEntry).where(  # type: ignore[arg-type]
+                        CodingQueueEntry.segment_id == row.segment_id,
+                        CodingQueueEntry.claimed_at.is_not(None),  # type: ignore[union-attr]
+                        CodingQueueEntry.finished_at.is_(None),  # type: ignore[union-attr]
+                        (CodingQueueEntry.coder_id != row.coder_id)
+                        | (CodingQueueEntry.codebook_used_id != row.codebook_used_id),
+                    )
+                ).one()
+                if int(conflict) > 0:
+                    s.rollback()
+                    continue
                 s.commit()
             except Exception:
                 s.rollback()
@@ -241,25 +269,32 @@ def save_codes_and_finish_assignment(
         by_key: dict[str, Quote] = {
             _normalize_quote_text(q.text): q for q in existing_quotes
         }
-        for c in codes:
-            # Add c before wiring relationships so back-population of
-            # Quote.codes sees c as session-resident (avoids SAWarning).
-            s.add(c)
-            merged: list[Quote] = []
-            for q in (c.supporting_quotes or []):
-                if q.quote_id is not None:
-                    mq = s.merge(q)
-                    by_key.setdefault(_normalize_quote_text(mq.text), mq)
-                    merged.append(mq)
-                    continue
-                key = _normalize_quote_text(q.text)
-                hit = by_key.get(key)
-                if hit is not None:
-                    merged.append(hit)
-                else:
-                    by_key[key] = q
-                    merged.append(q)
-            c.supporting_quotes = merged
+        # Resolve every code's supporting_quotes against by_key BEFORE
+        # adding the code to the session. If we s.add(c) first, the
+        # save-update cascade on the many-to-many pulls the agent's
+        # original transient Quote objects into the session; the later
+        # reassignment swaps them out of the relationship but they still
+        # flush as orphan Quote rows with duplicate text. Dedup first,
+        # then add. no_autoflush keeps the SAWarning quiet that fires
+        # when back-population touches a not-yet-added Code.
+        with s.no_autoflush:
+            for c in codes:
+                merged: list[Quote] = []
+                for q in (c.supporting_quotes or []):
+                    if q.quote_id is not None:
+                        mq = s.merge(q)
+                        by_key.setdefault(_normalize_quote_text(mq.text), mq)
+                        merged.append(mq)
+                        continue
+                    key = _normalize_quote_text(q.text)
+                    hit = by_key.get(key)
+                    if hit is not None:
+                        merged.append(hit)
+                    else:
+                        by_key[key] = q
+                        merged.append(q)
+                c.supporting_quotes = merged
+                s.add(c)
         a.finished_at = _utcnow()
         s.add(a)
         s.commit()
