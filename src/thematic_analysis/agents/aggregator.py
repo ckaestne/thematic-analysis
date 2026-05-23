@@ -137,17 +137,22 @@ class CodeAggregatorAgent(BaseAgent):
         revision in turn (concatenated result).
         """
         if codebook is not None:
-            return self._aggregate_one(segment, codebook)
-
-        # SQLModel disables __hash__, so a set over Codebook objects raises
-        # TypeError; key the dedup on the FK int instead (one entry per
-        # codebook revision, identity preserved via the value).
-        codebooks = {c.codebook_used_id: c.codebook_used for c in segment.codes}
-        return [
-            resulting_code
-            for codebook in codebooks.values()
-            for resulting_code in self._aggregate_one(segment, codebook)
-        ]
+            result = self._aggregate_one(segment, codebook)
+        else:
+            # SQLModel disables __hash__, so a set over Codebook objects raises
+            # TypeError; key the dedup on the FK int instead (one entry per
+            # codebook revision, identity preserved via the value).
+            codebooks = {c.codebook_used_id: c.codebook_used for c in segment.codes}
+            result = [
+                resulting_code
+                for codebook in codebooks.values()
+                for resulting_code in self._aggregate_one(segment, codebook)
+            ]
+        assert all(c.coder_id == SYSTEM_AGGREGATOR_ID for c in result), (
+            "aggregator must return codes with coder_id == SYSTEM_AGGREGATOR_ID; "
+            f"got {[c.coder_id for c in result]}"
+        )
+        return result
 
     def _aggregate_one(
         self, segment: Segment, codebook: Codebook

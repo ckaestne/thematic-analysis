@@ -314,6 +314,14 @@ class ReviewerAgent(BaseAgent):
         ``s.add`` and lets the cascade write the provenance edges and the
         quote links.
         """
+        result = self._review_code_impl(code)
+        assert result.coder_id == SYSTEM_REVIEWER_ID, (
+            "reviewer must return a code with coder_id == SYSTEM_REVIEWER_ID; "
+            f"got {result.coder_id}"
+        )
+        return result
+
+    def _review_code_impl(self, code: Code) -> Code:
         self.last_similar = []
         self.last_payload = None
         self.last_system_prompt = ""
