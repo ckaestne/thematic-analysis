@@ -1,7 +1,9 @@
 import {
   ActionIcon,
   Anchor,
+  Button,
   Card,
+  Group,
   Progress,
   Stack,
   Table,
@@ -10,7 +12,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconPlayerPlay, IconTrash } from "@tabler/icons-react";
+import { IconPlayerPlay, IconTrash, IconDice } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api } from "../api";
@@ -78,6 +80,28 @@ export function Documents() {
       }),
   });
 
+  const enqueueRandom = useMutation({
+    mutationFn: () => api.enqueueRandomDocuments(10),
+    onSuccess: (res) => {
+      const nDocs = res.document_ids.length;
+      notifications.show({
+        message:
+          nDocs > 0
+            ? `Enqueued ${nDocs} document${nDocs === 1 ? "" : "s"} (${res.enqueued} segment/coder pair${res.enqueued === 1 ? "" : "s"})`
+            : "No un-enqueued documents available",
+        color: nDocs > 0 ? "teal" : "yellow",
+      });
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["status"] });
+      qc.invalidateQueries({ queryKey: ["coding-queue"] });
+    },
+    onError: (e) =>
+      notifications.show({
+        message: e instanceof Error ? e.message : String(e),
+        color: "red",
+      }),
+  });
+
   const enqueue = useMutation({
     mutationFn: (id: number) => api.enqueueDocument(id),
     onSuccess: (res) => {
@@ -106,7 +130,19 @@ export function Documents() {
   return (
     <Stack gap="md">
       {confirm.modal}
-      <Title order={2}>Documents</Title>
+      <Group justify="space-between">
+        <Title order={2}>Documents</Title>
+        <Tooltip label="Pick 10 random documents that have never been enqueued and queue every segment for all coders">
+          <Button
+            variant="light"
+            leftSection={<IconDice size={16} />}
+            loading={enqueueRandom.isPending}
+            onClick={() => enqueueRandom.mutate()}
+          >
+            Enqueue 10 random
+          </Button>
+        </Tooltip>
+      </Group>
       <Card padding={0}>
         <Table verticalSpacing="sm" highlightOnHover>
           <Table.Thead>

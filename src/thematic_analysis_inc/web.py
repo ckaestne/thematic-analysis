@@ -590,6 +590,43 @@ def create_app(db_path: str | Path) -> FastAPI:
         n = db_coding.enqueue_segment(segment_id, coder_ids=coder_ids)
         return {"enqueued": n}
 
+    @app.post("/api/documents/enqueue-random")
+    def enqueue_random_documents(
+        body: EnqueueIn | None = None, n: int = 10
+    ) -> dict[str, Any]:
+        """Pick up to ``n`` documents that have no coding-queue entries yet
+        and enqueue every segment in each for all registered real coders.
+        Returns the chosen document ids and the number of queue rows inserted."""
+        import random
+        from sqlmodel import select
+
+        _ensure_connected()
+        with store.session() as s:
+            enqueued_doc_ids = set(
+                s.exec(
+                    select(store.Segment.document_id)
+                    .join(
+                        store.CodingQueueEntry,
+                        store.CodingQueueEntry.segment_id  # type: ignore[arg-type]
+                        == store.Segment.segment_id,
+                    )
+                    .distinct()
+                ).all()
+            )
+            stmt = select(store.Document.document_id)
+            if enqueued_doc_ids:
+                stmt = stmt.where(
+                    store.Document.document_id.not_in(enqueued_doc_ids)  # type: ignore[union-attr]
+                )
+            candidate_ids = list(s.exec(stmt).all())
+        random.shuffle(candidate_ids)
+        chosen = candidate_ids[:n]
+        coder_ids = body.coder_ids if body else None
+        total = 0
+        for did in chosen:
+            total += db_coding.enqueue_document(did, coder_ids=coder_ids)
+        return {"document_ids": chosen, "enqueued": total}
+
     # ── coders ───────────────────────────────────────────────────────────
     @app.get("/api/coders")
     def get_coders() -> list[dict[str, Any]]:
