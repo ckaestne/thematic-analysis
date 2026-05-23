@@ -152,7 +152,13 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     seg = store.get_segment(segment_id)
     if seg is None:
         raise HTTPException(status_code=404, detail="segment not found")
-    from thematic_analysis_inc.db.models import is_sentinel_code
+    from thematic_analysis_inc.db.models import Document, is_sentinel_code
+
+    document_filename: str | None = None
+    if seg.document_id is not None:
+        with store.session() as s:
+            doc = s.get(Document, seg.document_id)
+            document_filename = doc.filename if doc is not None else None
 
     coder_codes = db_coding.load_segment_coder_codes(seg)
     queue_entries = db_coding.list_queue_entries_for_segment(segment_id)
@@ -237,6 +243,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     return {
         "segment_id": seg.segment_id,
         "document_id": seg.document_id,
+        "document_filename": document_filename,
         "title": seg.title,
         "content": seg.content,
         "line_from": seg.line_from,

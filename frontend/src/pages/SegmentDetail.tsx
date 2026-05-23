@@ -26,16 +26,15 @@ export function SegmentDetail() {
   return (
     <Stack gap="md">
       <Breadcrumbs>
-        {data.document_id != null ? (
+        <Anchor component={Link} to="/documents">
+          Documents
+        </Anchor>
+        {data.document_id != null && (
           <Anchor component={Link} to={`/documents/${data.document_id}`}>
-            Documents
-          </Anchor>
-        ) : (
-          <Anchor component={Link} to="/documents">
-            Documents
+            {data.document_filename ?? `doc ${data.document_id}`}
           </Anchor>
         )}
-        <Text>{data.segment_id}</Text>
+        <Text>segment {data.segment_id}</Text>
       </Breadcrumbs>
 
       <SegmentCodingCard
