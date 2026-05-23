@@ -200,7 +200,11 @@ class CodeAggregatorAgent(BaseAgent):
 
         if data is None:
             # Parse failure: fall back to retaining every input code as-is.
-            return [c for codes in coder_codes for c in codes]
+            return [
+                self._copy_as_aggregator(segment, codebook, c)
+                for codes in coder_codes
+                for c in codes
+            ]
 
         return self._build_codes(segment, codebook, data, code_index)
 
@@ -359,7 +363,7 @@ class CodeAggregatorAgent(BaseAgent):
             if src is None or cid in consumed:
                 continue
             consumed.add(cid)
-            out.append(src)
+            out.append(self._copy_as_aggregator(segment, codebook, src))
 
         return out
 
