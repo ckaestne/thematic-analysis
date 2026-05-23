@@ -70,6 +70,8 @@ export type DocumentCoderProgress = {
   runs_failed: number;
 };
 
+export type QueueState = "none" | "earlier" | "latest";
+
 export type Document = {
   document_id: number;
   filename: string;
@@ -78,6 +80,7 @@ export type Document = {
   segments_total: number;
   per_coder: DocumentCoderProgress[];
   aggregations_by_status: Record<string, number>;
+  queue_state: QueueState;
 };
 
 export type DocumentSegment = {
@@ -90,6 +93,7 @@ export type DocumentSegment = {
   coder_runs: CoderRun[];
   aggregation: SegmentDetail["aggregation"];
   aggregated_codes: AggregatedCode[];
+  queue_state: QueueState;
 };
 
 export type DocumentDetail = {
@@ -156,6 +160,7 @@ export type SegmentDetail = {
     error: string | null;
   };
   aggregated_codes: AggregatedCode[];
+  queue_state: QueueState;
 };
 
 // The shape `/api/segments/{id}` and `/api/documents/{id}.segments[]` actually
@@ -199,6 +204,7 @@ export type ApiSegmentPayload = {
     };
   }>;
   aggregator_no_codes: boolean;
+  queue_state: QueueState;
 };
 
 export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
@@ -259,6 +265,7 @@ export function adaptSegmentPayload(p: ApiSegmentPayload): SegmentDetail {
           }
         : null,
     aggregated_codes,
+    queue_state: p.queue_state ?? "none",
   };
 }
 

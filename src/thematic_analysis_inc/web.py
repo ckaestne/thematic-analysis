@@ -130,6 +130,24 @@ def _theme_coder_progress(
     return out
 
 
+def _queue_state(
+    max_cb: int | None, latest_cb: int | None
+) -> str:
+    """Classify a document/segment for the enqueue button UI.
+
+    - "latest": queued at the most recent codebook revision — clicking
+      enqueue would be a no-op for that revision.
+    - "earlier": queued, but only at a strictly older codebook revision —
+      the UI greys out the button and asks for a confirming second click.
+    - "none": never queued.
+    """
+    if max_cb is None:
+        return "none"
+    if latest_cb is not None and max_cb >= latest_cb:
+        return "latest"
+    return "earlier"
+
+
 def _segment_payload(segment_id: int) -> dict[str, Any]:
     seg = store.get_segment(segment_id)
     if seg is None:
@@ -139,6 +157,10 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
     coder_codes = db_coding.load_segment_coder_codes(seg)
     queue_entries = db_coding.list_queue_entries_for_segment(segment_id)
     queue_entries.sort(key=lambda q: q.coder_id)
+    max_cb = max((q.codebook_used_id for q in queue_entries), default=None)
+    latest = store.latest_codebook()
+    latest_cb_version = latest.version if latest is not None else None
+    queue_state = _queue_state(max_cb, latest_cb_version)
     coder_blocks: list[dict[str, Any]] = []
     for q in queue_entries:
         codes_for_coder = coder_codes.get(q.coder_id, [])
@@ -224,6 +246,7 @@ def _segment_payload(segment_id: int) -> dict[str, Any]:
         "coder_codes": coder_blocks,
         "aggregator_codes": agg_payload,
         "aggregator_no_codes": aggregator_no_codes,
+        "queue_state": queue_state,
     }
 
 
@@ -443,6 +466,7 @@ def create_app(db_path: str | Path) -> FastAPI:
                     select(
                         store.Segment.document_id,
                         store.CodingQueueEntry.coder_id,
+                        store.CodingQueueEntry.codebook_used_id,
                         store.CodingQueueEntry.claimed_at,
                         store.CodingQueueEntry.finished_at,
                         store.CodingQueueEntry.error,
@@ -480,11 +504,19 @@ def create_app(db_path: str | Path) -> FastAPI:
 
         # (document_id, coder_id) -> {status: count}
         per_doc_coder: dict[tuple[int, int], dict[str, int]] = {}
-        for doc_id, coder_id, claimed_at, finished_at, error in queue_rows:
+        # document_id -> max codebook_used_id over its queue entries
+        max_cb_per_doc: dict[int, int] = {}
+        for doc_id, coder_id, cb_used, claimed_at, finished_at, error in queue_rows:
             key = (doc_id, coder_id)
             buckets = per_doc_coder.setdefault(key, {})
             st = _derive(claimed_at, finished_at, error)
             buckets[st] = buckets.get(st, 0) + 1
+            prev = max_cb_per_doc.get(doc_id)
+            if prev is None or cb_used > prev:
+                max_cb_per_doc[doc_id] = cb_used
+
+        latest = store.latest_codebook()
+        latest_cb_version = latest.version if latest is not None else None
 
         # document_id -> count of distinct segments with an aggregator code
         agg_done_per_doc: dict[int, int] = {}
@@ -518,6 +550,9 @@ def create_app(db_path: str | Path) -> FastAPI:
                     "per_coder": per_coder,
                     "aggregations_by_status": (
                         {"done": agg_done} if agg_done else {}
+                    ),
+                    "queue_state": _queue_state(
+                        max_cb_per_doc.get(d.document_id), latest_cb_version
                     ),
                 }
             )
