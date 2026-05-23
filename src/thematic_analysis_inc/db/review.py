@@ -13,6 +13,7 @@ from thematic_analysis_inc.db.models import (
     Codebook,
     CodebookCode,
     CodesDerived,
+    DECISION_MERGE,
     DERIVATION_REVIEW,
     SENTINEL_CODE_LABEL,
 )
@@ -172,6 +173,112 @@ def list_review_decisions(
         for r in rows:
             s.expunge(r)
         return total, rows
+
+
+def manual_merge_reviewer_codes(
+    current_code_id: int,
+    selected_code_ids: list[int],
+    codebook_version: int,
+) -> tuple[int, int]:
+    """Merge ``current`` + ``selected`` reviewer codes into a new reviewer Code
+    inside ``codebook_version`` and produce a new codebook revision.
+
+    The new Code copies the current code's label/description/embedding, unions
+    every supporting quote from current + selected, and wires one 'R' edge
+    (decision 'M') per merged source. A fresh codebook revision is created
+    whose membership equals ``codebook_version``'s membership minus the merged
+    codes plus the new one. Returns ``(new_code_id, new_codebook_version)``.
+    """
+    if not selected_code_ids:
+        raise ValueError("selected_code_ids must be non-empty")
+    if current_code_id in selected_code_ids:
+        raise ValueError("current_code_id must not appear in selected_code_ids")
+
+    # Late import to avoid a circular module-load dependency:
+    # codebook.py imports from review.py via the db package init.
+    from thematic_analysis_inc.db.codebook import insert_codebook_version
+
+    with session() as s:
+        parent_cb = s.get(Codebook, codebook_version)
+        if parent_cb is None:
+            raise ValueError(f"unknown codebook version: {codebook_version}")
+        s.expunge(parent_cb)
+
+        all_ids = [current_code_id, *selected_code_ids]
+        codes_by_id: dict[int, Code] = {}
+        for cid in all_ids:
+            c = s.get(Code, cid)
+            if c is None:
+                raise ValueError(f"unknown code_id: {cid}")
+            if c.coder_id != SYSTEM_REVIEWER_ID:
+                raise ValueError(
+                    f"code {cid} is not a reviewer code (coder_id={c.coder_id})"
+                )
+            membership = s.get(CodebookCode, (codebook_version, cid))
+            if membership is None:
+                raise ValueError(
+                    f"code {cid} is not a member of codebook v{codebook_version}"
+                )
+            codes_by_id[cid] = c
+
+        current = codes_by_id[current_code_id]
+        merged_quote_ids: dict[int, "object"] = {}
+        for cid in all_ids:
+            for q in (codes_by_id[cid].supporting_quotes or []):
+                if q.quote_id is not None and q.quote_id not in merged_quote_ids:
+                    merged_quote_ids[q.quote_id] = q
+        quotes = list(merged_quote_ids.values())
+
+        new_code = Code(
+            segment_id=current.segment_id,
+            coder_id=SYSTEM_REVIEWER_ID,
+            codebook_used_id=codebook_version,
+            code=current.code,
+            description=current.description,
+            rationale=f"Manual merge of codes {all_ids} via UI",
+            embedding=current.embedding,
+        )
+        new_code.supporting_quotes = list(quotes)
+        new_code.derivation_sources = [
+            CodesDerived(
+                source_code=codes_by_id[cid],
+                derivation_type=DERIVATION_REVIEW,
+                decision=DECISION_MERGE,
+                rationale="manual merge from UI",
+            )
+            for cid in all_ids
+        ]
+        s.add(new_code)
+        s.commit()
+        s.refresh(new_code)
+        new_code_id = new_code.code_id
+        s.expunge_all()
+
+    new_cb = insert_codebook_version(parent=parent_cb)
+    merged_ids = set(all_ids)
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(CodebookCode).where(
+                    CodebookCode.codebook_version == codebook_version
+                )
+            ).all()
+        )
+        for r in rows:
+            if r.code_id in merged_ids:
+                continue
+            s.add(
+                CodebookCode(
+                    codebook_version=new_cb.version, code_id=r.code_id
+                )
+            )
+        s.add(
+            CodebookCode(
+                codebook_version=new_cb.version, code_id=new_code_id
+            )
+        )
+        s.commit()
+    return new_code_id, new_cb.version
 
 
 def segment_review_remaining(segment_id: int) -> int:

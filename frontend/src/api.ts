@@ -613,6 +613,28 @@ export const api = {
     jsonFetch<CodebookVersionDetail>(`/api/codebook/versions/${v}`),
 
   code: (id: number) => jsonFetch<CodeDetail>(`/api/codes/${id}`),
+  similarCodes: (id: number, top_k: number = 30) =>
+    jsonFetch<{
+      codebook_version: number | null;
+      items: Array<{
+        code_id: number;
+        code: string;
+        description: string;
+        coder_id: number;
+        similarity: number;
+        segment_id: number | null;
+        document_id: number | null;
+        n_quotes: number;
+      }>;
+    }>(`/api/codes/${id}/similar?top_k=${top_k}`),
+  mergeCodes: (id: number, selected_code_ids: number[]) =>
+    jsonFetch<{ new_code_id: number; new_codebook_version: number }>(
+      `/api/codes/${id}/merge`,
+      {
+        method: "POST",
+        body: JSON.stringify({ selected_code_ids }),
+      },
+    ),
   quote: (id: number) => jsonFetch<CodebookQuote>(`/api/quotes/${id}`),
 
   themeCoders: () => jsonFetch<ThemeCoder[]>("/api/theme-coders"),
