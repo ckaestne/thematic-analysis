@@ -100,3 +100,8 @@ venv = ".venv"
 pythonVersion = "3.12"
 useLibraryCodeForTypes = true
 typeCheckingMode = "standard"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

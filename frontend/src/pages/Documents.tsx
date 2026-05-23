@@ -1,7 +1,9 @@
 import {
   ActionIcon,
   Anchor,
+  Button,
   Card,
+  Group,
   Progress,
   Stack,
   Table,
@@ -10,7 +12,8 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconPlayerPlay, IconTrash } from "@tabler/icons-react";
+import { IconPlayerPlay, IconTrash, IconUpload } from "@tabler/icons-react";
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 import { notifications } from "@mantine/notifications";
 import { api } from "../api";
@@ -63,6 +66,24 @@ export function Documents() {
     queryFn: api.documents,
   });
   const confirm = useConfirmDelete();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const upload = useMutation({
+    mutationFn: (file: File) => api.uploadDocument(file),
+    onSuccess: (res) => {
+      notifications.show({
+        message: `Uploaded "${res.filename}" — ${res.segments_inserted} segment${res.segments_inserted === 1 ? "" : "s"} added`,
+        color: "teal",
+      });
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["status"] });
+    },
+    onError: (e) =>
+      notifications.show({
+        message: e instanceof Error ? e.message : String(e),
+        color: "red",
+      }),
+  });
 
   const del = useMutation({
     mutationFn: (id: number) => api.deleteDocument(id),
@@ -106,7 +127,28 @@ export function Documents() {
   return (
     <Stack gap="md">
       {confirm.modal}
-      <Title order={2}>Documents</Title>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.md,.text"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) upload.mutate(file);
+          e.target.value = "";
+        }}
+      />
+      <Group justify="space-between">
+        <Title order={2}>Documents</Title>
+        <Button
+          leftSection={<IconUpload size={16} />}
+          variant="light"
+          loading={upload.isPending}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          Upload document
+        </Button>
+      </Group>
       <Card padding={0}>
         <Table verticalSpacing="sm" highlightOnHover>
           <Table.Thead>

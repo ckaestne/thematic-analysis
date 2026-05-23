@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -557,6 +557,57 @@ def create_app(db_path: str | Path) -> FastAPI:
         if not removed:
             raise HTTPException(status_code=404, detail="document not found")
         return {"removed_document": True, "removed_segments": n_segs}
+
+    @app.post("/api/documents")
+    async def upload_document(file: UploadFile = File(...)) -> dict[str, Any]:
+        """Upload a plain-text file, segment it by paragraph, and store it."""
+        _ensure_connected()
+        content = await file.read()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="file must be UTF-8 text")
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="file is empty")
+
+        filename = file.filename or "upload.txt"
+        if store.find_document_by_filename(filename) is not None:
+            raise HTTPException(
+                status_code=409, detail=f"document '{filename}' already exists"
+            )
+
+        from thematic_analysis.loaders import (
+            DocumentMetadata,
+            LoadedDocument,
+        )
+
+        doc_obj = LoadedDocument(
+            text=text,
+            metadata=DocumentMetadata(
+                filename=filename,
+                filepath="",
+                word_count=len(text.split()),
+                char_count=len(text),
+            ),
+        )
+        segments = doc_obj.segment(method="paragraph", min_words=20)
+        if not segments:
+            raise HTTPException(
+                status_code=422,
+                detail="no segments found — document may be too short",
+            )
+
+        new_doc = store.add_document(filename)
+        rows = [(None, s.text, 0, 0, i) for i, s in enumerate(segments)]
+        inserted = store.enqueue_segments(new_doc, rows)
+        return {
+            "document_id": new_doc.document_id,
+            "filename": new_doc.filename,
+            "created_at": (
+                new_doc.created_at.isoformat() if new_doc.created_at else None
+            ),
+            "segments_inserted": len(inserted),
+        }
 
     @app.post("/api/documents/{document_id}/enqueue")
     def enqueue_document(

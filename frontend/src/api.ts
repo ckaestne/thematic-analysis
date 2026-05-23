@@ -449,6 +449,27 @@ export const api = {
   deleteSegment: (id: string) =>
     jsonFetch(`/api/segments/${id}`, { method: "DELETE" }),
 
+  uploadDocument: async (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/documents", { method: "POST", body: fd });
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (body && typeof body.detail === "string") detail = body.detail;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail);
+    }
+    return res.json() as Promise<{
+      document_id: number;
+      filename: string;
+      created_at: string;
+      segments_inserted: number;
+    }>;
+  },
   documents: () =>
     jsonFetch<{ items: Document[]; coder_ids: string[] }>("/api/documents"),
   document: (id: number) =>
