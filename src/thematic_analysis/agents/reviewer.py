@@ -43,7 +43,7 @@ class ReviewerConfig(AgentConfig):
     """Configuration for the Reviewer agent."""
 
     similarity_threshold: float = 0.75  # Threshold for considering codes similar
-    top_k_similar: int = 10  # Number of similar codes to retrieve (paper §4)
+    top_k_similar: int = 25  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging
     max_quotes_per_code: int = 5  # Quotes shown per code in the prompt
 
