@@ -3,6 +3,7 @@ import {
   Anchor,
   Button,
   Card,
+  Center,
   Group,
   Progress,
   Stack,
@@ -10,12 +11,20 @@ import {
   Text,
   Title,
   Tooltip,
+  UnstyledButton,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { IconTrash, IconDice } from "@tabler/icons-react";
+import {
+  IconTrash,
+  IconDice,
+  IconChevronUp,
+  IconChevronDown,
+  IconSelector,
+} from "@tabler/icons-react";
 import { Link } from "react-router-dom";
+import { useMemo, useState } from "react";
 import { notifications } from "@mantine/notifications";
-import { api } from "../api";
+import { api, type Document } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { useConfirmDelete } from "../components/ConfirmDelete";
 import { EnqueueButton } from "../components/EnqueueButton";
@@ -59,6 +68,75 @@ function ProgressMini({
   );
 }
 
+type SortKey =
+  | "document_id"
+  | "filename"
+  | "segments_total"
+  | "size_bytes"
+  | "created_at"
+  | "aggregations_done"
+  | `coder:${string}`;
+
+type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
+
+function sortValue(d: Document, key: SortKey): number | string {
+  if (key === "aggregations_done") {
+    const done = d.aggregations_by_status.done ?? 0;
+    return d.segments_total > 0 ? done / d.segments_total : -1;
+  }
+  if (key.startsWith("coder:")) {
+    const cid = key.slice("coder:".length);
+    const p = d.per_coder.find((x) => x.coder_id === cid);
+    const done = p?.runs_done ?? 0;
+    return d.segments_total > 0 ? done / d.segments_total : -1;
+  }
+  return d[key as keyof Document] as number | string;
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  state,
+  onToggle,
+  align = "left",
+  style,
+}: {
+  label: React.ReactNode;
+  sortKey: SortKey;
+  state: SortState;
+  onToggle: (key: SortKey) => void;
+  align?: "left" | "right";
+  style?: React.CSSProperties;
+}) {
+  const active = state?.key === sortKey;
+  const Icon = active
+    ? state!.dir === "asc"
+      ? IconChevronUp
+      : IconChevronDown
+    : IconSelector;
+  return (
+    <Table.Th style={style}>
+      <UnstyledButton
+        onClick={() => onToggle(sortKey)}
+        style={{ width: "100%" }}
+      >
+        <Group
+          gap={4}
+          wrap="nowrap"
+          justify={align === "right" ? "flex-end" : "flex-start"}
+        >
+          <Text fw={600} size="sm">
+            {label}
+          </Text>
+          <Center>
+            <Icon size={14} opacity={active ? 1 : 0.4} />
+          </Center>
+        </Group>
+      </UnstyledButton>
+    </Table.Th>
+  );
+}
+
 export function Documents() {
   const qc = useQueryClient();
   const { data, error, isLoading } = useQuery({
@@ -66,6 +144,32 @@ export function Documents() {
     queryFn: api.documents,
   });
   const confirm = useConfirmDelete();
+  const [sort, setSort] = useState<SortState>({
+    key: "document_id",
+    dir: "asc",
+  });
+
+  const toggleSort = (key: SortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: "asc" };
+      if (prev.dir === "asc") return { key, dir: "desc" };
+      return null;
+    });
+  };
+
+  const sortedItems = useMemo(() => {
+    const items = data?.items ?? [];
+    if (!sort) return items;
+    const dir = sort.dir === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const av = sortValue(a, sort.key);
+      const bv = sortValue(b, sort.key);
+      if (typeof av === "number" && typeof bv === "number") {
+        return (av - bv) * dir;
+      }
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }, [data?.items, sort]);
 
   const del = useMutation({
     mutationFn: (id: number) => api.deleteDocument(id),
@@ -148,17 +252,54 @@ export function Documents() {
         <Table verticalSpacing="sm" highlightOnHover>
           <Table.Thead>
             <Table.Tr>
-              <Table.Th>ID</Table.Th>
-              <Table.Th>Filename</Table.Th>
-              <Table.Th ta="right">Segments</Table.Th>
+              <SortHeader
+                label="ID"
+                sortKey="document_id"
+                state={sort}
+                onToggle={toggleSort}
+              />
+              <SortHeader
+                label="Filename"
+                sortKey="filename"
+                state={sort}
+                onToggle={toggleSort}
+              />
+              <SortHeader
+                label="Segments"
+                sortKey="segments_total"
+                state={sort}
+                onToggle={toggleSort}
+                align="right"
+              />
               {coderIds.map((cid) => (
-                <Table.Th key={cid} style={{ minWidth: 140 }}>
-                  {cid}
-                </Table.Th>
+                <SortHeader
+                  key={cid}
+                  label={cid}
+                  sortKey={`coder:${cid}`}
+                  state={sort}
+                  onToggle={toggleSort}
+                  style={{ minWidth: 140 }}
+                />
               ))}
-              <Table.Th style={{ minWidth: 140 }}>Aggregations</Table.Th>
-              <Table.Th>Size</Table.Th>
-              <Table.Th>Added</Table.Th>
+              <SortHeader
+                label="Aggregations"
+                sortKey="aggregations_done"
+                state={sort}
+                onToggle={toggleSort}
+                style={{ minWidth: 140 }}
+              />
+              <SortHeader
+                label="Size"
+                sortKey="size_bytes"
+                state={sort}
+                onToggle={toggleSort}
+              />
+              <SortHeader
+                label="Added"
+                sortKey="created_at"
+                state={sort}
+                onToggle={toggleSort}
+              />
               <Table.Th w={80}></Table.Th>
             </Table.Tr>
           </Table.Thead>
@@ -168,7 +309,7 @@ export function Documents() {
                 <Table.Td colSpan={6 + coderIds.length}>Loading…</Table.Td>
               </Table.Tr>
             )}
-            {data?.items.map((d) => (
+            {sortedItems.map((d) => (
               <Table.Tr key={d.document_id}>
                 <Table.Td>
                   <Anchor component={Link} to={`/documents/${d.document_id}`}>
