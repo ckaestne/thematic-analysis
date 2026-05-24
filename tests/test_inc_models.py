@@ -47,6 +47,11 @@ EXPECTED_TABLES = {
     "quote",
     "research_context",
     "segment",
+    "theme",
+    "theme_code",
+    "theme_coding_job",
+    "theme_supporting_quote",
+    "themes_derived",
 }
 
 

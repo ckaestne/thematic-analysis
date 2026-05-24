@@ -16,6 +16,7 @@ from thematic_analysis_inc.db import (
     research_context,
     review,
     status,
+    theme,
 )
 from thematic_analysis_inc.db.aggregation import (
     load_segment_and_codebook_for_aggregation,
@@ -83,6 +84,16 @@ from thematic_analysis_inc.db.status import (
     StatusCounts,
     status_counts,
 )
+from thematic_analysis_inc.db.theme import (
+    add_theme_coding_job,
+    get_theme,
+    get_theme_coding_job,
+    list_current_themes,
+    list_theme_coding_jobs,
+    list_themes_for_job,
+    mark_theme_deleted,
+    save_themes,
+)
 
 
 __all__ = [
@@ -96,6 +107,7 @@ __all__ = [
     "research_context",
     "review",
     "status",
+    "themes",
     # connection
     "connect",
     "init_db",
@@ -154,4 +166,13 @@ __all__ = [
     # status
     "StatusCounts",
     "status_counts",
+    # themes
+    "add_theme_coding_job",
+    "get_theme_coding_job",
+    "list_theme_coding_jobs",
+    "save_themes",
+    "get_theme",
+    "list_current_themes",
+    "list_themes_for_job",
+    "mark_theme_deleted",
 ]

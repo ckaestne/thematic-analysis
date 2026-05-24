@@ -10,6 +10,10 @@ from thematic_analysis.agents.reviewer import (
     ReviewerAgent,
     ReviewerConfig,
 )
+from thematic_analysis.agents.theme_coder import (
+    ThemeCoderAgent,
+    ThemeCoderConfig,
+)
 
 
 __all__ = [
@@ -21,4 +25,6 @@ __all__ = [
     "AggregatorConfig",
     "ReviewerAgent",
     "ReviewerConfig",
+    "ThemeCoderAgent",
+    "ThemeCoderConfig",
 ]

@@ -1,0 +1,168 @@
+"""Theme + ThemeCodingJob CRUD, backed by SQLModel.
+
+Themes come from one of three sources (see ``models.SOURCE_*``); the
+"current" theme set excludes deleted themes and any theme that has
+been folded into a newer one via ``themes_derived``.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy.orm import selectinload
+from sqlmodel import select
+
+from thematic_analysis_inc.db.connection import session
+from thematic_analysis_inc.db.models import (
+    SOURCE_JOB,
+    Code,
+    Quote,
+    Theme,
+    ThemeCodingJob,
+    ThemesDerived,
+)
+
+
+# ---------------------------------------------------------------------------
+# ThemeCodingJob
+# ---------------------------------------------------------------------------
+
+
+def add_theme_coding_job(
+    codebook_used_id: int, prompt: str
+) -> ThemeCodingJob:
+    """Insert a new job and return the persisted (detached) row."""
+    job = ThemeCodingJob(
+        codebook_used_id=codebook_used_id, prompt=prompt,
+    )
+    with session() as s:
+        s.add(job)
+        s.commit()
+        s.refresh(job)
+        s.expunge(job)
+        return job
+
+
+def get_theme_coding_job(job_id: int) -> ThemeCodingJob | None:
+    with session() as s:
+        job = s.get(ThemeCodingJob, job_id)
+        if job is not None:
+            s.expunge(job)
+        return job
+
+
+def list_theme_coding_jobs() -> list[ThemeCodingJob]:
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(ThemeCodingJob).order_by(ThemeCodingJob.id)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+# ---------------------------------------------------------------------------
+# Theme
+# ---------------------------------------------------------------------------
+
+
+def save_themes(themes: list[Theme]) -> list[Theme]:
+    """Persist a batch of transient themes (with their link rows) in one
+    transaction. Each theme must already have its ``source`` set and,
+    where applicable, ``theme_coding_job_id``; the worker is responsible
+    for that. Returns the persisted (detached) rows."""
+    if not themes:
+        return []
+    with session() as s:
+        for t in themes:
+            s.add(t)
+        s.commit()
+        for t in themes:
+            s.refresh(t)
+            # Touch relationships so callers can read them after expunge.
+            _ = list(t.codes)
+            _ = list(t.supporting_quotes)
+        s.expunge_all()
+        return themes
+
+
+def get_theme(theme_id: int) -> Theme | None:
+    """Fetch a theme with its codes + quotes eager-loaded."""
+    with session() as s:
+        t = s.exec(
+            select(Theme)
+            .where(Theme.theme_id == theme_id)
+            .options(
+                selectinload(Theme.codes).selectinload(  # type: ignore[arg-type]
+                    Code.supporting_quotes
+                ),
+                selectinload(Theme.supporting_quotes),  # type: ignore[arg-type]
+            )
+        ).first()
+        if t is None:
+            return None
+        _ = list(t.codes)
+        _ = list(t.supporting_quotes)
+        s.expunge_all()
+        return t
+
+
+def list_current_themes() -> list[Theme]:
+    """Themes that are not deleted and not folded into a derived theme."""
+    with session() as s:
+        src_ids = select(ThemesDerived.source_theme_id)
+        rows = list(
+            s.exec(
+                select(Theme)
+                .where(
+                    Theme.deleted == False,                  # noqa: E712
+                    ~Theme.theme_id.in_(src_ids),
+                )
+                .order_by(Theme.theme_id)
+                .options(
+                    selectinload(Theme.codes),               # type: ignore[arg-type]
+                    selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
+                )
+            ).all()
+        )
+        for t in rows:
+            _ = list(t.codes)
+            _ = list(t.supporting_quotes)
+        s.expunge_all()
+        return rows
+
+
+def list_themes_for_job(job_id: int) -> list[Theme]:
+    """All themes (deleted or not) attributed to a job, ordered by id."""
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(Theme)
+                .where(
+                    Theme.source == SOURCE_JOB,
+                    Theme.theme_coding_job_id == job_id,
+                )
+                .order_by(Theme.theme_id)
+                .options(
+                    selectinload(Theme.codes),               # type: ignore[arg-type]
+                    selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
+                )
+            ).all()
+        )
+        for t in rows:
+            _ = list(t.codes)
+            _ = list(t.supporting_quotes)
+        s.expunge_all()
+        return rows
+
+
+def mark_theme_deleted(theme_id: int, deleted: bool = True) -> bool:
+    """Set the ``deleted`` flag. Returns ``True`` if the row existed."""
+    with session() as s:
+        t = s.get(Theme, theme_id)
+        if t is None:
+            return False
+        t.deleted = deleted
+        s.add(t)
+        s.commit()
+        return True

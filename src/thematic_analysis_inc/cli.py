@@ -58,6 +58,7 @@ PANEL_DOCUMENTS = "Documents"
 PANEL_S1_CODERS = "Stage 1 — coder management"
 PANEL_S1_PIPELINE = "Stage 1 — codebook pipeline"
 PANEL_S1_STATUS = "Stage 1 — status & codebook inspection"
+PANEL_S2_THEMES = "Stage 2 — themes"
 PANEL_DEBUG = "Debugging"
 
 
@@ -75,6 +76,9 @@ _REQUIRES_EXISTING_DB = {
     "list-codebooks",
     "show-codebook",
     "export-codebook",
+    "theme-code",
+    "list-themes",
+    "show-theme",
     "set-research-context",
     "show-research-context",
     "clear-research-context",
@@ -1000,6 +1004,108 @@ def _cmd_test_review(args: SimpleNamespace) -> int:
     return 0
 
 
+# Stage 2 — theme coding handlers --------------------------------------------
+
+
+def _resolve_codebook_version(version_arg: int | None) -> int | None:
+    if version_arg is not None:
+        return version_arg
+    cv = store.latest_codebook()
+    if cv is None:
+        print(
+            "no codebook version found; run 'ta --db ... init' first",
+            file=sys.stderr,
+        )
+        return None
+    return cv.version
+
+
+def _cmd_theme_code(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    version = _resolve_codebook_version(args.codebook_version)
+    if version is None:
+        return 1
+
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    if not (prompt or "").strip():
+        print(
+            "error: provide --prompt or --prompt-file with the job "
+            "instructions (research question, persona, etc.)",
+            file=sys.stderr,
+        )
+        return 2
+
+    job = store.add_theme_coding_job(
+        codebook_used_id=version, prompt=prompt,
+    )
+    print(
+        f"[theme-code] job id={job.id} codebook=v{version} "
+        f"prompt={len(prompt)} chars"
+    )
+
+    themes = workers.run_theme_coding_job(job)
+    print(
+        f"[theme-code] job id={job.id} produced {len(themes)} theme(s)"
+    )
+    for t in themes:
+        print(
+            f"  theme_id={t.theme_id} codes={len(t.codes)} "
+            f"quotes={len(t.supporting_quotes)} {t.title!r}"
+        )
+    return 0
+
+
+def _cmd_list_themes(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    if args.job is not None:
+        themes = store.list_themes_for_job(args.job)
+        scope = f"job={args.job}"
+    else:
+        themes = store.list_current_themes()
+        scope = "current"
+    if not themes:
+        print(f"(no themes — {scope})")
+        return 0
+    print(f"{len(themes)} theme(s) — {scope}")
+    for t in themes:
+        flag = " [deleted]" if t.deleted else ""
+        print(
+            f"  theme_id={t.theme_id} src={t.source} "
+            f"codes={len(t.codes)} quotes={len(t.supporting_quotes)}"
+            f"{flag} {t.title!r}"
+        )
+    return 0
+
+
+def _cmd_show_theme(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    t = store.get_theme(args.theme_id)
+    if t is None:
+        print(f"no theme with id {args.theme_id}", file=sys.stderr)
+        return 1
+    print(f"theme_id={t.theme_id}  {t.title}")
+    print(
+        f"  source={t.source}  job={t.theme_coding_job_id}  "
+        f"codebook=v{t.codebook_used_id}  deleted={t.deleted}"
+    )
+    if t.description:
+        print(f"  description: {t.description}")
+    if t.rationale:
+        print(f"  rationale:   {t.rationale}")
+    print(f"  codes ({len(t.codes)}):")
+    for c in t.codes:
+        print(f"    [code_id={c.code_id}] {c.code}")
+    print(f"  supporting quotes ({len(t.supporting_quotes)}):")
+    for q in t.supporting_quotes:
+        text = (q.text or "").replace("\n", " ").strip()
+        if len(text) > 160:
+            text = text[:157] + "..."
+        print(f"    [quote_id={q.quote_id}] \"{text}\"")
+    return 0
+
+
 # Typer wiring ---------------------------------------------------------------
 
 
@@ -1389,6 +1495,87 @@ def _cli_export_codebook(
     output: Annotated[str, typer.Option("-o", "--output")] = "-",
 ) -> None:
     _run(ctx, _cmd_export_codebook, version=version, output=output)
+
+
+# Stage 2 — themes -----------------------------------------------------------
+
+
+@app.command(
+    name="theme-code",
+    rich_help_panel=PANEL_S2_THEMES,
+    help=(
+        "create a theme-coding job and run it: an LLM theme coder reads "
+        "the full codebook and proposes themes"
+    ),
+)
+def _cli_theme_code(
+    ctx: typer.Context,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            help=(
+                "job instructions appended to the system prompt — "
+                "research question, persona, framing"
+            ),
+        ),
+    ] = None,
+    prompt_file: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-file",
+            help="read job instructions from this file instead of --prompt",
+        ),
+    ] = None,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option(
+            "--codebook-version",
+            help="codebook version to theme-code (default: latest)",
+        ),
+    ] = None,
+) -> None:
+    _run(
+        ctx,
+        _cmd_theme_code,
+        prompt=prompt,
+        prompt_file=prompt_file,
+        codebook_version=codebook_version,
+    )
+
+
+@app.command(
+    name="list-themes",
+    rich_help_panel=PANEL_S2_THEMES,
+    help=(
+        "list themes — by default the 'current' set "
+        "(not deleted, not folded into a derived theme)"
+    ),
+)
+def _cli_list_themes(
+    ctx: typer.Context,
+    job: Annotated[
+        int | None,
+        typer.Option(
+            "--job",
+            help="instead show every theme attributed to this theme-coding job",
+        ),
+    ] = None,
+) -> None:
+    _run(ctx, _cmd_list_themes, job=job)
+
+
+@app.command(
+    name="show-theme",
+    rich_help_panel=PANEL_S2_THEMES,
+    help="print one theme with its codes and supporting quotes",
+)
+def _cli_show_theme(
+    ctx: typer.Context,
+    theme_id: Annotated[int, typer.Argument(help="theme_id to show")],
+) -> None:
+    _run(ctx, _cmd_show_theme, theme_id=theme_id)
+
 
 # Research-context commands are registered via the helper module so its
 # specific options stay collocated with its handlers.
