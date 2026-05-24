@@ -12,6 +12,14 @@ message contains the entire codebook serialised to JSON — codes,
 descriptions, and supporting quotes with their ids — without
 compression. Modern long-context models handle this directly, so we
 skip the LLMLingua step the paper used.
+
+A single ``develop_themes_async`` call runs a five-step conversation
+against the LLM: an initial proposal (3–10 themes), two "any more
+themes?" follow-ups in the same chat, an out-of-band critic pass that
+reviews the accumulated themes against the codebook, and a final
+consolidation turn where the critic's feedback is injected back into
+the original chat and the model produces the definitive list. Only
+the last turn's output is parsed and returned.
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from openhands.sdk import Message, TextContent
 from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
@@ -44,6 +53,10 @@ something analytically interesting about the data with respect to the
 research focus. Each theme should be supported by multiple codes; a
 theme grounded in a single code is usually too narrow.
 
+Aim for 3 to 10 themes overall — enough to cover the analytically
+important patterns in the codebook, but few enough that each theme is
+substantive and distinct.
+
 For each theme, provide:
 - a short, evocative title;
 - a one- to three-sentence description of what the theme captures;
@@ -59,6 +72,47 @@ in the user message. Do not invent ids. Do not include codes that
 don't belong to the theme just to pad it out. If you cannot construct
 a coherent theme set from the codebook, return an empty list of
 themes."""
+
+
+_ADDITIONAL_THEMES_PROMPT = """\
+Look at the codebook again. Are there additional themes worth raising
+that you did not propose above? Consider patterns you may have
+overlooked, alternative interpretive angles, or codes left
+unconnected. If so, propose them now, following the same schema as
+before. Only propose genuinely new themes — do not restate ones you
+already gave. If nothing further is warranted, return an empty list
+(`{"themes": []}`)."""
+
+
+_CRITIC_SYSTEM_PROMPT = """\
+You are a critical reviewer of a thematic analysis. Another analyst
+has proposed a set of themes over a codebook. Read the codebook and
+the proposed themes, then identify weaknesses: themes that are too
+narrow or too broad, themes that overlap and should be consolidated,
+themes that do not speak to the research focus, patterns in the
+codebook that were missed, and groupings of codes that don't hang
+together coherently.
+
+Be concrete and constructive. Refer to themes by their titles and to
+codes by their `code_id`. Your output is free-form feedback for the
+analyst — no JSON, no schema. Keep it focused and actionable; the
+analyst will use it to produce a final consolidated list."""
+
+
+_FINAL_PROMPT_TEMPLATE = """\
+A critical reviewer has examined the themes you proposed across the
+turns above and given the following feedback:
+
+<<<CRITIC_FEEDBACK>>>
+{critique}
+<<<END_CRITIC_FEEDBACK>>>
+
+Taking this feedback into account alongside everything you proposed
+earlier in this conversation, produce a final consolidated list of
+themes. Aim for 3 to 10 themes total. Drop or merge themes that did
+not hold up, refine those that needed work, and incorporate any
+genuinely new themes the critique raised. Use only `code_id`s and
+`quote_id`s from the codebook. This list is your definitive answer."""
 
 
 # Header used to demarcate the researcher's framing in the user message
@@ -201,7 +255,7 @@ class ThemeCoderAgent(BaseAgent):
         return json.dumps({"codes": codes_payload}, indent=2)
 
     def _build_user_prompt(self, codebook: Codebook, prompt: str) -> str:
-        """Assemble the user message.
+        """Assemble the initial user message.
 
         The researcher's framing (if any) goes first, in a clearly
         delimited block, so the model knows it is a brief from the
@@ -220,6 +274,44 @@ class ThemeCoderAgent(BaseAgent):
                 version=codebook.version,
                 codebook_json=self._codebook_to_json(codebook),
             )
+        )
+        return "\n\n".join(sections)
+
+    def _build_critic_user_prompt(
+        self,
+        codebook: Codebook,
+        prompt: str,
+        prior_responses: list[str],
+    ) -> str:
+        """Assemble the critic's user message.
+
+        The critic sees the researcher's framing, the codebook JSON,
+        and every prior turn's raw JSON response from the theme coder
+        — verbatim, so the critic judges what the analyst actually
+        said rather than a summary.
+        """
+        sections: list[str] = []
+        framing = (prompt or "").strip()
+        if framing:
+            sections.append(
+                _RESEARCHER_FRAMING_HEADER.format(framing=framing)
+            )
+        sections.append(
+            _CODEBOOK_HEADER.format(
+                version=codebook.version,
+                codebook_json=self._codebook_to_json(codebook),
+            )
+        )
+        proposals = "\n\n".join(
+            f"### Analyst's turn {i + 1}\n```json\n{r}\n```"
+            for i, r in enumerate(prior_responses)
+        )
+        sections.append(
+            "## Themes proposed by the analyst\n\n"
+            "Below are the analyst's responses across multiple turns. "
+            "Earlier turns proposed an initial set; later turns added "
+            "further themes when prompted. Review them as a whole.\n\n"
+            f"{proposals}"
         )
         return "\n\n".join(sections)
 
@@ -295,14 +387,89 @@ class ThemeCoderAgent(BaseAgent):
             )
         return out
 
+    # -- LLM helpers ---------------------------------------------------------
+
+    async def _chat_async(
+        self,
+        messages: list[Message],
+        response_format: dict | None = None,
+    ) -> str:
+        """Run one LLM turn over a prebuilt message list and return text.
+
+        Used by the multi-step ``develop_themes_async`` flow so each
+        turn can extend the same conversation rather than restarting
+        from a single system+user pair.
+        """
+        kwargs = {"response_format": response_format} if response_format else {}
+        response = await self._completion_with_retry_async(messages, kwargs)
+        return self._extract_text(response)
+
+    @staticmethod
+    def _user(text: str) -> Message:
+        return Message(role="user", content=[TextContent(text=text)])
+
+    @staticmethod
+    def _assistant(text: str) -> Message:
+        return Message(role="assistant", content=[TextContent(text=text)])
+
+    @staticmethod
+    def _system(text: str) -> Message:
+        return Message(role="system", content=[TextContent(text=text)])
+
     # -- public API ----------------------------------------------------------
 
     async def develop_themes_async(
         self, codebook: Codebook, prompt: str
     ) -> list[Theme]:
-        response = await self._call_llm_async(
-            self.get_system_prompt(),
-            self._build_user_prompt(codebook, prompt),
-            response_format=THEME_CODER_RESPONSE_SCHEMA,
+        """Develop themes via a five-step multi-turn conversation.
+
+        1. Initial proposal of 3–10 themes.
+        2. Same chat: any additional themes worth raising?
+        3. Same chat: any more themes?
+        4. Out-of-band critic reviews the accumulated themes and the
+           codebook, returning free-form feedback.
+        5. Critic feedback injected into the original chat; model
+           returns the final consolidated list.
+
+        Only step 5's response is parsed and returned.
+        """
+        system_prompt = self.get_system_prompt()
+        messages: list[Message] = [
+            self._system(system_prompt),
+            self._user(self._build_user_prompt(codebook, prompt)),
+        ]
+
+        initial = await self._chat_async(
+            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
         )
-        return self._parse_response(response, codebook)
+        messages.append(self._assistant(initial))
+
+        messages.append(self._user(_ADDITIONAL_THEMES_PROMPT))
+        more1 = await self._chat_async(
+            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        )
+        messages.append(self._assistant(more1))
+
+        messages.append(self._user(_ADDITIONAL_THEMES_PROMPT))
+        more2 = await self._chat_async(
+            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        )
+        messages.append(self._assistant(more2))
+
+        critic_messages: list[Message] = [
+            self._system(_CRITIC_SYSTEM_PROMPT),
+            self._user(
+                self._build_critic_user_prompt(
+                    codebook, prompt, [initial, more1, more2]
+                )
+            ),
+        ]
+        critique = await self._chat_async(critic_messages)
+
+        messages.append(
+            self._user(_FINAL_PROMPT_TEMPLATE.format(critique=critique))
+        )
+        final = await self._chat_async(
+            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        )
+        return self._parse_response(final, codebook)
