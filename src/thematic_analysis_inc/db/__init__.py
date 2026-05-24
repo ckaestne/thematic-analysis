@@ -94,6 +94,7 @@ from thematic_analysis_inc.db.theme import (
     list_themes_derived_from,
     list_themes_derived_into,
     list_themes_for_job,
+    list_unrun_theme_coding_jobs,
     mark_theme_deleted,
     save_themes,
 )
@@ -180,5 +181,6 @@ __all__ = [
     "list_themes_derived_from",
     "list_themes_derived_into",
     "list_themes_for_job",
+    "list_unrun_theme_coding_jobs",
     "mark_theme_deleted",
 ]

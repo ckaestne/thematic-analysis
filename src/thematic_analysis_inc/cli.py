@@ -76,7 +76,8 @@ _REQUIRES_EXISTING_DB = {
     "list-codebooks",
     "show-codebook",
     "export-codebook",
-    "theme-code",
+    "create-theme-job",
+    "create-themes",
     "list-themes",
     "show-theme",
     "set-research-context",
@@ -1021,7 +1022,7 @@ def _resolve_codebook_version(version_arg: int | None) -> int | None:
     return cv.version
 
 
-def _cmd_theme_code(args: SimpleNamespace) -> int:
+def _cmd_create_theme_job(args: SimpleNamespace) -> int:
     store.connect(args.db)
     version = _resolve_codebook_version(args.codebook_version)
     if version is None:
@@ -1042,19 +1043,53 @@ def _cmd_theme_code(args: SimpleNamespace) -> int:
         codebook_used_id=version, prompt=prompt,
     )
     print(
-        f"[theme-code] job id={job.id} codebook=v{version} "
-        f"prompt={len(prompt)} chars"
+        f"[create-theme-job] job id={job.id} codebook=v{version} "
+        f"prompt={len(prompt)} chars (not run — use 'create-themes' to run "
+        f"pending jobs)"
     )
+    return 0
 
-    themes = workers.run_theme_coding_job(job)
+
+def _cmd_create_themes(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    pending = store.list_unrun_theme_coding_jobs()
+    if not pending:
+        print("[create-themes] no pending theme-coding jobs")
+        return 0
+    print(f"[create-themes] running {len(pending)} pending job(s)")
+
+    n_themes = 0
+    n_empty = 0
+    for job in pending:
+        try:
+            themes = workers.run_theme_coding_job(job)
+        except Exception as e:
+            print(
+                f"[create-themes] job id={job.id} FAILED: {e}",
+                file=sys.stderr,
+            )
+            return 1
+        if themes:
+            n_themes += len(themes)
+            print(
+                f"[create-themes] job id={job.id} codebook=v{job.codebook_used_id} "
+                f"produced {len(themes)} theme(s)"
+            )
+            for t in themes:
+                print(
+                    f"  theme_id={t.theme_id} codes={len(t.codes)} "
+                    f"quotes={len(t.supporting_quotes)} {t.title!r}"
+                )
+        else:
+            n_empty += 1
+            print(
+                f"[create-themes] job id={job.id} codebook=v{job.codebook_used_id} "
+                f"produced no themes (sentinel recorded)"
+            )
     print(
-        f"[theme-code] job id={job.id} produced {len(themes)} theme(s)"
+        f"[create-themes] done: {len(pending)} job(s), "
+        f"{n_themes} theme(s), {n_empty} empty"
     )
-    for t in themes:
-        print(
-            f"  theme_id={t.theme_id} codes={len(t.codes)} "
-            f"quotes={len(t.supporting_quotes)} {t.title!r}"
-        )
     return 0
 
 
@@ -1553,14 +1588,14 @@ def _cli_export_codebook(
 
 
 @app.command(
-    name="theme-code",
+    name="create-theme-job",
     rich_help_panel=PANEL_S2_THEMES,
     help=(
-        "create a theme-coding job and run it: an LLM theme coder reads "
-        "the full codebook and proposes themes"
+        "create a theme-coding job (codebook version + researcher prompt) "
+        "without running it — use 'create-themes' to run pending jobs"
     ),
 )
-def _cli_theme_code(
+def _cli_create_theme_job(
     ctx: typer.Context,
     prompt: Annotated[
         str | None,
@@ -1589,11 +1624,24 @@ def _cli_theme_code(
 ) -> None:
     _run(
         ctx,
-        _cmd_theme_code,
+        _cmd_create_theme_job,
         prompt=prompt,
         prompt_file=prompt_file,
         codebook_version=codebook_version,
     )
+
+
+@app.command(
+    name="create-themes",
+    rich_help_panel=PANEL_S2_THEMES,
+    help=(
+        "run every theme-coding job that has not been run yet (no "
+        "associated themes); jobs that produce no themes record a "
+        "sentinel so they aren't re-run"
+    ),
+)
+def _cli_create_themes(ctx: typer.Context) -> None:
+    _run(ctx, _cmd_create_themes)
 
 
 @app.command(

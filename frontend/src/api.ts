@@ -375,6 +375,8 @@ export type ThemeDetail = ThemeFull & {
   derived_into: ThemeSummary[];
 };
 
+export type ThemeCodingJobRunStatus = "not_run" | "no_themes" | "has_themes";
+
 export type ThemeCodingJobSummary = {
   id: number;
   codebook_used_id: number;
@@ -382,6 +384,7 @@ export type ThemeCodingJobSummary = {
   created_at: string | null;
   n_themes: number;
   n_themes_active: number;
+  run_status: ThemeCodingJobRunStatus;
 };
 
 export type ThemeCodingJobDetail = {
@@ -389,6 +392,7 @@ export type ThemeCodingJobDetail = {
   codebook_used_id: number;
   prompt: string;
   created_at: string | null;
+  run_status: ThemeCodingJobRunStatus;
   themes: ThemeFull[];
 };
 
@@ -624,10 +628,28 @@ export const api = {
       codebook_used_id: number;
       prompt: string;
       created_at: string | null;
-      n_themes: number;
+      run_status: ThemeCodingJobRunStatus;
     }>("/api/theme-coding-jobs", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  runThemeCodingJob: (id: number) =>
+    jsonFetch<{
+      id: number;
+      n_themes: number;
+      run_status: ThemeCodingJobRunStatus;
+    }>(`/api/theme-coding-jobs/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  runPendingThemeCodingJobs: () =>
+    jsonFetch<{
+      n_jobs_run: number;
+      n_themes: number;
+      n_jobs_empty: number;
+    }>("/api/theme-coding-jobs/run-pending", {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
   themeCodingJob: (id: number) =>
     jsonFetch<ThemeCodingJobDetail>(`/api/theme-coding-jobs/${id}`),
