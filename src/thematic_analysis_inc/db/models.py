@@ -120,7 +120,7 @@ class Segment(SQLModel, table=True):
 
     segment_id: Optional[int] = Field(default=None, primary_key=True)
     document_id: int = Field(
-        foreign_key="document.document_id", index=True
+        foreign_key="document.document_id", ondelete="CASCADE", index=True
     )
     title: Optional[str] = None
     content: str
@@ -237,7 +237,7 @@ class Code(SQLModel, table=True):
     """
 
     code_id: Optional[int] = Field(default=None, primary_key=True)
-    segment_id: int = Field(foreign_key="segment.segment_id", index=True)
+    segment_id: int = Field(foreign_key="segment.segment_id", ondelete="CASCADE", index=True)
     coder_id: int = Field(foreign_key="coder.coder_id", index=True)
     codebook_used_id: int = Field(
         foreign_key="codebook.version", index=True
@@ -280,7 +280,7 @@ class Quote(SQLModel, table=True):
     """
 
     quote_id: Optional[int] = Field(default=None, primary_key=True)
-    segment_id: int = Field(foreign_key="segment.segment_id", index=True)
+    segment_id: int = Field(foreign_key="segment.segment_id", ondelete="CASCADE", index=True)
     text: str
 
     segment: Segment = Relationship(back_populates="quotes")
@@ -338,13 +338,13 @@ class CodingQueueEntry(SQLModel, table=True):
     __tablename__ = "coding_queue"
 
     segment_id: int = Field(
-        foreign_key="segment.segment_id", primary_key=True
+        foreign_key="segment.segment_id", ondelete="CASCADE", primary_key=True
     )
     coder_id: int = Field(
-        foreign_key="coder.coder_id", primary_key=True, index=True
+        foreign_key="coder.coder_id", ondelete="CASCADE", primary_key=True, index=True
     )
     codebook_used_id: int = Field(
-        foreign_key="codebook.version", primary_key=True
+        foreign_key="codebook.version", ondelete="CASCADE", primary_key=True
     )
     enqueued_at: datetime = Field(default_factory=_utcnow)
     claimed_at: Optional[datetime] = None
@@ -451,10 +451,10 @@ class CodebookCode(SQLModel, table=True):
     __tablename__ = "codebook_code"
 
     codebook_version: int = Field(
-        foreign_key="codebook.version", primary_key=True
+        foreign_key="codebook.version", ondelete="CASCADE", primary_key=True
     )
     code_id: int = Field(
-        foreign_key="code.code_id", primary_key=True
+        foreign_key="code.code_id", ondelete="CASCADE", primary_key=True
     )
 
 
@@ -464,10 +464,10 @@ class CodesSupportingQuotes(SQLModel, table=True):
     __tablename__ = "codes_supporting_quotes"
 
     code_id: int = Field(
-        foreign_key="code.code_id", primary_key=True
+        foreign_key="code.code_id", ondelete="CASCADE", primary_key=True
     )
     quote_id: int = Field(
-        foreign_key="quote.quote_id", primary_key=True
+        foreign_key="quote.quote_id", ondelete="CASCADE", primary_key=True
     )
 
 
@@ -482,10 +482,10 @@ class CodesDerived(SQLModel, table=True):
     __tablename__ = "codes_derived"
 
     new_code_id: int = Field(
-        foreign_key="code.code_id", primary_key=True
+        foreign_key="code.code_id", ondelete="CASCADE", primary_key=True
     )
     source_code_id: int = Field(
-        foreign_key="code.code_id", primary_key=True
+        foreign_key="code.code_id", ondelete="CASCADE", primary_key=True
     )
     derivation_type: str = Field(max_length=1)
     decision: Optional[str] = Field(default=None, max_length=1)
