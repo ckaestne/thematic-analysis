@@ -3,6 +3,7 @@ import {
   Card,
   Collapse,
   Group,
+  Select,
   Stack,
   Text,
   TextInput,
@@ -11,11 +12,53 @@ import {
 } from "@mantine/core";
 import { IconPlus } from "@tabler/icons-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { api } from "../api";
+import { useMemo, useState } from "react";
+import { api, type ThemeFull } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { ThemeCard } from "../components/ThemeCard";
 import { useConfirmDelete } from "../components/ConfirmDelete";
+
+type SortKey =
+  | "quotes_desc"
+  | "quotes_asc"
+  | "codes_desc"
+  | "title_asc"
+  | "created_desc"
+  | "created_asc";
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: "quotes_desc", label: "Supporting quotes (most first)" },
+  { value: "quotes_asc", label: "Supporting quotes (fewest first)" },
+  { value: "codes_desc", label: "Codes (most first)" },
+  { value: "title_asc", label: "Title (A→Z)" },
+  { value: "created_desc", label: "Newest first" },
+  { value: "created_asc", label: "Oldest first" },
+];
+
+function sortThemes(themes: ThemeFull[], key: SortKey): ThemeFull[] {
+  const out = [...themes];
+  switch (key) {
+    case "quotes_desc":
+      out.sort((a, b) => b.quotes.length - a.quotes.length);
+      break;
+    case "quotes_asc":
+      out.sort((a, b) => a.quotes.length - b.quotes.length);
+      break;
+    case "codes_desc":
+      out.sort((a, b) => b.codes.length - a.codes.length);
+      break;
+    case "title_asc":
+      out.sort((a, b) => a.title.localeCompare(b.title));
+      break;
+    case "created_desc":
+      out.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+      break;
+    case "created_asc":
+      out.sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
+      break;
+  }
+  return out;
+}
 
 export function ThemesPage() {
   const qc = useQueryClient();
@@ -32,6 +75,12 @@ export function ThemesPage() {
       qc.invalidateQueries({ queryKey: ["themes"] });
     },
   });
+
+  const [sortKey, setSortKey] = useState<SortKey>("quotes_desc");
+  const sortedThemes = useMemo(
+    () => (themes.data ? sortThemes(themes.data, sortKey) : undefined),
+    [themes.data, sortKey],
+  );
 
   const [showAdd, setShowAdd] = useState(false);
   const [title, setTitle] = useState("");
@@ -61,13 +110,24 @@ export function ThemesPage() {
             newer one, or marked deleted, are hidden.
           </Text>
         </div>
-        <Button
-          leftSection={<IconPlus size={16} />}
-          variant={showAdd ? "default" : "filled"}
-          onClick={() => setShowAdd((v) => !v)}
-        >
-          {showAdd ? "Cancel" : "Add manual theme"}
-        </Button>
+        <Group gap="sm" align="flex-end">
+          <Select
+            label="Sort by"
+            size="xs"
+            data={SORT_OPTIONS}
+            value={sortKey}
+            onChange={(v) => v && setSortKey(v as SortKey)}
+            allowDeselect={false}
+            w={240}
+          />
+          <Button
+            leftSection={<IconPlus size={16} />}
+            variant={showAdd ? "default" : "filled"}
+            onClick={() => setShowAdd((v) => !v)}
+          >
+            {showAdd ? "Cancel" : "Add manual theme"}
+          </Button>
+        </Group>
       </Group>
 
       <Collapse in={showAdd}>
@@ -114,7 +174,7 @@ export function ThemesPage() {
 
       {themes.isLoading ? (
         <Text c="dimmed">Loading…</Text>
-      ) : !themes.data || themes.data.length === 0 ? (
+      ) : !sortedThemes || sortedThemes.length === 0 ? (
         <Card padding="md" withBorder>
           <Text c="dimmed" ta="center" py="md">
             No themes yet. Run a theme coding job or add one manually.
@@ -122,7 +182,7 @@ export function ThemesPage() {
         </Card>
       ) : (
         <Stack gap="sm">
-          {themes.data.map((t) => (
+          {sortedThemes.map((t) => (
             <ThemeCard
               key={t.theme_id}
               theme={t}
