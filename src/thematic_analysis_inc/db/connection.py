@@ -18,7 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel
 
 
@@ -61,6 +61,13 @@ def _ensure_engine(path: str | Path) -> Engine:
             f"sqlite:///{p}",
             connect_args={"check_same_thread": False},
         )
+
+        @event.listens_for(_engine, "connect")
+        def _enable_sqlite_fks(dbapi_conn, _):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.close()
+
         _engine_path = p
     return _engine
 

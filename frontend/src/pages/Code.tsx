@@ -2,7 +2,9 @@ import {
   Anchor,
   Badge,
   Breadcrumbs,
+  Button,
   Card,
+  Checkbox,
   Code as CodeText,
   Collapse,
   Group,
@@ -12,9 +14,9 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { IconChevronDown, IconChevronRight } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   api,
   type CodebookQuote,
@@ -243,6 +245,110 @@ function LineageNode({
   );
 }
 
+/** Similar-codes panel: top-N by reviewer embedding distance, with
+ * checkboxes and a merge button that produces a new merged reviewer code
+ * + a new codebook revision. Shown only on reviewer codes that are still
+ * members of a codebook revision. */
+function SimilarCodesPanel({ codeId }: { codeId: number }) {
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  const similar = useQuery({
+    queryKey: ["code", codeId, "similar"],
+    queryFn: () => api.similarCodes(codeId, 30),
+  });
+
+  const merge = useMutation({
+    mutationFn: () => api.mergeCodes(codeId, Array.from(selected)),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["code"] });
+      qc.invalidateQueries({ queryKey: ["codebook"] });
+      navigate(`/code/${res.new_code_id}`);
+    },
+  });
+
+  if (similar.isLoading)
+    return (
+      <Card padding="md" withBorder>
+        <Text c="dimmed">Loading similar codes…</Text>
+      </Card>
+    );
+  if (similar.error) return <ErrorAlert error={similar.error} />;
+  const data = similar.data;
+  if (!data || data.codebook_version == null || data.items.length === 0) {
+    return null;
+  }
+
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  return (
+    <Card padding="md" withBorder>
+      <Group justify="space-between" align="center" mb="xs">
+        <Title order={5}>
+          Similar codes in codebook v{data.codebook_version} (
+          {data.items.length})
+        </Title>
+        <Button
+          size="xs"
+          disabled={selected.size === 0 || merge.isPending}
+          loading={merge.isPending}
+          onClick={() => merge.mutate()}
+        >
+          Merge {selected.size > 0 ? `(${selected.size})` : ""}
+        </Button>
+      </Group>
+      <Text size="xs" c="dimmed" mb="xs">
+        Selected codes will be merged into a copy of this code; a new
+        codebook revision replaces them with the merged code.
+      </Text>
+      {merge.error && <ErrorAlert error={merge.error} />}
+      <Stack gap={4}>
+        {data.items.map((s) => (
+          <Group
+            key={s.code_id}
+            gap="sm"
+            wrap="nowrap"
+            align="center"
+            style={{
+              padding: "4px 8px",
+              borderRadius: 3,
+              background: selected.has(s.code_id)
+                ? "var(--mantine-color-default-hover)"
+                : undefined,
+            }}
+          >
+            <Checkbox
+              checked={selected.has(s.code_id)}
+              onChange={() => toggle(s.code_id)}
+              aria-label={`select ${s.code}`}
+            />
+            <Text size="xs" ff="monospace" c="dimmed" style={{ width: 56 }}>
+              {s.similarity.toFixed(3)}
+            </Text>
+            <Anchor
+              component={Link}
+              to={`/code/${s.code_id}`}
+              style={{ flex: 1, minWidth: 0 }}
+            >
+              <CodeText style={{ fontSize: 13 }}>{s.code}</CodeText>
+            </Anchor>
+            <Text size="xs" c="dimmed">
+              {s.n_quotes} quote{s.n_quotes === 1 ? "" : "s"}
+            </Text>
+          </Group>
+        ))}
+      </Stack>
+    </Card>
+  );
+}
+
 export function CodePage() {
   const { id } = useParams<{ id: string }>();
   const codeId = Number(id);
@@ -331,6 +437,10 @@ export function CodePage() {
             ))}
           </Stack>
         </Card>
+      )}
+
+      {d.coder_id === -1 && d.in_codebook_versions.length > 0 && (
+        <SimilarCodesPanel codeId={d.code_id} />
       )}
 
       <Card padding="md" withBorder>
