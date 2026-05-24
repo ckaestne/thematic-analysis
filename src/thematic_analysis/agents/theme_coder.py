@@ -2,9 +2,9 @@
 
 Reads a full ``Codebook`` revision and proposes a set of overarching
 themes that organise its codes into patterns of meaning. The agent is
-stateless: each call takes the codebook + the customisable part of the
-system prompt (research question, persona, extra instructions) and
-returns a list of transient ``Theme`` rows. Persistence and provenance
+stateless: each call takes the codebook + the researcher's framing
+(research question, persona, any extra instructions) and returns a
+list of transient ``Theme`` rows. Persistence and provenance
 (``source``, ``theme_coding_job_id``) are the worker's job.
 
 Following Thematic-LM (Sec. 3.1, App. B "Main Prompts"), the user
@@ -23,15 +23,11 @@ from pydantic import BaseModel, ValidationError
 
 from thematic_analysis.agents.base import AgentConfig, BaseAgent
 from thematic_analysis.agents.json_utils import extract_json_str
-from thematic_analysis.prompts import join_system_prompt_sections
 from thematic_analysis_inc.db.models import (
     Code,
     Codebook,
     Quote,
     Theme,
-)
-from thematic_analysis_inc.db.research_context import (
-    to_domain as _research_context_to_domain,
 )
 
 
@@ -59,12 +55,29 @@ For each theme, provide:
   not all of them.
 
 Use only `code_id`s and `quote_id`s that appear in the codebook JSON
-below. Do not invent ids. Do not include codes that don't belong to the
-theme just to pad it out. If you cannot construct a coherent theme set
-from the codebook, return an empty list of themes."""
+in the user message. Do not invent ids. Do not include codes that
+don't belong to the theme just to pad it out. If you cannot construct
+a coherent theme set from the codebook, return an empty list of
+themes."""
 
 
-THEME_CODER_USER_PROMPT = """\
+# Header used to demarcate the researcher's framing in the user message
+# so the model can tell our generic theme-coding instructions apart from
+# the study-specific framing the human supplied for this run.
+_RESEARCHER_FRAMING_HEADER = (
+    "## Researcher's framing for this run\n"
+    "The text below was written by the researcher running this job. It "
+    "tells you what to look for, what perspective to adopt, and any "
+    "study-specific framing. Treat it as your brief, not as a fixed "
+    "rule that overrides the JSON output schema or the general theme-"
+    "coding guidance in the system prompt.\n\n"
+    "<<<RESEARCHER_FRAMING>>>\n"
+    "{framing}\n"
+    "<<<END_RESEARCHER_FRAMING>>>"
+)
+
+
+_CODEBOOK_HEADER = """\
 ## Codebook (version {version})
 
 The codebook below contains every code in the current revision, each
@@ -147,11 +160,13 @@ class ThemeCoderConfig(AgentConfig):
 class ThemeCoderAgent(BaseAgent):
     """Stateless theme-coding agent.
 
-    A single :meth:`develop_themes` call runs the LLM over the full
-    codebook and returns transient ``Theme`` rows. The agent does not
-    own a job, an identity, or a research-context override — those
-    live on (respectively) the worker, the caller's ``prompt`` argument,
-    and the ``codebook.research_context`` row the worker passes in.
+    A single :meth:`develop_themes_async` call runs the LLM over the
+    full codebook and returns transient ``Theme`` rows. The agent does
+    not own a job, an identity, or a research-context override — the
+    caller is responsible for any study-specific framing, which is
+    passed in as the ``prompt`` argument and reproduced verbatim inside
+    the user message (clearly delimited so the model can tell it apart
+    from our generic instructions).
     """
 
     def __init__(self, config: ThemeCoderConfig | None = None):
@@ -159,34 +174,9 @@ class ThemeCoderAgent(BaseAgent):
         self.theme_config: ThemeCoderConfig = self.config  # type: ignore[assignment]
 
     def get_system_prompt(self) -> str:
-        # Static system prompt; per-call customisation comes through the
-        # ``prompt`` argument to ``develop_themes`` and the codebook's
-        # research context.
         return THEME_CODER_SYSTEM_PROMPT
 
     # -- prompt building -----------------------------------------------------
-
-    def _build_system_prompt(self, codebook: Codebook, prompt: str) -> str:
-        research_section = ""
-        rc_row = codebook.research_context
-        if rc_row is not None:
-            rc = _research_context_to_domain(rc_row)
-            if not rc.is_empty():
-                research_section = (
-                    "## Research context\n"
-                    + rc.to_prompt_section(role="coder")
-                )
-
-        job_section = ""
-        cleaned = (prompt or "").strip()
-        if cleaned:
-            job_section = "## Job instructions\n" + cleaned
-
-        return join_system_prompt_sections(
-            THEME_CODER_SYSTEM_PROMPT,
-            research_context_instructions=research_section,
-            identity_instructions=job_section,
-        )
 
     def _codebook_to_json(self, codebook: Codebook) -> str:
         """Serialise the codebook for the user prompt.
@@ -209,11 +199,28 @@ class ThemeCoderAgent(BaseAgent):
             )
         return json.dumps({"codes": codes_payload}, indent=2)
 
-    def _build_user_prompt(self, codebook: Codebook) -> str:
-        return THEME_CODER_USER_PROMPT.format(
-            version=codebook.version,
-            codebook_json=self._codebook_to_json(codebook),
+    def _build_user_prompt(self, codebook: Codebook, prompt: str) -> str:
+        """Assemble the user message.
+
+        The researcher's framing (if any) goes first, in a clearly
+        delimited block, so the model knows it is a brief from the
+        person running the job — separate from the generic theme-coding
+        rules in the system prompt and separate from the codebook data.
+        The codebook JSON follows.
+        """
+        sections: list[str] = []
+        framing = (prompt or "").strip()
+        if framing:
+            sections.append(
+                _RESEARCHER_FRAMING_HEADER.format(framing=framing)
+            )
+        sections.append(
+            _CODEBOOK_HEADER.format(
+                version=codebook.version,
+                codebook_json=self._codebook_to_json(codebook),
+            )
         )
+        return "\n\n".join(sections)
 
     # -- response parsing ----------------------------------------------------
 
@@ -289,22 +296,12 @@ class ThemeCoderAgent(BaseAgent):
 
     # -- public API ----------------------------------------------------------
 
-    def develop_themes(
-        self, codebook: Codebook, prompt: str
-    ) -> list[Theme]:
-        response = self._call_llm(
-            self._build_system_prompt(codebook, prompt),
-            self._build_user_prompt(codebook),
-            response_format=THEME_CODER_RESPONSE_SCHEMA,
-        )
-        return self._parse_response(response, codebook)
-
     async def develop_themes_async(
         self, codebook: Codebook, prompt: str
     ) -> list[Theme]:
         response = await self._call_llm_async(
-            self._build_system_prompt(codebook, prompt),
-            self._build_user_prompt(codebook),
+            self.get_system_prompt(),
+            self._build_user_prompt(codebook, prompt),
             response_format=THEME_CODER_RESPONSE_SCHEMA,
         )
         return self._parse_response(response, codebook)

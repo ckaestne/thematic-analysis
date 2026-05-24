@@ -698,29 +698,66 @@ def run_theme_coding_job(
     """Run a single theme-coding job end-to-end.
 
     Loads the codebook revision pinned by ``job``, hands it to a fresh
-    ``ThemeCoderAgent`` with ``job.prompt`` as the customisable system
-    section, then persists every returned theme (with its code + quote
+    ``ThemeCoderAgent`` together with ``job.prompt`` as the researcher's
+    framing, then persists every returned theme (with its code + quote
     links) in one transaction. Returns the persisted (detached) themes.
 
     Raises ``ValueError`` if the pinned codebook revision is missing.
     Agent failures propagate; nothing is written on failure.
     """
-    codebook = db_codebook.get_codebook_with_codes_and_research_context(
-        job.codebook_used_id
-    )
-    if codebook is None:
-        raise ValueError(
-            f"codebook version {job.codebook_used_id} not found "
-            f"(referenced by theme_coding_job id={job.id})"
+    themes = asyncio.run(
+        _run_theme_coder_async(
+            job.codebook_used_id, job.prompt, agent_factory=agent_factory,
         )
-
-    factory = agent_factory or default_theme_coder_factory
-    agent = factory()
-    themes = agent.develop_themes(codebook, job.prompt)
+    )
     for t in themes:
         t.source = SOURCE_JOB
         t.theme_coding_job_id = job.id
-        # Agent already set codebook_used_id from the codebook it saw;
-        # re-assert for clarity in case a test factory forgot.
-        t.codebook_used_id = codebook.version
     return db_themes.save_themes(themes)
+
+
+async def _run_theme_coder_async(
+    codebook_version: int,
+    prompt: str,
+    *,
+    agent_factory: ThemeCoderFactory | None = None,
+) -> list[Theme]:
+    codebook = db_codebook.get_codebook_with_codes_and_research_context(
+        codebook_version
+    )
+    if codebook is None:
+        raise ValueError(
+            f"codebook version {codebook_version} not found"
+        )
+    factory = agent_factory or default_theme_coder_factory
+    agent = factory()
+    themes = await agent.develop_themes_async(codebook, prompt)
+    # The agent already set codebook_used_id; re-assert defensively in
+    # case a test stub forgot.
+    for t in themes:
+        t.codebook_used_id = codebook.version
+    return themes
+
+
+def test_theme_code(
+    codebook_version: int,
+    prompt: str,
+    *,
+    agent_factory: ThemeCoderFactory | None = None,
+) -> dict:
+    """Dry-run a theme coder against a codebook revision without writing
+    anything to the DB. Returns a result dict with the transient
+    ``Theme`` rows the agent produced and timing info; the worker that
+    calls this is responsible for *not* persisting them.
+    """
+    t0 = time.monotonic()
+    themes = asyncio.run(
+        _run_theme_coder_async(
+            codebook_version, prompt, agent_factory=agent_factory,
+        )
+    )
+    return {
+        "codebook_version": codebook_version,
+        "themes": themes,
+        "elapsed": time.monotonic() - t0,
+    }

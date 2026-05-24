@@ -7,11 +7,10 @@ call is patched). End-to-end persistence is exercised by
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import pytest
 
 from thematic_analysis.agents import ThemeCoderAgent, ThemeCoderConfig
 
@@ -29,21 +28,9 @@ def _code(cid: int, label: str, description: str = "", quotes=None):
     )
 
 
-def _codebook(version: int = 7, codes=None, research_context=None):
-    return SimpleNamespace(
-        version=version,
-        codes=codes or [],
-        research_context=research_context,
-    )
-
-
-def _rc_row(description: str = "", coder_prompt: str | None = None):
-    return SimpleNamespace(
-        description=description,
-        coder_prompt=coder_prompt,
-        coding_critic_prompt=None,
-        reviewer_prompt=None,
-    )
+def _codebook(version: int = 7, codes=None):
+    # No research_context attr — the agent no longer reads one.
+    return SimpleNamespace(version=version, codes=codes or [])
 
 
 def _resp(themes: list[dict]) -> str:
@@ -61,34 +48,12 @@ class TestThemeCoderConfig:
 
 
 class TestPromptBuilding:
-    def test_system_prompt_base(self):
+    def test_system_prompt_is_fixed(self):
         agent = ThemeCoderAgent()
-        cb = _codebook()
-        sys = agent._build_system_prompt(cb, prompt="")
+        sys = agent.get_system_prompt()
         assert "theme coder" in sys.lower()
-        assert "Research context" not in sys
-        assert "Job instructions" not in sys
-
-    def test_system_prompt_includes_research_context(self):
-        agent = ThemeCoderAgent()
-        cb = _codebook(
-            research_context=_rc_row(
-                description="climate-policy skepticism rhetorical strategies",
-            )
-        )
-        sys = agent._build_system_prompt(cb, prompt="")
-        assert "Research context" in sys
-        assert "rhetorical strategies" in sys
-
-    def test_system_prompt_includes_job_prompt(self):
-        agent = ThemeCoderAgent()
-        cb = _codebook()
-        sys = agent._build_system_prompt(
-            cb,
-            prompt="Act as a critical discourse analyst focused on power.",
-        )
-        assert "Job instructions" in sys
-        assert "critical discourse analyst" in sys
+        # Per-run framing lives in the user message, not the system one.
+        assert "Researcher's framing" not in sys
 
     def test_user_prompt_serialises_full_codebook(self):
         cb = _codebook(
@@ -104,7 +69,7 @@ class TestPromptBuilding:
                 ),
             ],
         )
-        user = ThemeCoderAgent()._build_user_prompt(cb)
+        user = ThemeCoderAgent()._build_user_prompt(cb, prompt="")
         assert "version 9" in user
         payload = json.loads(
             user.split("```json", 1)[1].split("```", 1)[0]
@@ -112,6 +77,23 @@ class TestPromptBuilding:
         assert {c["code_id"] for c in payload["codes"]} == {1, 2}
         sup = next(c for c in payload["codes"] if c["code_id"] == 2)
         assert {q["quote_id"] for q in sup["quotes"]} == {12, 13}
+
+    def test_user_prompt_includes_researcher_framing_delimited(self):
+        agent = ThemeCoderAgent()
+        cb = _codebook()
+        framing = "Act as a critical discourse analyst focused on power."
+        user = agent._build_user_prompt(cb, prompt=framing)
+        # Framing appears, clearly demarcated, BEFORE the codebook block.
+        assert "Researcher's framing" in user
+        assert "<<<RESEARCHER_FRAMING>>>" in user
+        assert "<<<END_RESEARCHER_FRAMING>>>" in user
+        assert framing in user
+        assert user.index(framing) < user.index("## Codebook")
+
+    def test_user_prompt_omits_framing_block_when_empty(self):
+        user = ThemeCoderAgent()._build_user_prompt(_codebook(), prompt="   ")
+        assert "Researcher's framing" not in user
+        assert "RESEARCHER_FRAMING" not in user
 
 
 # --- response parsing -------------------------------------------------------
@@ -234,7 +216,7 @@ def test_parse_empty_or_invalid_response_returns_empty():
 # --- public API integration via patched LLM ---------------------------------
 
 
-def test_develop_themes_calls_llm_and_returns_parsed():
+def test_develop_themes_async_calls_llm_and_returns_parsed():
     cb = _codebook(
         version=3,
         codes=[
@@ -245,7 +227,7 @@ def test_develop_themes_calls_llm_and_returns_parsed():
     agent = ThemeCoderAgent()
     captured: dict = {}
 
-    def fake_call(system_prompt, user_prompt, response_format=None):
+    async def fake_call(system_prompt, user_prompt, response_format=None):
         captured["system"] = system_prompt
         captured["user"] = user_prompt
         captured["schema"] = response_format
@@ -258,10 +240,14 @@ def test_develop_themes_calls_llm_and_returns_parsed():
             ]
         )
 
-    with patch.object(agent, "_call_llm", side_effect=fake_call):
-        themes = agent.develop_themes(cb, prompt="be analytic")
+    with patch.object(agent, "_call_llm_async", side_effect=fake_call):
+        themes = asyncio.run(
+            agent.develop_themes_async(cb, prompt="be analytic")
+        )
 
     assert len(themes) == 1
-    assert "be analytic" in captured["system"]
+    # Per-run framing is in the user message, not the system prompt.
+    assert "be analytic" not in captured["system"]
+    assert "be analytic" in captured["user"]
     assert "version 3" in captured["user"]
     assert captured["schema"] is not None

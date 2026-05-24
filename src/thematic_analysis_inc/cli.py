@@ -85,6 +85,7 @@ _REQUIRES_EXISTING_DB = {
     "test-code",
     "test-aggregate",
     "test-review",
+    "test-theme",
 }
 
 
@@ -1106,6 +1107,51 @@ def _cmd_show_theme(args: SimpleNamespace) -> int:
     return 0
 
 
+def _cmd_test_theme(args: SimpleNamespace) -> int:
+    store.connect(args.db)
+    version = _resolve_codebook_version(args.codebook_version)
+    if version is None:
+        return 1
+
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    prompt = prompt or ""
+
+    try:
+        res = workers.test_theme_code(version, prompt)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    themes = res["themes"]
+    if not themes:
+        print("(no themes returned)")
+    else:
+        for t in themes:
+            print(f"- {t.title!r}")
+            if t.description:
+                print(f"    description: {t.description}")
+            if t.rationale:
+                print(f"    rationale:   {t.rationale}")
+            print(f"    codes ({len(t.codes)}):")
+            for c in t.codes:
+                print(f"      [code_id={c.code_id}] {c.code}")
+            print(f"    supporting quotes ({len(t.supporting_quotes)}):")
+            for q in t.supporting_quotes:
+                text = (q.text or "").replace("\n", " ").strip()
+                if len(text) > 160:
+                    text = text[:157] + "..."
+                print(f"      [quote_id={q.quote_id}] \"{text}\"")
+
+    print()
+    print(
+        f"[test-theme] codebook=v{res['codebook_version']} "
+        f"themes={len(themes)} ({res['elapsed']:.1f}s) no DB writes"
+    )
+    return 0
+
+
 # Typer wiring ---------------------------------------------------------------
 
 
@@ -1685,6 +1731,50 @@ def _cli_test_review(
         ctx,
         _cmd_test_review,
         code_id=code_id,
+    )
+
+
+@app.command(
+    name="test-theme",
+    rich_help_panel=PANEL_DEBUG,
+    help=(
+        "dry-run the theme coder against a codebook version + prompt; "
+        "prints the proposed themes without writing anything to the DB"
+    ),
+)
+def _cli_test_theme(
+    ctx: typer.Context,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            help=(
+                "researcher's framing (research question, persona, "
+                "extra instructions) — same shape as `theme-code`"
+            ),
+        ),
+    ] = None,
+    prompt_file: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt-file",
+            help="read the framing from this file instead of --prompt",
+        ),
+    ] = None,
+    codebook_version: Annotated[
+        int | None,
+        typer.Option(
+            "--codebook-version",
+            help="codebook version to use (default: latest)",
+        ),
+    ] = None,
+) -> None:
+    _run(
+        ctx,
+        _cmd_test_theme,
+        prompt=prompt,
+        prompt_file=prompt_file,
+        codebook_version=codebook_version,
     )
 
 
