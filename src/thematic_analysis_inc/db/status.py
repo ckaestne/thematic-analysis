@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import func
 from sqlmodel import select
@@ -15,9 +15,13 @@ from thematic_analysis_inc.db.models import (
     Coder,
     CodesDerived,
     CodingQueueEntry,
+    Document,
+    Quote,
     Segment,
+    Theme,
     DERIVATION_REVIEW,
     SENTINEL_CODE_LABEL,
+    SENTINEL_THEME_TITLE,
 )
 
 
@@ -34,6 +38,13 @@ class StatusCounts:
     review_decisions_by_kind: dict[str, int]
     codebook_version: int
     codebook_codes: int
+    documents_total: int = 0
+    codes_total: int = 0
+    quotes_total: int = 0
+    themes_total: int = 0
+    documents_by_coding_status: dict[str, int] = field(default_factory=dict)
+    reviews_pending: int = 0
+    reviews_completed_since_codebook: int = 0
 
     def format(self) -> str:
         def by_status(d: dict[str, int]) -> str:
@@ -180,6 +191,10 @@ def status_counts() -> StatusCounts:
         )
 
     cq_by = _coding_queue_by_status()
+    docs_total, docs_by_status = _documents_by_coding_status()
+    codes_total, quotes_total = _codes_and_quotes_totals()
+    themes_total = _themes_total()
+    reviews_pending, reviews_completed = _codebook_review_progress(cb_version)
     return StatusCounts(
         segments_total=seg_total,
         segments_by_status=segments_by_derived_status(),
@@ -192,6 +207,151 @@ def status_counts() -> StatusCounts:
         review_decisions_by_kind=rev_by,
         codebook_version=cb_version,
         codebook_codes=cb_codes,
+        documents_total=docs_total,
+        codes_total=codes_total,
+        quotes_total=quotes_total,
+        themes_total=themes_total,
+        documents_by_coding_status=docs_by_status,
+        reviews_pending=reviews_pending,
+        reviews_completed_since_codebook=reviews_completed,
     )
+
+
+def _codes_and_quotes_totals() -> tuple[int, int]:
+    """Total real (non-sentinel) Code rows and total Quote rows."""
+    with session() as s:
+        codes_total = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(Code.code != SENTINEL_CODE_LABEL)
+            ).one()
+        )
+        quotes_total = int(
+            s.exec(select(func.count()).select_from(Quote)).one()
+        )
+    return codes_total, quotes_total
+
+
+def _themes_total() -> int:
+    """Non-deleted, non-sentinel themes (the same definition the Themes
+    page uses)."""
+    with session() as s:
+        return int(
+            s.exec(
+                select(func.count())
+                .select_from(Theme)
+                .where(
+                    Theme.deleted == False,  # noqa: E712
+                    Theme.title != SENTINEL_THEME_TITLE,
+                )
+            ).one()
+        )
+
+
+def _documents_by_coding_status() -> tuple[int, dict[str, int]]:
+    """Bucket every Document into fully_coded / partially_coded / not_coded.
+
+    - **fully_coded**: every segment has an aggregator code row
+      (``coder_id == 0``, sentinel or real).
+    - **partially_coded**: at least one segment has any code (coder,
+      aggregator, or reviewer) but not all segments are fully coded.
+    - **not_coded**: no segment has any code.
+
+    Returns ``(docs_total, {bucket: count})``.
+    """
+    with session() as s:
+        seg_rows = list(
+            s.exec(
+                select(Segment.document_id, Segment.segment_id)
+            ).all()
+        )
+        agg_seg_ids = {
+            int(sid)
+            for sid in s.exec(
+                select(Code.segment_id).where(Code.coder_id == 0).distinct()
+            ).all()
+        }
+        any_coded_seg_ids = {
+            int(sid)
+            for sid in s.exec(
+                select(Code.segment_id).distinct()
+            ).all()
+        }
+        docs_total = int(
+            s.exec(select(func.count()).select_from(Document)).one()
+        )
+
+    by_doc_total: dict[int, int] = {}
+    by_doc_agg: dict[int, int] = {}
+    by_doc_any: dict[int, int] = {}
+    for doc_id, seg_id in seg_rows:
+        by_doc_total[doc_id] = by_doc_total.get(doc_id, 0) + 1
+        if seg_id in agg_seg_ids:
+            by_doc_agg[doc_id] = by_doc_agg.get(doc_id, 0) + 1
+        if seg_id in any_coded_seg_ids:
+            by_doc_any[doc_id] = by_doc_any.get(doc_id, 0) + 1
+
+    out = {"fully_coded": 0, "partially_coded": 0, "not_coded": 0}
+    seen_doc_ids = set(by_doc_total.keys())
+    for did, total in by_doc_total.items():
+        n_agg = by_doc_agg.get(did, 0)
+        n_any = by_doc_any.get(did, 0)
+        if total > 0 and n_agg == total:
+            out["fully_coded"] += 1
+        elif n_any > 0:
+            out["partially_coded"] += 1
+        else:
+            out["not_coded"] += 1
+    # Documents with no segments yet — count them as not_coded.
+    out["not_coded"] += max(0, docs_total - len(seen_doc_ids))
+    return docs_total, out
+
+
+def _codebook_review_progress(latest_cb_version: int) -> tuple[int, int]:
+    """``(pending, completed_since_latest_codebook)`` for the codebook
+    progress bar.
+
+    *pending* — aggregator codes (``coder_id=0``, non-sentinel) without
+    an outgoing 'R' edge: these still need to be reviewed.
+    *completed_since_latest_codebook* — reviewer codes (``coder_id=-1``,
+    non-sentinel) authored against the latest codebook revision: a
+    review has been produced but a newer codebook revision that absorbs
+    it has not yet been materialized.
+    """
+    with session() as s:
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        pending = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(
+                    Code.coder_id == 0,
+                    Code.code != SENTINEL_CODE_LABEL,
+                    ~outgoing_r,
+                )
+            ).one()
+        )
+        if latest_cb_version <= 0:
+            return pending, 0
+        completed = int(
+            s.exec(
+                select(func.count())
+                .select_from(Code)
+                .where(
+                    Code.coder_id == -1,
+                    Code.code != SENTINEL_CODE_LABEL,
+                    Code.codebook_used_id == latest_cb_version,
+                )
+            ).one()
+        )
+    return pending, completed
 
 

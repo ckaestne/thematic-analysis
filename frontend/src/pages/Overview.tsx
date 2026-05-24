@@ -2,22 +2,20 @@ import {
   Anchor,
   Card,
   Code,
-  Grid,
   Group,
   SimpleGrid,
   Stack,
-  Table,
   Text,
   Title,
-  Tooltip,
 } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconBook2,
-  IconClipboardCheck,
+  IconBulb,
   IconDatabase,
-  IconStack2,
-  IconUsers,
+  IconFile,
+  IconMessage,
+  IconTag,
 } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -40,7 +38,15 @@ export function Overview() {
   if (error) return <ErrorAlert error={error} />;
   if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
 
-  const { stage1, per_coder } = data;
+  const { stage1 } = data;
+  const desc = data.research_context_description.trim();
+
+  const codebookProgress = {
+    pending: stage1.reviews_pending,
+    done: stage1.reviews_completed_since_codebook,
+  };
+  const codebookTotal =
+    codebookProgress.pending + codebookProgress.done;
 
   return (
     <Stack gap="md">
@@ -48,41 +54,48 @@ export function Overview() {
         <div>
           <Title order={2}>Overview</Title>
           <Text c="dimmed" size="sm">
-            <Code>{data.db_path}</Code> · {bytes(data.db_size_bytes)} ·{" "}
-            {data.research_context_set ? (
-              <Anchor component={Link} to="/research-context">
-                research context set
-              </Anchor>
-            ) : (
-              <Anchor component={Link} to="/research-context" c="orange">
-                research context not set
-              </Anchor>
-            )}
+            <Code>{data.db_path}</Code> · {bytes(data.db_size_bytes)}
           </Text>
         </div>
       </Group>
 
-      <SimpleGrid cols={{ base: 2, sm: 3, md: 5 }} spacing="md">
+      <Card padding="md" withBorder>
+        <Group justify="space-between" mb={4} wrap="nowrap">
+          <Title order={4}>Research context</Title>
+          <Anchor component={Link} to="/research-context" size="sm">
+            {data.research_context_set ? "edit" : "set up"}
+          </Anchor>
+        </Group>
+        {desc ? (
+          <Text style={{ whiteSpace: "pre-wrap" }}>{desc}</Text>
+        ) : (
+          <Text c="orange" size="sm">
+            No research context has been set. The agents will fall back to
+            generic prompts. Click <em>set up</em> to add one.
+          </Text>
+        )}
+      </Card>
+
+      <SimpleGrid cols={{ base: 2, sm: 3, md: 6 }} spacing="md">
+        <StatCard
+          label="Documents"
+          value={stage1.documents_total}
+          icon={<IconFile size={28} />}
+        />
         <StatCard
           label="Segments"
           value={stage1.segments_total}
           icon={<IconDatabase size={28} />}
         />
         <StatCard
-          label="Coders"
-          value={stage1.coders_total}
-          icon={<IconUsers size={28} />}
+          label="Codes"
+          value={stage1.codes_total}
+          icon={<IconTag size={28} />}
         />
         <StatCard
-          label="Aggregations"
-          value={stage1.aggregations_total}
-          icon={<IconStack2 size={28} />}
-        />
-        <StatCard
-          label="Reviews"
-          value={`${stage1.review_decisions_applied}/${stage1.review_decisions_total}`}
-          hint="applied / total"
-          icon={<IconClipboardCheck size={28} />}
+          label="Quotes"
+          value={stage1.quotes_total}
+          icon={<IconMessage size={28} />}
         />
         <StatCard
           label="Codebook"
@@ -90,101 +103,67 @@ export function Overview() {
           hint={`${stage1.codebook_codes} codes`}
           icon={<IconBook2 size={28} />}
         />
+        <StatCard
+          label="Themes"
+          value={stage1.themes_total}
+          icon={<IconBulb size={28} />}
+        />
       </SimpleGrid>
 
-      <Grid>
-        <Grid.Col span={{ base: 12, md: 12 }}>
-          <Card padding="md">
-            <Stack gap="sm">
-              <Title order={4}>Stage 1 progress</Title>
-              <Text size="sm" c="dimmed">
-                Segments
-              </Text>
-              <StatusBar counts={stage1.segments_by_status} />
-              <Text size="sm" c="dimmed" mt="xs">
-                Coder runs
-              </Text>
-              <StatusBar counts={stage1.coder_runs_by_status} />
-              <Text size="sm" c="dimmed" mt="xs">
-                Aggregations
-              </Text>
-              <StatusBar counts={stage1.aggregations_by_status} />
-            </Stack>
-          </Card>
-        </Grid.Col>
-      </Grid>
-
       <Card padding="md">
-        <Title order={4} mb="sm">
-          Per-coder progress (Stage 1)
-        </Title>
-        {per_coder.length === 0 ? (
-          <Text c="dimmed" size="sm">
-            No coders registered. Use{" "}
-            <Code>ta-stage1 add-coder ID IDENTITY</Code> to add one, or use the{" "}
-            <Anchor component={Link} to="/coders">
-              Coders
-            </Anchor>{" "}
-            page.
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Title order={4}>Document coding progress</Title>
+            <Text size="xs" c="dimmed">
+              {stage1.documents_total} document
+              {stage1.documents_total === 1 ? "" : "s"}
+            </Text>
+          </Group>
+          <StatusBar
+            counts={{
+              "fully coded":
+                stage1.documents_by_coding_status.fully_coded ?? 0,
+              "partially coded":
+                stage1.documents_by_coding_status.partially_coded ?? 0,
+              "not coded":
+                stage1.documents_by_coding_status.not_coded ?? 0,
+            }}
+          />
+          <Text size="xs" c="dimmed">
+            A document is fully coded when every segment has aggregated
+            codes; partially coded when any segment has any coder codes
+            but the document is not yet fully aggregated.
           </Text>
-        ) : (
-          <Table verticalSpacing="xs" striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Coder</Table.Th>
-                <Table.Th>Identity</Table.Th>
-                <Table.Th>Progress</Table.Th>
-                <Table.Th ta="right">Done</Table.Th>
-                <Table.Th ta="right">Running</Table.Th>
-                <Table.Th ta="right">Failed</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {per_coder.map((c) => (
-                <Table.Tr key={c.coder_id}>
-                  <Table.Td>{c.coder_id}</Table.Td>
-                  <Table.Td>
-                    <Tooltip label={c.identity} multiline w={300}>
-                      <Text size="sm" lineClamp={1}>
-                        {c.identity}
-                      </Text>
-                    </Tooltip>
-                  </Table.Td>
-                  <Table.Td style={{ minWidth: 200 }}>
-                    <StatusBar
-                      counts={{
-                        done: c.runs_done,
-                        running: c.runs_running,
-                        failed: c.runs_failed,
-                        pending: Math.max(
-                          0,
-                          c.segments_total -
-                            c.runs_done -
-                            c.runs_running -
-                            c.runs_failed,
-                        ),
-                      }}
-                      total={c.segments_total}
-                    />
-                  </Table.Td>
-                  <Table.Td ta="right">{c.runs_done}</Table.Td>
-                  <Table.Td ta="right">{c.runs_running}</Table.Td>
-                  <Table.Td ta="right">
-                    {c.runs_failed > 0 ? (
-                      <Text c="red" fw={600}>
-                        {c.runs_failed}
-                      </Text>
-                    ) : (
-                      c.runs_failed
-                    )}
-                  </Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
-        )}
+        </Stack>
       </Card>
 
+      <Card padding="md">
+        <Stack gap="sm">
+          <Group justify="space-between">
+            <Title order={4}>Codebook progress</Title>
+            <Text size="xs" c="dimmed">
+              since v{stage1.codebook_version}
+            </Text>
+          </Group>
+          {codebookTotal === 0 ? (
+            <Text size="sm" c="dimmed">
+              No reviews pending or completed since the latest codebook
+              revision.
+            </Text>
+          ) : (
+            <StatusBar
+              counts={{
+                pending: codebookProgress.pending,
+                done: codebookProgress.done,
+              }}
+            />
+          )}
+          <Text size="xs" c="dimmed">
+            Reviews completed since the last codebook revision will be
+            integrated when the codebook is next materialized.
+          </Text>
+        </Stack>
+      </Card>
     </Stack>
   );
 }

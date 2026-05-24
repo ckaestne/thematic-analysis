@@ -1,6 +1,7 @@
 import { Route, Routes, Navigate } from "react-router-dom";
 import { AppLayout } from "./components/Layout";
 import { Overview } from "./pages/Overview";
+import { CodingProgressPage } from "./pages/CodingProgress";
 import { ResearchContextPage } from "./pages/ResearchContextPage";
 import { Documents } from "./pages/Documents";
 import { DocumentDetail } from "./pages/DocumentDetail";
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/segments" element={<Segments />} />
         <Route path="/segments/:id" element={<SegmentDetail />} />
         <Route path="/coders" element={<Coders />} />
+        <Route path="/coding-progress" element={<CodingProgressPage />} />
         <Route path="/codebook" element={<CodebookPage />} />
         <Route path="/codebook/:version" element={<CodebookPage />} />
         <Route path="/code/:id" element={<CodePage />} />
