@@ -355,6 +355,7 @@ export type ThemeCodeRef = {
   code: string;
   description: string;
   coder_id: number;
+  n_quotes: number;
 };
 
 export type ThemeQuoteRef = {
