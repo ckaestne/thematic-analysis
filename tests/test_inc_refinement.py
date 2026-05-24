@@ -426,7 +426,7 @@ class TestWorkerEndToEnd:
             return wrap_with_refinement(base)
 
         res = workers.code_one(
-            conn, c.coder_id, use_mock_embeddings=True, agent_factory=factory
+            c.coder_id, use_mock_embeddings=True, agent_factory=factory
         )
         assert res is not None and res["ok"], res
         assert res["n_codes"] == 1

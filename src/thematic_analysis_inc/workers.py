@@ -1,7 +1,6 @@
 """Worker functions for the incremental Stage 1 pipeline.
 
-These compose the helpers in :mod:`thematic_analysis_inc.db`. Stage-1
-helpers are SQLModel-backed and no longer take a ``conn`` parameter.
+These compose the helpers in :mod:`thematic_analysis_inc.db`.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from thematic_analysis.agents.theme_coder import (
 from thematic_analysis_inc import db
 from thematic_analysis_inc.db import (
     aggregation as db_aggregation,
-    cascades as db_cascades,
     codebook as db_codebook,
     coders as db_coders,
     coding as db_coding,
@@ -153,19 +151,15 @@ async def test_code_segment_async(
 
 
 def code_one(
-    conn: sqlite3.Connection | None,
     coder_id: int | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AgentFactory | None = None,
 ) -> dict | None:
     """Process one un-coded segment. If ``coder_id`` is given, restrict to
-    that coder's queue rows; otherwise claim any pending row. ``conn`` is
-    accepted (and ignored) for backwards compatibility — Stage-1 helpers
-    use their own SQLModel session."""
+    that coder's queue rows; otherwise claim any pending row."""
     return asyncio.run(
         code_one_async(
-            conn,
             coder_id,
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=agent_factory,
@@ -174,7 +168,6 @@ def code_one(
 
 
 async def code_one_async(
-    conn: sqlite3.Connection | None,
     coder_id: int | None = None,
     *,
     use_mock_embeddings: bool = False,
@@ -240,7 +233,6 @@ async def code_one_async(
 
 
 async def drain_code_async(
-    conn: sqlite3.Connection | None,
     *,
     workers: int = 1,
     limit: int | None = None,
@@ -261,7 +253,6 @@ async def drain_code_async(
                 stop = True
                 return
             res = await code_one_async(
-                conn,
                 use_mock_embeddings=use_mock_embeddings,
                 agent_factory=agent_factory,
             )
@@ -360,7 +351,6 @@ def _do_aggregate(
 
 
 def aggregate_one(
-    conn: sqlite3.Connection | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AggregatorFactory | None = None,
@@ -376,8 +366,7 @@ def aggregate_one(
 
 
 def aggregate_segment(
-    conn: sqlite3.Connection | None = None,
-    segment_id: int = 0,
+    segment_id: int,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: AggregatorFactory | None = None,
@@ -444,7 +433,6 @@ def test_aggregate_segment(segment_id: int) -> dict[str, Any]:
 
 
 def drain_aggregate(
-    conn: sqlite3.Connection | None = None,
     *,
     limit: int | None = None,
     use_mock_embeddings: bool = False,
@@ -456,7 +444,6 @@ def drain_aggregate(
         if limit is not None and counters["done"] + counters["failed"] >= limit:
             break
         res = aggregate_one(
-            None,
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=agent_factory,
         )
@@ -579,7 +566,6 @@ def test_review_aggregated_code(
 
 
 def review_one(
-    conn: sqlite3.Connection | None = None,
     *,
     use_mock_embeddings: bool = False,
     agent_factory: ReviewerFactory | None = None,
@@ -638,7 +624,6 @@ def review_one(
 
 
 def drain_review(
-    conn: sqlite3.Connection | None = None,
     *,
     limit: int | None = None,
     use_mock_embeddings: bool = False,
@@ -650,7 +635,6 @@ def drain_review(
         if limit is not None and counters["done"] + counters["failed"] >= limit:
             break
         res = review_one(
-            None,
             use_mock_embeddings=use_mock_embeddings,
             agent_factory=agent_factory,
         )

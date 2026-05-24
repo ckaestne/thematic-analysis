@@ -531,7 +531,6 @@ def _cmd_code(args: SimpleNamespace) -> int:
                 ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
             )
             return await workers.drain_code_async(
-                None,
                 workers=n_workers,
                 limit=args.limit,
                 use_mock_embeddings=args.mock_embeddings,
@@ -581,7 +580,6 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
             prog.advance(task)
 
         counters = workers.drain_aggregate(
-            None,
             limit=args.limit,
             use_mock_embeddings=args.mock_embeddings,
             on_event=on_event,
@@ -620,7 +618,6 @@ def _cmd_review(args: SimpleNamespace) -> int:
             prog.advance(task)
 
         counters = workers.drain_review(
-            None,
             limit=args.limit,
             use_mock_embeddings=args.mock_embeddings,
             on_event=on_event,

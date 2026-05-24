@@ -118,12 +118,12 @@ def _seed_ready_to_review(conn, n: int = 1) -> list[int]:
     store.coding.enqueue_document(doc.document_id)
     for c in store.list_coders():
         while workers.code_one(
-            conn, c.coder_id, use_mock_embeddings=True,
+            c.coder_id, use_mock_embeddings=True,
             agent_factory=lambda cb, x: _StubCoder(cb, x),
         ) is not None:
             pass
     while workers.aggregate_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=lambda: _StubAggregator(),
     ) is not None:
         pass
@@ -223,7 +223,7 @@ def test_review_one_add_writes_reviewer_code_no_new_revision(
     v_before = store.latest_codebook().version
 
     res = workers.review_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     assert res is not None and res["ok"] is True
@@ -247,7 +247,7 @@ def test_finalize_after_adds_creates_one_new_revision(tmp_path: Path) -> None:
     v_before = store.latest_codebook().version
 
     counters = workers.drain_review(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     assert counters == {"done": 4, "failed": 0}
@@ -272,7 +272,7 @@ def test_review_one_merge_drops_target_from_new_revision(tmp_path: Path) -> None
     _seed_ready_to_review(conn, n=1)
     # First ADD seeds 'alpha' into the codebook (after finalize).
     workers.review_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     workers.finalize_codebook()
@@ -283,7 +283,7 @@ def test_review_one_merge_drops_target_from_new_revision(tmp_path: Path) -> None
     # Second review MERGEs (beta into alpha) — new revision should still
     # contain a code labeled 'alpha' but the previous 'alpha' Code is dropped.
     workers.review_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_MERGE, target_label="alpha"),
     )
     new_version = workers.finalize_codebook()
@@ -296,13 +296,13 @@ def test_review_one_update_renames_target(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     _seed_ready_to_review(conn, n=1)
     workers.review_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     workers.finalize_codebook()
 
     workers.review_one(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_MERGE_AND_RENAME, target_label="alpha"),
     )
     new_version = workers.finalize_codebook()
@@ -319,17 +319,17 @@ def test_review_one_segment_done_after_all_reviewed(tmp_path: Path) -> None:
     sids = _seed_ready_to_review(conn, n=1)
     factory = _stub_reviewer_factory(DECISION_ADD)
 
-    workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
+    workers.review_one(use_mock_embeddings=True, agent_factory=factory)
     s1 = store.status.derive_segment_status(sids[0])
     assert s1 == "reviewing"
-    workers.review_one(conn, use_mock_embeddings=True, agent_factory=factory)
+    workers.review_one(use_mock_embeddings=True, agent_factory=factory)
     s2 = store.status.derive_segment_status(sids[0])
     assert s2 == "done"
 
 
 def test_review_one_returns_none_when_idle(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    assert workers.review_one(conn, use_mock_embeddings=True) is None
+    assert workers.review_one(use_mock_embeddings=True) is None
 
 
 def test_finalize_with_no_decisions_returns_none(tmp_path: Path) -> None:
@@ -344,7 +344,7 @@ def test_drain_review_writes_per_code_rows(tmp_path: Path) -> None:
     _seed_ready_to_review(conn, n=2)  # 2 segments × 2 codes = 4 codes
 
     counters = workers.drain_review(
-        conn, use_mock_embeddings=True,
+        use_mock_embeddings=True,
         agent_factory=_stub_reviewer_factory(DECISION_ADD),
     )
     assert counters == {"done": 4, "failed": 0}
