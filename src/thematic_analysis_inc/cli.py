@@ -517,14 +517,14 @@ def _cmd_code(args: SimpleNamespace) -> int:
                     _print_trace(res["segment_id"], res["trace"])
                 skipped = " skipped" if res.get("skipped") else ""
                 print(
-                    f"[code] {res['segment_id']} coder={res['coder_id']} "
+                    f"[code] segment={res['segment_id']} coder={res['coder_id']} "
                     f"codes={res['n_codes']} v={res['version']}{skipped} "
                     f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
                     f"{res['elapsed']:.1f}s)"
                 )
             else:
                 print(
-                    f"[code] {res['segment_id']} coder={res['coder_id']} "
+                    f"[code] segment={res['segment_id']} coder={res['coder_id']} "
                     f"FAILED v={res['version']}: {res['error']}",
                     file=sys.stderr,
                 )
@@ -576,7 +576,7 @@ def _cmd_aggregate(args: SimpleNamespace) -> int:
             n = c["done"] + c["failed"]
             if res["ok"]:
                 print(
-                    f"[aggregate] {res['segment_id']} in={res['n_in']} "
+                    f"[aggregate] segment={res['segment_id']} in={res['n_in']} "
                     f"out={res['n_out']} new={res['n_new']} "
                     f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
                     f"{res['elapsed']:.1f}s)"
@@ -619,10 +619,9 @@ def _cmd_review(args: SimpleNamespace) -> int:
 
         def on_event(res: dict, c: dict) -> None:
             n = c["done"] + c["failed"]
-            new_label = res.get("new_code") or res.get("code")
             print(
-                f"[review] {res['segment_id']} code={res['code']!r} "
-                f"decision={res['decision']} new={new_label!r} "
+                f"[review] reviewed_code={res['aggregated_code_id']} ({res['code']!r}) "
+                f"decision={res['decision']} "
                 f"({n}/{bar_total} ok={c['done']} failed={c['failed']} "
                 f"{res['elapsed']:.1f}s)"
             )
