@@ -87,17 +87,22 @@ already gave. If nothing further is warranted, return an empty list
 
 _CRITIC_SYSTEM_PROMPT = """\
 You are a critical reviewer of a thematic analysis. Another analyst
-has proposed a set of themes over a codebook. Read the codebook and
-the proposed themes, then identify weaknesses: themes that are too
-narrow or too broad, themes that overlap and should be consolidated,
-themes that do not speak to the research focus, patterns in the
-codebook that were missed, and groupings of codes that don't hang
-together coherently.
+has proposed a set of themes. You do not see the underlying codebook
+— review the themes on their own merits. Focus on two things:
 
-Be concrete and constructive. Refer to themes by their titles and to
-codes by their `code_id`. Your output is free-form feedback for the
-analyst — no JSON, no schema. Keep it focused and actionable; the
-analyst will use it to produce a final consolidated list."""
+1. **Relevance to the research focus.** How well does each theme
+   speak to the research question and the researcher's framing? Flag
+   themes that drift off-topic or that restate the setup rather than
+   advancing an analytic claim.
+2. **Analytic depth.** Are the themes substantive patterns of
+   meaning, or shallow topic headings? Flag themes that are too thin
+   or descriptive, themes that overlap and should be consolidated,
+   and gaps where a deeper or more interpretive theme is warranted.
+
+Be concrete and constructive. Refer to themes by their titles. Your
+output is free-form feedback for the analyst — no JSON, no schema.
+Keep it focused and actionable; the analyst will use it to produce a
+final consolidated list."""
 
 
 _FINAL_PROMPT_TEMPLATE = """\
@@ -302,16 +307,17 @@ class ThemeCoderAgent(BaseAgent):
 
     def _build_critic_user_prompt(
         self,
-        codebook: Codebook,
         prompt: str,
         prior_responses: list[str],
     ) -> str:
         """Assemble the critic's user message.
 
-        The critic sees the researcher's framing, the codebook JSON,
-        and every prior turn's raw JSON response from the theme coder
-        — verbatim, so the critic judges what the analyst actually
-        said rather than a summary.
+        The critic sees the researcher's framing plus the combined set
+        of themes proposed across the analyst's three turns, merged
+        into one list. The codebook is not included — the critic is
+        asked to judge the themes on their own (relevance to the
+        research focus, analytic depth), not to re-ground them in the
+        underlying data.
         """
         sections: list[str] = []
         framing = (prompt or "").strip()
@@ -319,24 +325,39 @@ class ThemeCoderAgent(BaseAgent):
             sections.append(
                 _RESEARCHER_FRAMING_HEADER.format(framing=framing)
             )
-        sections.append(
-            _CODEBOOK_HEADER.format(
-                version=codebook.version,
-                codebook_json=self._codebook_to_json(codebook),
-            )
-        )
-        proposals = "\n\n".join(
-            f"### Analyst's turn {i + 1}\n```json\n{r}\n```"
-            for i, r in enumerate(prior_responses)
-        )
+
+        merged = self._merge_theme_responses(prior_responses)
         sections.append(
             "## Themes proposed by the analyst\n\n"
-            "Below are the analyst's responses across multiple turns. "
-            "Earlier turns proposed an initial set; later turns added "
-            "further themes when prompted. Review them as a whole.\n\n"
-            f"{proposals}"
+            "Below is the combined set of themes the analyst proposed "
+            "across several rounds, merged into one list. Review them "
+            "as a whole.\n\n"
+            f"```json\n{merged}\n```"
         )
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _merge_theme_responses(responses: list[str]) -> str:
+        """Flatten the analyst's per-turn JSON responses into one list.
+
+        Each response is expected to be ``{"themes": [...]}``. Items
+        from later turns are concatenated after earlier ones; turn
+        boundaries are not preserved. On parse failure for a given
+        turn, that turn is skipped — the merged list contains whatever
+        could be recovered from the well-formed turns.
+        """
+        themes: list = []
+        for raw in responses:
+            json_str = extract_json_str(raw)
+            if json_str is None:
+                continue
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                continue
+            for t in data.get("themes", []) or []:
+                themes.append(t)
+        return json.dumps({"themes": themes}, indent=2)
 
     # -- response parsing ----------------------------------------------------
 
@@ -516,7 +537,7 @@ class ThemeCoderAgent(BaseAgent):
         messages.append(self._assistant(more2))
 
         critic_user = self._build_critic_user_prompt(
-            codebook, prompt, [initial, more1, more2]
+            prompt, [initial, more1, more2]
         )
         critic_messages: list[Message] = [
             self._system(_CRITIC_SYSTEM_PROMPT),
