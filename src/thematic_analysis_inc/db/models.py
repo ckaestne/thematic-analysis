@@ -365,6 +365,107 @@ class CodingQueueEntry(SQLModel, table=True):
 
 
 # ===========================================================================
+# Stage 2 — themes
+#
+# A theme groups codebook codes (and representative quotes) into a
+# higher-level pattern of meaning. Themes come from one of three sources:
+#
+#   - SOURCE_JOB         a `ThemeCodingJob` run (LLM theme coder)
+#   - SOURCE_AGGREGATOR  output of a (future) automated merge step
+#   - SOURCE_MANUAL      hand-curated by the user
+#
+# Provenance edges (`themes_derived`) capture which themes were folded
+# into a newer one. The "current" theme set is then `Theme.deleted IS
+# FALSE AND theme_id NOT IN (SELECT source_theme_id FROM themes_derived)`
+# — no separate status flag.
+# ===========================================================================
+
+
+SOURCE_JOB = "job"
+SOURCE_AGGREGATOR = "aggregator"
+SOURCE_MANUAL = "manual"
+
+
+class ThemeCodingJob(SQLModel, table=True):
+    """One LLM theme-coding run over a single codebook revision.
+
+    `prompt` carries the customisable part the user supplies for this
+    job — research question, persona, any extra instructions. The agent
+    splices it into the base system prompt at run time.
+    """
+
+    __tablename__ = "theme_coding_job"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    codebook_used_id: int = Field(
+        foreign_key="codebook.version", index=True
+    )
+    prompt: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    codebook_used: Codebook = Relationship()
+    themes: list["Theme"] = Relationship(back_populates="job")
+
+
+class Theme(SQLModel, table=True):
+    """One theme. See header comment for the source taxonomy.
+
+    `codebook_used_id` is only populated for job-derived themes, where
+    the agent knew exactly which codebook revision it was reading.
+    Aggregator and manual themes leave it `NULL` and reach a codebook
+    transitively through their `codes` (each `Code` pins its own
+    `codebook_used`).
+    """
+
+    __tablename__ = "theme"
+
+    theme_id: Optional[int] = Field(default=None, primary_key=True)
+    codebook_used_id: Optional[int] = Field(
+        default=None, foreign_key="codebook.version", index=True
+    )
+
+    source: str = Field(max_length=16, index=True)
+    theme_coding_job_id: Optional[int] = Field(
+        default=None, foreign_key="theme_coding_job.id", index=True
+    )
+
+    title: str
+    description: str = Field(default="")
+    rationale: str = Field(default="")
+    deleted: bool = Field(default=False, index=True)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    job: Optional[ThemeCodingJob] = Relationship(back_populates="themes")
+    codebook_used: Optional[Codebook] = Relationship()
+
+    codes: list[Code] = Relationship(
+        sa_relationship_kwargs={"secondary": "theme_code"},
+    )
+    supporting_quotes: list[Quote] = Relationship(
+        sa_relationship_kwargs={"secondary": "theme_supporting_quote"},
+    )
+
+    derived_from: list["Theme"] = Relationship(
+        sa_relationship_kwargs={
+            "secondary": "themes_derived",
+            "primaryjoin": "Theme.theme_id == ThemesDerived.new_theme_id",
+            "secondaryjoin": "Theme.theme_id == ThemesDerived.source_theme_id",
+        },
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('job','aggregator','manual')",
+            name="ck_theme_source",
+        ),
+        CheckConstraint(
+            "(source = 'job') = (theme_coding_job_id IS NOT NULL)",
+            name="ck_theme_job_consistency",
+        ),
+    )
+
+
+# ===========================================================================
 # Link tables
 #
 # Pure structural glue between entities. Kept at the bottom because each
@@ -447,6 +548,56 @@ class CodesDerived(SQLModel, table=True):
     )
 
 
+class ThemeCode(SQLModel, table=True):
+    """n:m link: which codebook codes a theme groups."""
+
+    __tablename__ = "theme_code"
+
+    theme_id: int = Field(
+        foreign_key="theme.theme_id", primary_key=True
+    )
+    code_id: int = Field(
+        foreign_key="code.code_id", primary_key=True
+    )
+
+
+class ThemeSupportingQuote(SQLModel, table=True):
+    """n:m link: representative quotes the agent picked for a theme.
+
+    Stored separately from the theme's codes (rather than derived from
+    them) so the LLM's curatorial choice — which quotes best illustrate
+    *this theme* — survives independently of which quotes happen to be
+    attached to each constituent code.
+    """
+
+    __tablename__ = "theme_supporting_quote"
+
+    theme_id: int = Field(
+        foreign_key="theme.theme_id", primary_key=True
+    )
+    quote_id: int = Field(
+        foreign_key="quote.quote_id", primary_key=True
+    )
+
+
+class ThemesDerived(SQLModel, table=True):
+    """Provenance edge: `new_theme` was derived from `source_theme`.
+
+    Used by the (future) aggregator to record merges. The "current"
+    theme set excludes any theme that appears as a `source_theme_id`.
+    """
+
+    __tablename__ = "themes_derived"
+
+    new_theme_id: int = Field(
+        foreign_key="theme.theme_id", primary_key=True
+    )
+    source_theme_id: int = Field(
+        foreign_key="theme.theme_id", primary_key=True
+    )
+    rationale: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -460,10 +611,15 @@ __all__ = [
     "Code",
     "Quote",
     "CodingQueueEntry",
+    "ThemeCodingJob",
+    "Theme",
     # Link tables
     "CodebookCode",
     "CodesSupportingQuotes",
     "CodesDerived",
+    "ThemeCode",
+    "ThemeSupportingQuote",
+    "ThemesDerived",
     # Enum-ish constants
     "DERIVATION_AGGREGATION",
     "DERIVATION_REVIEW",
@@ -472,4 +628,7 @@ __all__ = [
     "DECISION_MERGE_AND_RENAME",
     "SENTINEL_CODE_LABEL",
     "is_sentinel_code",
+    "SOURCE_JOB",
+    "SOURCE_AGGREGATOR",
+    "SOURCE_MANUAL",
 ]

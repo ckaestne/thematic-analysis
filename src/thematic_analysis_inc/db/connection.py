@@ -73,7 +73,7 @@ def _ensure_engine(path: str | Path) -> Engine:
 
 
 def _create_sqlmodel_tables(engine: Engine) -> None:
-    """Create every Stage-1 SQLModel-owned table (idempotent)."""
+    """Create every SQLModel-owned table (idempotent)."""
     from thematic_analysis_inc.db.models import (
         Code,
         Codebook,
@@ -86,6 +86,11 @@ def _create_sqlmodel_tables(engine: Engine) -> None:
         Quote,
         ResearchContext,
         Segment,
+        Theme,
+        ThemeCode,
+        ThemeCodingJob,
+        ThemeSupportingQuote,
+        ThemesDerived,
     )
 
     SQLModel.metadata.create_all(
@@ -102,6 +107,12 @@ def _create_sqlmodel_tables(engine: Engine) -> None:
             CodebookCode.__table__,
             CodesSupportingQuotes.__table__,
             CodesDerived.__table__,
+            # Stage 2
+            ThemeCodingJob.__table__,
+            Theme.__table__,
+            ThemeCode.__table__,
+            ThemeSupportingQuote.__table__,
+            ThemesDerived.__table__,
         ],
     )
 

@@ -19,6 +19,10 @@ from thematic_analysis.agents.reviewer import (
     ReviewerAgent,
     ReviewerConfig,
 )
+from thematic_analysis.agents.theme_coder import (
+    ThemeCoderAgent,
+    ThemeCoderConfig,
+)
 
 from thematic_analysis_inc import db
 from thematic_analysis_inc.db import (
@@ -29,6 +33,7 @@ from thematic_analysis_inc.db import (
     coding as db_coding,
     embeddings as db_embeddings,
     review as db_review,
+    theme as db_themes,
 )
 from thematic_analysis_inc.db.models import (
     Code,
@@ -37,6 +42,9 @@ from thematic_analysis_inc.db.models import (
     DECISION_ADD,
     DECISION_MERGE,
     DECISION_MERGE_AND_RENAME,
+    SOURCE_JOB,
+    Theme,
+    ThemeCodingJob,
     is_sentinel_code,
 )
 from thematic_analysis_inc.refinement import wrap_with_refinement
@@ -670,3 +678,49 @@ def finalize_codebook() -> int | None:
         return None
     new_cb = db_codebook.materialize_codebook_revision(parent_full)
     return new_cb.version if new_cb is not None else None
+
+
+# ── Stage 2 — theme coding ──────────────────────────────────────────────────
+
+
+ThemeCoderFactory = Callable[[], ThemeCoderAgent]
+
+
+def default_theme_coder_factory() -> ThemeCoderAgent:
+    return ThemeCoderAgent(config=ThemeCoderConfig())
+
+
+def run_theme_coding_job(
+    job: ThemeCodingJob,
+    *,
+    agent_factory: ThemeCoderFactory | None = None,
+) -> list[Theme]:
+    """Run a single theme-coding job end-to-end.
+
+    Loads the codebook revision pinned by ``job``, hands it to a fresh
+    ``ThemeCoderAgent`` with ``job.prompt`` as the customisable system
+    section, then persists every returned theme (with its code + quote
+    links) in one transaction. Returns the persisted (detached) themes.
+
+    Raises ``ValueError`` if the pinned codebook revision is missing.
+    Agent failures propagate; nothing is written on failure.
+    """
+    codebook = db_codebook.get_codebook_with_codes_and_research_context(
+        job.codebook_used_id
+    )
+    if codebook is None:
+        raise ValueError(
+            f"codebook version {job.codebook_used_id} not found "
+            f"(referenced by theme_coding_job id={job.id})"
+        )
+
+    factory = agent_factory or default_theme_coder_factory
+    agent = factory()
+    themes = agent.develop_themes(codebook, job.prompt)
+    for t in themes:
+        t.source = SOURCE_JOB
+        t.theme_coding_job_id = job.id
+        # Agent already set codebook_used_id from the codebook it saw;
+        # re-assert for clarity in case a test factory forgot.
+        t.codebook_used_id = codebook.version
+    return db_themes.save_themes(themes)
