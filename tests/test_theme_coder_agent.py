@@ -289,14 +289,17 @@ def test_develop_themes_async_runs_five_step_flow_and_returns_final():
         assert len(calls[i]["messages"]) > len(calls[i - 1]["messages"])
 
     # Step 4: critic — fresh session with the critic system prompt and
-    # all three prior responses in the user message. No JSON schema.
+    # the merged theme list (no codebook, no turn boundaries). No JSON
+    # schema, since the critique is free-form.
     assert "critical reviewer" in calls[3]["system"].lower()
     assert calls[3]["schema"] is None
     critic_user = calls[3]["last_user"]
-    assert "version 3" in critic_user
-    assert initial_resp in critic_user
-    assert more1_resp in critic_user
-    assert more2_resp in critic_user
+    assert "version 3" not in critic_user  # codebook is not included
+    # Themes from all three turns appear by title; turn headers do not.
+    assert "T1" in critic_user
+    assert "T2" in critic_user
+    assert "turn 1" not in critic_user.lower()
+    assert "turn 2" not in critic_user.lower()
 
     # Step 5: final consolidation — back in the original chat with the
     # critique injected. Schema is on again; chat carries everything.
@@ -308,6 +311,19 @@ def test_develop_themes_async_runs_five_step_flow_and_returns_final():
     # Only the final response is parsed and returned.
     assert [t.title for t in themes] == ["Final"]
     assert {q.quote_id for q in themes[0].supporting_quotes} == {11, 12, 13}
+
+
+def test_merge_theme_responses_flattens_across_turns_and_skips_garbage():
+    t1 = _resp([{"title": "A", "description": "", "rationale": "",
+                 "code_ids": [1], "quote_ids": []}])
+    t2 = "not json at all"
+    t3 = _resp([{"title": "B", "description": "", "rationale": "",
+                 "code_ids": [2], "quote_ids": []},
+                {"title": "C", "description": "", "rationale": "",
+                 "code_ids": [3], "quote_ids": []}])
+    merged_str = ThemeCoderAgent._merge_theme_responses([t1, t2, t3])
+    merged = json.loads(merged_str)
+    assert [t["title"] for t in merged["themes"]] == ["A", "B", "C"]
 
 
 def test_develop_themes_async_records_every_turn_on_last_turns():
@@ -356,7 +372,10 @@ def test_develop_themes_async_records_every_turn_on_last_turns():
     assert "framing!" in users[0] and "version 4" in users[0]
     assert users[1] == users[2]  # both follow-ups are the same prompt
     assert "additional themes" in users[1].lower()
-    assert initial_resp in users[3] and more1_resp in users[3]
+    # Critic gets a merged themes list, not raw per-turn JSON; the
+    # exact response strings are no longer present, but a `themes`
+    # block is.
+    assert '"themes"' in users[3]
     assert critique_text in users[4]
 
     assert all(t.elapsed >= 0 for t in agent.last_turns)

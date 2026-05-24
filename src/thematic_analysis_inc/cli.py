@@ -1159,18 +1159,21 @@ def _cmd_test_theme(args: SimpleNamespace) -> int:
     themes = res["themes"]
     turns = res.get("turns") or []
 
-    # Debug dump: every prompt + response in the five-step flow. The
-    # critic turn uses a different system prompt; collapse repeats so
-    # the trace stays readable.
-    prev_system: str | None = None
+    # Debug dump: every prompt + response in the five-step flow. Turns
+    # 1–3 and 5 share the same chat (one system message at the front);
+    # turn 4 (critic) is a separate session with its own system prompt.
+    # Collapse any system prompt that was already shown earlier so the
+    # trace doesn't reprint the long theme-coder prompt for the final
+    # turn after the critic.
+    seen_systems: dict[str, int] = {}
     for i, turn in enumerate(turns, start=1):
         print(f"===== turn {i}: {turn.label} ({turn.elapsed:.2f}s) =====")
         print("----- system prompt -----")
-        if turn.system_prompt != prev_system:
-            print(turn.system_prompt)
-            prev_system = turn.system_prompt
+        if turn.system_prompt in seen_systems:
+            print(f"(same as turn {seen_systems[turn.system_prompt]})")
         else:
-            print("(same as previous turn)")
+            print(turn.system_prompt)
+            seen_systems[turn.system_prompt] = i
         print("----- user prompt -----")
         print(turn.user_prompt)
         print("----- response -----")
