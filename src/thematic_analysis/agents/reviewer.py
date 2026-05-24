@@ -42,6 +42,7 @@ from thematic_analysis_inc.db.models import (
 class ReviewerConfig(AgentConfig):
     """Configuration for the Reviewer agent."""
 
+    task: str = "reviewer"
     similarity_threshold: float = 0.4  # Threshold for considering codes similar
     top_k_similar: int = 25  # Number of similar codes to retrieve (paper §4)
     merge_threshold: float = 0.90  # Threshold for automatic merging

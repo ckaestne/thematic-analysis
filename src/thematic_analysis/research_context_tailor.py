@@ -104,7 +104,9 @@ def _meta_user_prompt(description: str, role: str) -> str:
 
 
 def _load_llm() -> LLM:
-    return LLM.load_from_env()
+    from thematic_analysis.llm_config import apply_task_env
+
+    return apply_task_env(LLM.load_from_env(), "tailor")
 
 
 def _strip_fences(text: str) -> str:

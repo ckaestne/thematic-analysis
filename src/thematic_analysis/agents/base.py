@@ -9,6 +9,12 @@ from dataclasses import dataclass
 
 from openhands.sdk import LLM, Message, TextContent
 
+from thematic_analysis.llm_config import (
+    env_max_tokens,
+    env_model,
+    env_temperature,
+)
+
 # Retry config for transient LLM errors (rate limits, 5xx, connection blips).
 # Tunable via env so ops can crank it up without code changes.
 _RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "6"))
@@ -64,13 +70,26 @@ def _backoff_delay(attempt: int, exc: BaseException) -> float:
     )
 
 
+_DEFAULT_TEMPERATURE = 0.7
+_DEFAULT_MAX_TOKENS = 4096
+
+
 @dataclass
 class AgentConfig:
-    """Configuration for an agent."""
+    """Configuration for an agent.
 
-    model: str = "anthropic/claude-sonnet-4-20250514"
-    temperature: float = 0.7
-    max_tokens: int = 4096
+    Model / temperature / max_tokens default to ``None`` so that
+    task-specific env vars (``LLM_MODEL_<TASK>`` etc., see
+    ``thematic_analysis.llm_config``) can take effect. Explicit values
+    passed in code always win over env vars.
+    """
+
+    # Task name used to look up env-var overrides like LLM_MODEL_<TASK>.
+    # Subclasses set this (e.g. "coder", "reviewer", "theme_coder").
+    task: str = "default"
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
     identity: str | None = None  # Optional identity/persona for the agent
     api_key: str | None = None  # API key (falls back to LLM_API_KEY env var)
     base_url: str | None = None  # Optional base URL for API
@@ -94,15 +113,30 @@ class BaseAgent(ABC):
 
     @property
     def llm(self) -> LLM:
-        """Lazy load the LLM instance."""
+        """Lazy load the LLM instance.
+
+        Resolution order for model / temperature / max_tokens:
+        explicit config value > task-specific env var > fallback default.
+        """
         if self._llm is None:
             # Use SDK's load_from_env which handles OpenHands proxy correctly
             self._llm = LLM.load_from_env()
-            # Override with config settings if specified
-            if self.config.temperature is not None:
-                self._llm.temperature = self.config.temperature
-            if self.config.max_tokens is not None:
-                self._llm.max_output_tokens = self.config.max_tokens
+            task = self.config.task
+            model = self.config.model or env_model(task)
+            if model:
+                self._llm.model = model
+            temperature = self.config.temperature
+            if temperature is None:
+                temperature = env_temperature(task)
+            if temperature is None:
+                temperature = _DEFAULT_TEMPERATURE
+            self._llm.temperature = temperature
+            max_tokens = self.config.max_tokens
+            if max_tokens is None:
+                max_tokens = env_max_tokens(task)
+            if max_tokens is None:
+                max_tokens = _DEFAULT_MAX_TOKENS
+            self._llm.max_output_tokens = max_tokens
         return self._llm
 
     def _create_messages(self, system_prompt: str, user_prompt: str) -> list[Message]:

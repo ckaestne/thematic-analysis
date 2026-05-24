@@ -22,6 +22,7 @@ from thematic_analysis_inc.db.models import (
 class AggregatorConfig(AgentConfig):
     """Configuration for the Code Aggregator agent."""
 
+    task: str = "aggregator"
     max_quotes_per_code: int = 10
 
 

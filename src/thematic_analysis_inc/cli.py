@@ -1257,9 +1257,15 @@ def _cli_add_document(
     ] = 50,
     max_words: Annotated[int, typer.Option("--max-words")] = 500,
     model: Annotated[
-        str,
-        typer.Option("--model", help="litellm model id for --segmentation llm"),
-    ] = "gemini/gemini-2.5-flash-lite",
+        str | None,
+        typer.Option(
+            "--model",
+            help=(
+                "litellm model id for --segmentation llm "
+                "(defaults to LLM_MODEL_SEGMENTER env or gemini/gemini-2.5-flash-lite)"
+            ),
+        ),
+    ] = None,
     batch: Annotated[int | None, typer.Option("--batch")] = None,
     enqueue: Annotated[
         bool,
@@ -1658,12 +1664,15 @@ def _cli_segment(
     ] = 20,
     max_words: Annotated[int, typer.Option("--max-words")] = 500,
     model: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--model",
-            help="litellm model id for --method llm (e.g. gemini/gemini-2.5-pro)",
+            help=(
+                "litellm model id for --method llm "
+                "(defaults to LLM_MODEL_SEGMENTER env or gemini/gemini-2.5-flash-lite)"
+            ),
         ),
-    ] = "gemini/gemini-2.5-flash-lite",
+    ] = None,
 ) -> None:
     _run(
         ctx,

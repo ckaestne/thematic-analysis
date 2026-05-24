@@ -153,6 +153,7 @@ THEME_CODER_RESPONSE_SCHEMA = {
 class ThemeCoderConfig(AgentConfig):
     """Configuration for the Theme Coder agent."""
 
+    task: str = "theme_coder"
     max_themes: int = 10
     min_codes_per_theme: int = 2
 
