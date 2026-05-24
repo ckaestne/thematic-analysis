@@ -28,17 +28,16 @@ research_context(
     coder_prompt              TEXT,
     coding_critic_prompt      TEXT,
     reviewer_prompt           TEXT,
-    theme_coder_prompt        TEXT,
-    theme_aggregator_prompt   TEXT,
     created_at                DATETIME NOT NULL
 )
 ```
 
-The five `*_prompt` columns map to the role names exposed by
+The `*_prompt` columns map to the role names exposed by
 `thematic_analysis.research_context.AGENT_ROLES`:
-`coder`, `coding_critic`, `reviewer`, `theme_coder`, `theme_aggregator`.
-A `NULL` value means "no tailored prompt set for this role"; the agent
-falls back to the freeform `description`.
+`coder`, `coding_critic`, `reviewer`. A `NULL` value means "no
+tailored prompt set for this role"; the agent falls back to the
+freeform `description`. The theme coder reads its framing straight
+from the `theme_coding_job.prompt` it is given, not from this table.
 
 `clear_research_context` deletes **all** rows (fresh-DB policy).
 
