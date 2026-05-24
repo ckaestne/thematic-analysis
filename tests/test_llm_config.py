@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -11,17 +12,30 @@ from thematic_analysis.agents.coder import CoderConfig
 from thematic_analysis.agents.reviewer import ReviewerConfig
 from thematic_analysis.agents.theme_coder import ThemeCoderConfig
 from thematic_analysis.llm_config import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL,
+    DEFAULT_TEMPERATURE,
     apply_task_env,
+    ensure_llm_model_env,
     env_max_tokens,
     env_model,
     env_temperature,
+    resolve_max_tokens,
+    resolve_model,
+    resolve_temperature,
 )
 
 
-def test_env_lookup_returns_none_when_unset(monkeypatch):
-    monkeypatch.delenv("LLM_MODEL_CODER", raising=False)
-    monkeypatch.delenv("LLM_TEMPERATURE_CODER", raising=False)
-    monkeypatch.delenv("LLM_MAX_TOKENS_CODER", raising=False)
+@pytest.fixture(autouse=True)
+def _clean_llm_env(monkeypatch):
+    """Clear LLM_* vars before each test so we control the env precisely."""
+    for var in list(os.environ):
+        if var.startswith("LLM_"):
+            monkeypatch.delenv(var, raising=False)
+    yield
+
+
+def test_env_lookup_returns_none_when_unset():
     assert env_model("coder") is None
     assert env_temperature("coder") is None
     assert env_max_tokens("coder") is None
@@ -36,23 +50,80 @@ def test_env_lookup_reads_task_specific_vars(monkeypatch):
     assert env_max_tokens("coder") == 2048
 
 
-def test_apply_task_env_overrides_llm(monkeypatch):
-    monkeypatch.setenv("LLM_MODEL_TAILOR", "anthropic/claude-haiku-4-5")
-    monkeypatch.setenv("LLM_TEMPERATURE_TAILOR", "0.9")
-    llm = SimpleNamespace(model="old", temperature=0.1, max_output_tokens=100)
+def test_resolve_falls_back_to_defaults():
+    assert resolve_model("coder") == DEFAULT_MODEL
+    assert resolve_temperature("coder") == DEFAULT_TEMPERATURE
+    assert resolve_max_tokens("coder") == DEFAULT_MAX_TOKENS
+
+
+def test_resolve_uses_global_llm_model_when_task_unset(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.4")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2222")
+    assert resolve_model("coder") == "global-model"
+    assert resolve_temperature("coder") == 0.4
+    assert resolve_max_tokens("coder") == 2222
+
+
+def test_resolve_task_specific_beats_global(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_MODEL_CODER", "task-model")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.4")
+    monkeypatch.setenv("LLM_TEMPERATURE_CODER", "0.1")
+    assert resolve_model("coder") == "task-model"
+    assert resolve_temperature("coder") == 0.1
+    # Aggregator still gets the global value.
+    assert resolve_model("aggregator") == "global-model"
+
+
+def test_resolve_explicit_fallback_used_over_default():
+    assert resolve_model("segmenter", fallback="gemini/foo") == "gemini/foo"
+    assert resolve_temperature("segmenter", fallback=0.0) == 0.0
+
+
+def test_resolve_env_beats_explicit_fallback(monkeypatch):
+    """LLM_MODEL still wins over a function-supplied fallback so users can
+    override segmenter-style hardcoded defaults globally."""
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    assert resolve_model("segmenter", fallback="gemini/foo") == "global-model"
+
+
+def test_apply_task_env_uses_global_llm_vars(monkeypatch):
+    """apply_task_env (used by tailor) honours both task-specific and global
+    LLM_* vars."""
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS_TAILOR", "999")
+    llm = SimpleNamespace(model="orig", temperature=0.5, max_output_tokens=1)
     apply_task_env(llm, "tailor")
-    assert llm.model == "anthropic/claude-haiku-4-5"
-    assert llm.temperature == 0.9
-    assert llm.max_output_tokens == 100  # untouched (no env var)
+    assert llm.model == "global-model"
+    assert llm.temperature == 0.5  # nothing set
+    assert llm.max_output_tokens == 999
 
 
-def test_apply_task_env_noop_when_unset(monkeypatch):
-    monkeypatch.delenv("LLM_MODEL_TAILOR", raising=False)
-    monkeypatch.delenv("LLM_TEMPERATURE_TAILOR", raising=False)
-    monkeypatch.delenv("LLM_MAX_TOKENS_TAILOR", raising=False)
+def test_apply_task_env_task_specific_beats_global(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_MODEL_TAILOR", "task-model")
+    llm = SimpleNamespace(model="orig", temperature=0.5, max_output_tokens=1)
+    apply_task_env(llm, "tailor")
+    assert llm.model == "task-model"
+
+
+def test_apply_task_env_noop_when_unset():
     llm = SimpleNamespace(model="m", temperature=0.5, max_output_tokens=1)
     apply_task_env(llm, "tailor")
     assert (llm.model, llm.temperature, llm.max_output_tokens) == ("m", 0.5, 1)
+
+
+def test_ensure_llm_model_env_sets_default_when_unset():
+    assert os.environ.get("LLM_MODEL") is None
+    ensure_llm_model_env()
+    assert os.environ["LLM_MODEL"] == DEFAULT_MODEL
+
+
+def test_ensure_llm_model_env_preserves_existing(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "my-model")
+    ensure_llm_model_env()
+    assert os.environ["LLM_MODEL"] == "my-model"
 
 
 @pytest.mark.parametrize(
@@ -126,13 +197,8 @@ def test_llm_property_explicit_config_beats_env(monkeypatch):
 
 
 def test_llm_property_falls_back_to_defaults(monkeypatch):
+    """When nothing is configured, the resolved DEFAULT_MODEL kicks in."""
     fake = _patch_load_from_env(monkeypatch)
-    for v in (
-        "LLM_MODEL_AGGREGATOR",
-        "LLM_TEMPERATURE_AGGREGATOR",
-        "LLM_MAX_TOKENS_AGGREGATOR",
-    ):
-        monkeypatch.delenv(v, raising=False)
 
     from thematic_analysis.agents.base import BaseAgent
 
@@ -141,9 +207,41 @@ def test_llm_property_falls_back_to_defaults(monkeypatch):
             return ""
 
     _Bare(AggregatorConfig()).llm  # noqa: B018
-    assert fake.model == "sdk-default"  # left as SDK set it
-    assert fake.temperature == 0.7
-    assert fake.max_output_tokens == 4096
+    assert fake.model == DEFAULT_MODEL
+    assert fake.temperature == DEFAULT_TEMPERATURE
+    assert fake.max_output_tokens == DEFAULT_MAX_TOKENS
+
+
+def test_llm_property_uses_global_llm_model(monkeypatch):
+    """LLM_MODEL alone (no task-specific override) drives every agent."""
+    fake = _patch_load_from_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.42")
+
+    from thematic_analysis.agents.base import BaseAgent
+
+    class _Bare(BaseAgent):
+        def get_system_prompt(self) -> str:
+            return ""
+
+    _Bare(CoderConfig()).llm  # noqa: B018
+    assert fake.model == "global-model"
+    assert fake.temperature == 0.42
+
+
+def test_llm_property_task_specific_beats_global(monkeypatch):
+    fake = _patch_load_from_env(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "global-model")
+    monkeypatch.setenv("LLM_MODEL_CODER", "coder-model")
+
+    from thematic_analysis.agents.base import BaseAgent
+
+    class _Bare(BaseAgent):
+        def get_system_prompt(self) -> str:
+            return ""
+
+    _Bare(CoderConfig()).llm  # noqa: B018
+    assert fake.model == "coder-model"
 
 
 def test_theme_coder_env(monkeypatch):

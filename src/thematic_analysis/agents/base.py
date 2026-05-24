@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from openhands.sdk import LLM, Message, TextContent
 
 from thematic_analysis.llm_config import (
-    env_max_tokens,
-    env_model,
-    env_temperature,
+    ensure_llm_model_env,
+    resolve_max_tokens,
+    resolve_model,
+    resolve_temperature,
 )
 
 # Retry config for transient LLM errors (rate limits, 5xx, connection blips).
@@ -70,10 +71,6 @@ def _backoff_delay(attempt: int, exc: BaseException) -> float:
     )
 
 
-_DEFAULT_TEMPERATURE = 0.7
-_DEFAULT_MAX_TOKENS = 4096
-
-
 @dataclass
 class AgentConfig:
     """Configuration for an agent.
@@ -116,27 +113,25 @@ class BaseAgent(ABC):
         """Lazy load the LLM instance.
 
         Resolution order for model / temperature / max_tokens:
-        explicit config value > task-specific env var > fallback default.
+        explicit config value > ``LLM_<KEY>_<TASK>`` env > ``LLM_<KEY>``
+        env > builtin default (see ``thematic_analysis.llm_config``).
         """
         if self._llm is None:
-            # Use SDK's load_from_env which handles OpenHands proxy correctly
+            # Make sure SDK validation doesn't fail when LLM_MODEL is unset.
+            ensure_llm_model_env()
             self._llm = LLM.load_from_env()
             task = self.config.task
-            model = self.config.model or env_model(task)
-            if model:
-                self._llm.model = model
-            temperature = self.config.temperature
-            if temperature is None:
-                temperature = env_temperature(task)
-            if temperature is None:
-                temperature = _DEFAULT_TEMPERATURE
-            self._llm.temperature = temperature
-            max_tokens = self.config.max_tokens
-            if max_tokens is None:
-                max_tokens = env_max_tokens(task)
-            if max_tokens is None:
-                max_tokens = _DEFAULT_MAX_TOKENS
-            self._llm.max_output_tokens = max_tokens
+            self._llm.model = self.config.model or resolve_model(task)
+            self._llm.temperature = (
+                self.config.temperature
+                if self.config.temperature is not None
+                else resolve_temperature(task)
+            )
+            self._llm.max_output_tokens = (
+                self.config.max_tokens
+                if self.config.max_tokens is not None
+                else resolve_max_tokens(task)
+            )
         return self._llm
 
     def _create_messages(self, system_prompt: str, user_prompt: str) -> list[Message]:

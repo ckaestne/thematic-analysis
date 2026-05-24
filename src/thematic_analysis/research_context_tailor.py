@@ -118,8 +118,9 @@ def _meta_user_prompt(description: str, role: str) -> str:
 
 
 def _load_llm() -> LLM:
-    from thematic_analysis.llm_config import apply_task_env
+    from thematic_analysis.llm_config import apply_task_env, ensure_llm_model_env
 
+    ensure_llm_model_env()
     return apply_task_env(LLM.load_from_env(), "tailor")
 
 

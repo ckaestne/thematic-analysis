@@ -17,12 +17,15 @@ from openhands.sdk import LLM, Message, TextContent
 
 from thematic_analysis.llm_config import (
     env_max_tokens,
-    env_model,
-    env_temperature,
+    resolve_model,
+    resolve_temperature,
 )
 
 
+# Built-in fallback when neither LLM_MODEL_SEGMENTER nor LLM_MODEL is set.
+# Gemini Flash is plenty for boundary picking and cheap; users can override.
 _SEGMENTER_DEFAULT_MODEL = "gemini/gemini-2.5-flash-lite"
+_SEGMENTER_DEFAULT_TEMPERATURE = 0.0
 
 
 _SYSTEM_PROMPT = (
@@ -197,16 +200,18 @@ def segment_by_llm(
     never emits segment text; it only picks boundary line numbers and
     titles.
 
-    Model selection: explicit ``model`` arg > ``LLM_MODEL_SEGMENTER`` env >
-    built-in default.  ``LLM_TEMPERATURE_SEGMENTER`` and
-    ``LLM_MAX_TOKENS_SEGMENTER`` likewise override temperature (default 0.0)
-    and max output tokens.
+    Model selection chain: explicit ``model`` arg > ``LLM_MODEL_SEGMENTER``
+    > ``LLM_MODEL`` > built-in segmenter default (gemini-2.5-flash-lite).
+    Temperature defaults to 0.0; ``LLM_MAX_TOKENS_SEGMENTER`` overrides
+    max output tokens when set.
     """
     numbered, lines = _number_lines(text)
-    effective_model = model or env_model("segmenter") or _SEGMENTER_DEFAULT_MODEL
-    temperature = env_temperature("segmenter")
-    if temperature is None:
-        temperature = 0.0
+    effective_model = model or resolve_model(
+        "segmenter", fallback=_SEGMENTER_DEFAULT_MODEL
+    )
+    temperature = resolve_temperature(
+        "segmenter", fallback=_SEGMENTER_DEFAULT_TEMPERATURE
+    )
     llm = LLM(usage_id="segmenter", model=effective_model, temperature=temperature)
     max_tokens = env_max_tokens("segmenter")
     if max_tokens is not None:

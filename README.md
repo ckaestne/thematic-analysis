@@ -24,19 +24,33 @@ uv run ta --help
 
 ## Environment Variables
 
-The agents call an LLM via the OpenHands SDK. Set at minimum:
+The agents call an LLM via the OpenHands SDK. Every env var is optional and
+falls back to a sensible default — only `LLM_API_KEY` must be set for real
+LLM calls to succeed. See [`.env.template`](.env.template) for the full
+list with inline notes.
 
 ```bash
-export LLM_MODEL=anthropic/claude-sonnet-4-6   # or any supported model
 export LLM_API_KEY=your-api-key
-# optional: export LLM_BASE_URL=https://...
+# optional — defaults to anthropic/claude-sonnet-4-6
+export LLM_MODEL=anthropic/claude-sonnet-4-6
+# optional non-default endpoint
+# export LLM_BASE_URL=https://...
 ```
 
 ### Per-task model overrides
 
 Each LLM-using task can be pointed at a different model / temperature /
-max output tokens. Task-specific vars override the global `LLM_MODEL` etc.;
-values explicitly passed in code or via the CLI still win over env.
+max output tokens. Resolution order (first match wins):
+
+1. Explicit value passed in code or via the CLI
+2. `LLM_<KEY>_<TASK>` (e.g. `LLM_MODEL_CODER`)
+3. Global `LLM_<KEY>` (e.g. `LLM_MODEL`)
+4. Built-in default
+
+So `LLM_MODEL` still sets every task at once; the per-task vars only override
+the ones you care about. Recognised task names: `CODER`, `AGGREGATOR`,
+`REVIEWER`, `THEME_CODER`, `SEGMENTER`, `TAILOR` (research-context prompt
+generation).
 
 ```bash
 # pick a stronger model for coding, a cheaper one for aggregation
@@ -45,11 +59,7 @@ export LLM_MODEL_AGGREGATOR=anthropic/claude-haiku-4-5
 export LLM_TEMPERATURE_REVIEWER=0.2
 export LLM_MAX_TOKENS_THEME_CODER=8192
 export LLM_MODEL_SEGMENTER=gemini/gemini-2.5-pro
-export LLM_MODEL_TAILOR=anthropic/claude-sonnet-4-6
 ```
-
-Recognised task names: `CODER`, `AGGREGATOR`, `REVIEWER`, `THEME_CODER`,
-`SEGMENTER`, `TAILOR` (research-context prompt generation).
 
 ## Pipeline (`ta`)
 
