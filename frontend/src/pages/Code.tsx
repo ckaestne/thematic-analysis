@@ -56,16 +56,49 @@ function QuoteLink({ q }: { q: CodebookQuote }) {
         color: "inherit",
       }}
     >
-      <Text size="xs" ff="monospace">
-        {q.document_filename ?? "(no document)"}#{q.segment_id}
-        <Text span size="xs" c="dimmed">
-          {" "}
-          · quote {q.quote_id}
-        </Text>
+      <Text size="xs" ff="monospace" c="dimmed">
+        #{q.segment_id} · quote {q.quote_id}
       </Text>
       <Text size="sm">{q.text}</Text>
     </Anchor>
   );
+}
+
+type QuoteGroup = {
+  document_id: number | null;
+  document_filename: string | null;
+  quotes: CodebookQuote[];
+};
+
+function groupQuotesByDocument(quotes: CodebookQuote[]): QuoteGroup[] {
+  const byDoc = new Map<string, QuoteGroup>();
+  for (const q of quotes) {
+    const key = q.document_id == null ? "none" : String(q.document_id);
+    let g = byDoc.get(key);
+    if (!g) {
+      g = {
+        document_id: q.document_id,
+        document_filename: q.document_filename,
+        quotes: [],
+      };
+      byDoc.set(key, g);
+    }
+    g.quotes.push(q);
+  }
+  const groups = Array.from(byDoc.values());
+  for (const g of groups) {
+    g.quotes.sort((a, b) =>
+      a.segment_id !== b.segment_id
+        ? a.segment_id - b.segment_id
+        : a.quote_id - b.quote_id,
+    );
+  }
+  groups.sort((a, b) => {
+    const an = a.document_filename ?? "";
+    const bn = b.document_filename ?? "";
+    return an.localeCompare(bn);
+  });
+  return groups;
 }
 
 /** Label introducing a single edge, based on its derivation kind. */
@@ -431,9 +464,40 @@ export function CodePage() {
           <Title order={5} mb="xs">
             Supporting quotes ({d.quotes.length})
           </Title>
-          <Stack gap={6}>
-            {d.quotes.map((q) => (
-              <QuoteLink key={q.quote_id} q={q} />
+          <Stack gap="md">
+            {groupQuotesByDocument(d.quotes).map((g) => (
+              <Stack
+                key={g.document_id ?? "none"}
+                gap={6}
+                style={{
+                  borderLeft: "2px solid var(--mantine-color-gray-3)",
+                  paddingLeft: 10,
+                }}
+              >
+                <Group gap="xs" wrap="nowrap">
+                  {g.document_id != null ? (
+                    <Anchor
+                      component={Link}
+                      to={`/documents/${g.document_id}`}
+                      size="sm"
+                      ff="monospace"
+                      fw={600}
+                    >
+                      {g.document_filename ?? `document ${g.document_id}`}
+                    </Anchor>
+                  ) : (
+                    <Text size="sm" ff="monospace" fw={600} c="dimmed">
+                      (no document)
+                    </Text>
+                  )}
+                  <Text size="xs" c="dimmed">
+                    {g.quotes.length} quote{g.quotes.length === 1 ? "" : "s"}
+                  </Text>
+                </Group>
+                {g.quotes.map((q) => (
+                  <QuoteLink key={q.quote_id} q={q} />
+                ))}
+              </Stack>
             ))}
           </Stack>
         </Card>
