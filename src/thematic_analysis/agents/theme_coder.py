@@ -25,6 +25,7 @@ the last turn's output is parsed and returned.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 from openhands.sdk import Message, TextContent
@@ -212,6 +213,23 @@ class ThemeCoderConfig(AgentConfig):
     min_codes_per_theme: int = 2
 
 
+@dataclass
+class ThemeCoderTurn:
+    """One LLM round-trip in the multi-step theme-coding flow.
+
+    ``user_prompt`` is the new user message added at this turn, not the
+    whole running chat — that's the part a human inspecting the trace
+    actually wants to read. The ``critic`` turn is the only one with a
+    different ``system_prompt``.
+    """
+
+    label: str  # "initial" | "additional_1" | "additional_2" | "critic" | "final"
+    system_prompt: str
+    user_prompt: str
+    response: str
+    elapsed: float
+
+
 class ThemeCoderAgent(BaseAgent):
     """Stateless theme-coding agent.
 
@@ -222,11 +240,16 @@ class ThemeCoderAgent(BaseAgent):
     passed in as the ``prompt`` argument and reproduced verbatim inside
     the user message (clearly delimited so the model can tell it apart
     from our generic instructions).
+
+    After ``develop_themes_async`` runs, ``last_turns`` holds the per-
+    turn prompts and responses so debug callers (the ``test-theme``
+    CLI in particular) can show the full trace.
     """
 
     def __init__(self, config: ThemeCoderConfig | None = None):
         super().__init__(config or ThemeCoderConfig())
         self.theme_config: ThemeCoderConfig = self.config  # type: ignore[assignment]
+        self.last_turns: list[ThemeCoderTurn] = []
 
     def get_system_prompt(self) -> str:
         return THEME_CODER_SYSTEM_PROMPT
@@ -416,6 +439,36 @@ class ThemeCoderAgent(BaseAgent):
     def _system(text: str) -> Message:
         return Message(role="system", content=[TextContent(text=text)])
 
+    async def _run_turn(
+        self,
+        label: str,
+        system_prompt: str,
+        new_user_prompt: str,
+        chat_messages: list[Message],
+        response_format: dict | None,
+    ) -> str:
+        """Run one recorded turn against ``chat_messages``.
+
+        ``chat_messages`` must already have ``new_user_prompt`` appended
+        as the last user message; this helper only times the call,
+        records the turn on ``self.last_turns``, and returns the text.
+        """
+        t0 = time.monotonic()
+        response = await self._chat_async(
+            chat_messages, response_format=response_format
+        )
+        elapsed = time.monotonic() - t0
+        self.last_turns.append(
+            ThemeCoderTurn(
+                label=label,
+                system_prompt=system_prompt,
+                user_prompt=new_user_prompt,
+                response=response,
+                elapsed=elapsed,
+            )
+        )
+        return response
+
     # -- public API ----------------------------------------------------------
 
     async def develop_themes_async(
@@ -431,45 +484,53 @@ class ThemeCoderAgent(BaseAgent):
         5. Critic feedback injected into the original chat; model
            returns the final consolidated list.
 
-        Only step 5's response is parsed and returned.
+        Only step 5's response is parsed and returned. Each turn is
+        recorded on ``self.last_turns`` for debug callers.
         """
+        self.last_turns = []
         system_prompt = self.get_system_prompt()
+        initial_user = self._build_user_prompt(codebook, prompt)
         messages: list[Message] = [
             self._system(system_prompt),
-            self._user(self._build_user_prompt(codebook, prompt)),
+            self._user(initial_user),
         ]
 
-        initial = await self._chat_async(
-            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        initial = await self._run_turn(
+            "initial", system_prompt, initial_user,
+            messages, THEME_CODER_RESPONSE_SCHEMA,
         )
         messages.append(self._assistant(initial))
 
         messages.append(self._user(_ADDITIONAL_THEMES_PROMPT))
-        more1 = await self._chat_async(
-            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        more1 = await self._run_turn(
+            "additional_1", system_prompt, _ADDITIONAL_THEMES_PROMPT,
+            messages, THEME_CODER_RESPONSE_SCHEMA,
         )
         messages.append(self._assistant(more1))
 
         messages.append(self._user(_ADDITIONAL_THEMES_PROMPT))
-        more2 = await self._chat_async(
-            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+        more2 = await self._run_turn(
+            "additional_2", system_prompt, _ADDITIONAL_THEMES_PROMPT,
+            messages, THEME_CODER_RESPONSE_SCHEMA,
         )
         messages.append(self._assistant(more2))
 
+        critic_user = self._build_critic_user_prompt(
+            codebook, prompt, [initial, more1, more2]
+        )
         critic_messages: list[Message] = [
             self._system(_CRITIC_SYSTEM_PROMPT),
-            self._user(
-                self._build_critic_user_prompt(
-                    codebook, prompt, [initial, more1, more2]
-                )
-            ),
+            self._user(critic_user),
         ]
-        critique = await self._chat_async(critic_messages)
-
-        messages.append(
-            self._user(_FINAL_PROMPT_TEMPLATE.format(critique=critique))
+        critique = await self._run_turn(
+            "critic", _CRITIC_SYSTEM_PROMPT, critic_user,
+            critic_messages, None,
         )
-        final = await self._chat_async(
-            messages, response_format=THEME_CODER_RESPONSE_SCHEMA
+
+        final_user = _FINAL_PROMPT_TEMPLATE.format(critique=critique)
+        messages.append(self._user(final_user))
+        final = await self._run_turn(
+            "final", system_prompt, final_user,
+            messages, THEME_CODER_RESPONSE_SCHEMA,
         )
         return self._parse_response(final, codebook)
