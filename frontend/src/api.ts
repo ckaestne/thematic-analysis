@@ -4,18 +4,29 @@ export type Status = {
   db_path: string;
   db_size_bytes: number;
   research_context_set: boolean;
+  research_context_description: string;
+  latest_research_context_version: number | null;
   stage1: {
+    documents_total: number;
     segments_total: number;
     segments_by_status: Record<string, number>;
+    codes_total: number;
+    quotes_total: number;
+    themes_total: number;
     coders_total: number;
     coder_runs_total: number;
     coder_runs_by_status: Record<string, number>;
+    coding_queue_total: number;
+    coding_queue_by_status: Record<string, number>;
     aggregations_total: number;
     aggregations_by_status: Record<string, number>;
     review_decisions_total: number;
     review_decisions_applied: number;
     codebook_version: number;
     codebook_codes: number;
+    documents_by_coding_status: Record<string, number>;
+    reviews_pending: number;
+    reviews_completed_since_codebook: number;
   };
   per_coder: Array<{
     coder_id: string;
@@ -25,6 +36,56 @@ export type Status = {
     runs_running: number;
     runs_failed: number;
   }>;
+};
+
+export type CodebookPreviewSource = {
+  code_id: number;
+  code: string | null;
+  coder_id: number | null;
+  decision: string | null;
+  rationale: string | null;
+  segment_id: number | null;
+  document_id: number | null;
+  document_filename: string | null;
+};
+
+export type CodebookPreviewAdded = {
+  code_id: number;
+  code: string;
+  description: string;
+  coder_id: number;
+  n_quotes: number;
+  change: "new" | "merge" | "added";
+  sources: CodebookPreviewSource[];
+};
+
+export type CodebookPreviewRemoved = {
+  code_id: number;
+  code: string;
+  description: string;
+  coder_id: number;
+  n_quotes: number;
+};
+
+export type CodebookPreview = {
+  parent_version: number | null;
+  added: CodebookPreviewAdded[];
+  removed: CodebookPreviewRemoved[];
+  unchanged_count: number;
+  has_changes: boolean;
+};
+
+export type RecentCode = {
+  code_id: number;
+  code: string;
+  description: string;
+  coder_id: number;
+  coder_identity: string | null;
+  kind: "coder" | "aggregation" | "review";
+  codebook_used_id: number;
+  segment_id: number | null;
+  document_id: number | null;
+  document_filename: string | null;
 };
 
 export type ResearchContext = {
@@ -444,6 +505,9 @@ async function jsonFetch<T>(
 
 export const api = {
   status: () => jsonFetch<Status>("/api/status"),
+  recentCodes: (limit: number = 20) =>
+    jsonFetch<RecentCode[]>(`/api/recent-codes?limit=${limit}`),
+  codebookPreview: () => jsonFetch<CodebookPreview>("/api/codebook-preview"),
 
   researchContext: () =>
     jsonFetch<ResearchContext | null>("/api/research-context"),
