@@ -8,6 +8,7 @@ import {
   IconFlag,
   IconLayoutDashboard,
   IconListDetails,
+  IconProgressCheck,
   IconUsers,
 } from "@tabler/icons-react";
 import { NavLink as RouterLink, useLocation } from "react-router-dom";
@@ -40,6 +41,11 @@ const navGroups: NavGroup[] = [
     label: "Phase 1",
     items: [
       { to: "/coders", label: "Coders", icon: IconUsers },
+      {
+        to: "/coding-progress",
+        label: "Coding progress",
+        icon: IconProgressCheck,
+      },
       { to: "/codebook", label: "Codebook", icon: IconBook2 },
     ],
   },

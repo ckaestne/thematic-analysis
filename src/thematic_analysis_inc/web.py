@@ -270,10 +270,17 @@ def create_app(db_path: str | Path) -> FastAPI:
             "db_path": str(_DB_PATH),
             "db_size_bytes": db_size,
             "research_context_set": ctx is not None,
+            "research_context_description": (
+                ctx.description if ctx is not None else ""
+            ),
             "latest_research_context_version": latest_rc_version,
             "stage1": {
+                "documents_total": s1.documents_total,
                 "segments_total": s1.segments_total,
                 "segments_by_status": s1.segments_by_status,
+                "codes_total": s1.codes_total,
+                "quotes_total": s1.quotes_total,
+                "themes_total": s1.themes_total,
                 "coders_total": s1.coders_total,
                 "coding_queue_total": s1.coding_queue_total,
                 "coding_queue_by_status": s1.coding_queue_by_status,
@@ -283,6 +290,11 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "review_decisions_by_kind": s1.review_decisions_by_kind,
                 "codebook_version": s1.codebook_version,
                 "codebook_codes": s1.codebook_codes,
+                "documents_by_coding_status": s1.documents_by_coding_status,
+                "reviews_pending": s1.reviews_pending,
+                "reviews_completed_since_codebook": (
+                    s1.reviews_completed_since_codebook
+                ),
                 # Legacy aliases the bundled SPA references.
                 "coder_runs_total": s1.coding_queue_total,
                 "coder_runs_by_status": s1.coding_queue_by_status,
@@ -301,6 +313,199 @@ def create_app(db_path: str | Path) -> FastAPI:
             },
             "per_coder": _coder_progress(),
         }
+
+    @app.get("/api/codebook-preview")
+    def get_codebook_preview() -> dict[str, Any]:
+        """Preview the next codebook revision without writing it.
+
+        Uses the same mechanism as ``materialize_codebook_revision``:
+        ``live_codes_for_batch(latest)`` is the effective membership the
+        next revision would have. Returns the *diff* against the latest
+        revision — codes that would be added (new reviewer codes) and
+        codes that would be removed (replaced by merges) — so the user
+        can see what the next codebook will look like.
+        """
+        _ensure_connected()
+        from sqlmodel import select
+        from thematic_analysis_inc.db.codebook import live_codes_for_batch
+        from thematic_analysis_inc.db.models import (
+            CodesDerived,
+            DERIVATION_REVIEW,
+            Document,
+            Segment,
+        )
+
+        latest = store.latest_codebook()
+        if latest is None:
+            return {
+                "parent_version": None,
+                "added": [],
+                "removed": [],
+                "unchanged_count": 0,
+                "has_changes": False,
+            }
+        parent_full = store.get_codebook_with_codes_and_research_context(
+            latest.version
+        )
+        if parent_full is None:
+            return {
+                "parent_version": latest.version,
+                "added": [],
+                "removed": [],
+                "unchanged_count": 0,
+                "has_changes": False,
+            }
+        parent_codes = list(parent_full.codes)
+
+        live = live_codes_for_batch(parent_full)
+        parent_ids = {c.code_id for c in parent_codes}
+        live_ids = {c.code_id for c in live}
+        added_ids = live_ids - parent_ids
+        removed_ids = parent_ids - live_ids
+        unchanged = len(parent_ids & live_ids)
+
+        live_by_id = {c.code_id: c for c in live}
+        parent_by_id = {c.code_id: c for c in parent_codes}
+
+        def _code_summary(c) -> dict[str, Any]:
+            return {
+                "code_id": c.code_id,
+                "code": c.code,
+                "description": c.description,
+                "coder_id": c.coder_id,
+                "n_quotes": len(c.supporting_quotes or []),
+            }
+
+        added: list[dict[str, Any]] = []
+        for cid in sorted(added_ids):
+            c = live_by_id[cid]
+            payload = _code_summary(c)
+            # Find R edges and pretty-print the source codes so the user
+            # can see which codes were merged into this one.
+            with store.session() as s:
+                edges = list(
+                    s.exec(
+                        select(CodesDerived).where(
+                            CodesDerived.new_code_id == cid,
+                            CodesDerived.derivation_type == DERIVATION_REVIEW,
+                        )
+                    ).all()
+                )
+                sources: list[dict[str, Any]] = []
+                for e in edges:
+                    src = s.get(store.Code, e.source_code_id)
+                    src_seg = (
+                        s.get(Segment, src.segment_id)
+                        if src is not None and src.segment_id
+                        else None
+                    )
+                    src_doc = (
+                        s.get(Document, src_seg.document_id)
+                        if src_seg is not None
+                        else None
+                    )
+                    sources.append(
+                        {
+                            "code_id": e.source_code_id,
+                            "code": src.code if src else None,
+                            "coder_id": src.coder_id if src else None,
+                            "decision": e.decision,
+                            "rationale": e.rationale,
+                            "segment_id": (
+                                src.segment_id if src else None
+                            ),
+                            "document_id": (
+                                src_seg.document_id if src_seg else None
+                            ),
+                            "document_filename": (
+                                src_doc.filename if src_doc else None
+                            ),
+                        }
+                    )
+                # Decision summary: "merge" if any 'M'/'U', else "new"
+                decisions = {e.decision for e in edges}
+                if decisions & {"M", "U"}:
+                    payload["change"] = "merge"
+                elif "A" in decisions:
+                    payload["change"] = "new"
+                else:
+                    payload["change"] = "added"
+                payload["sources"] = sources
+            added.append(payload)
+
+        removed: list[dict[str, Any]] = []
+        for cid in sorted(removed_ids):
+            c = parent_by_id.get(cid)
+            if c is None:
+                with store.session() as s:
+                    c = s.get(store.Code, cid)
+                    if c is not None:
+                        s.expunge(c)
+            if c is not None:
+                removed.append(_code_summary(c))
+
+        return {
+            "parent_version": latest.version,
+            "added": added,
+            "removed": removed,
+            "unchanged_count": unchanged,
+            "has_changes": bool(added or removed),
+        }
+
+    @app.get("/api/recent-codes")
+    def get_recent_codes(
+        limit: int = Query(default=20, ge=1, le=200),
+    ) -> list[dict[str, Any]]:
+        """Last N real (non-sentinel) Code rows, newest first. Each entry
+        carries enough metadata to render a row and link to /code/:id for
+        full lineage."""
+        _ensure_connected()
+        from sqlmodel import select
+        from thematic_analysis_inc.db.models import (
+            Code,
+            Coder,
+            Document,
+            Segment,
+            SENTINEL_CODE_LABEL,
+        )
+
+        out: list[dict[str, Any]] = []
+        with store.session() as s:
+            rows = list(
+                s.exec(
+                    select(Code)
+                    .where(Code.code != SENTINEL_CODE_LABEL)
+                    .order_by(Code.code_id.desc())  # type: ignore[union-attr]
+                    .limit(limit)
+                ).all()
+            )
+            for c in rows:
+                coder = s.get(Coder, c.coder_id)
+                seg = s.get(Segment, c.segment_id) if c.segment_id else None
+                doc = (
+                    s.get(Document, seg.document_id) if seg is not None else None
+                )
+                if c.coder_id == 0:
+                    kind = "aggregation"
+                elif c.coder_id == -1:
+                    kind = "review"
+                else:
+                    kind = "coder"
+                out.append(
+                    {
+                        "code_id": c.code_id,
+                        "code": c.code,
+                        "description": c.description,
+                        "coder_id": c.coder_id,
+                        "coder_identity": coder.identity if coder else None,
+                        "kind": kind,
+                        "codebook_used_id": c.codebook_used_id,
+                        "segment_id": c.segment_id,
+                        "document_id": seg.document_id if seg else None,
+                        "document_filename": doc.filename if doc else None,
+                    }
+                )
+        return out
 
     def _rc_payload(rc) -> dict[str, Any]:
         ctx = store.research_context_to_domain(rc)
