@@ -1157,29 +1157,31 @@ def _cmd_test_theme(args: SimpleNamespace) -> int:
         return 1
 
     themes = res["themes"]
-    if not themes:
-        print("(no themes returned)")
-    else:
-        for t in themes:
-            print(f"- {t.title!r}")
-            if t.description:
-                print(f"    description: {t.description}")
-            if t.rationale:
-                print(f"    rationale:   {t.rationale}")
-            print(f"    codes ({len(t.codes)}):")
-            for c in t.codes:
-                print(f"      [code_id={c.code_id}] {c.code}")
-            print(f"    supporting quotes ({len(t.supporting_quotes)}):")
-            for q in t.supporting_quotes:
-                text = (q.text or "").replace("\n", " ").strip()
-                if len(text) > 160:
-                    text = text[:157] + "..."
-                print(f"      [quote_id={q.quote_id}] \"{text}\"")
+    turns = res.get("turns") or []
 
-    print()
+    # Debug dump: every prompt + response in the five-step flow. The
+    # critic turn uses a different system prompt; collapse repeats so
+    # the trace stays readable.
+    prev_system: str | None = None
+    for i, turn in enumerate(turns, start=1):
+        print(f"===== turn {i}: {turn.label} ({turn.elapsed:.2f}s) =====")
+        print("----- system prompt -----")
+        if turn.system_prompt != prev_system:
+            print(turn.system_prompt)
+            prev_system = turn.system_prompt
+        else:
+            print("(same as previous turn)")
+        print("----- user prompt -----")
+        print(turn.user_prompt)
+        print("----- response -----")
+        print(turn.response)
+        print()
+
+    titles = ", ".join(repr(t.title) for t in themes) or "(none)"
     print(
         f"[test-theme] codebook=v{res['codebook_version']} "
-        f"themes={len(themes)} ({res['elapsed']:.1f}s) no DB writes"
+        f"themes={len(themes)} [{titles}] "
+        f"turns={len(turns)} ({res['elapsed']:.1f}s) no DB writes"
     )
     return 0
 

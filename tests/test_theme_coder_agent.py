@@ -308,3 +308,63 @@ def test_develop_themes_async_runs_five_step_flow_and_returns_final():
     # Only the final response is parsed and returned.
     assert [t.title for t in themes] == ["Final"]
     assert {q.quote_id for q in themes[0].supporting_quotes} == {11, 12, 13}
+
+
+def test_develop_themes_async_records_every_turn_on_last_turns():
+    cb = _codebook(
+        version=4,
+        codes=[
+            _code(1, "x", quotes=[_quote(11)]),
+            _code(2, "y", quotes=[_quote(12)]),
+        ],
+    )
+    agent = ThemeCoderAgent()
+
+    initial_resp = _resp([])
+    more1_resp = _resp([])
+    more2_resp = _resp([])
+    critique_text = "consolidate everything"
+    final_resp = _resp(
+        [{"title": "Final", "description": "", "rationale": "",
+          "code_ids": [1, 2], "quote_ids": []}]
+    )
+    responses = iter(
+        [initial_resp, more1_resp, more2_resp, critique_text, final_resp]
+    )
+
+    async def fake_chat(messages, response_format=None):
+        return next(responses)
+
+    with patch.object(agent, "_chat_async", side_effect=fake_chat):
+        asyncio.run(agent.develop_themes_async(cb, prompt="framing!"))
+
+    assert [t.label for t in agent.last_turns] == [
+        "initial", "additional_1", "additional_2", "critic", "final",
+    ]
+    assert [t.response for t in agent.last_turns] == [
+        initial_resp, more1_resp, more2_resp, critique_text, final_resp,
+    ]
+
+    # System prompts: theme coder for proposal/follow-up/final, critic for #4.
+    sys_per_turn = [t.system_prompt for t in agent.last_turns]
+    for i in (0, 1, 2, 4):
+        assert "theme coder" in sys_per_turn[i].lower()
+    assert "critical reviewer" in sys_per_turn[3].lower()
+
+    # User prompts: only the new message added that turn, not the whole chat.
+    users = [t.user_prompt for t in agent.last_turns]
+    assert "framing!" in users[0] and "version 4" in users[0]
+    assert users[1] == users[2]  # both follow-ups are the same prompt
+    assert "additional themes" in users[1].lower()
+    assert initial_resp in users[3] and more1_resp in users[3]
+    assert critique_text in users[4]
+
+    assert all(t.elapsed >= 0 for t in agent.last_turns)
+
+    # Re-running clears the prior trace rather than appending to it.
+    responses = iter(
+        [initial_resp, more1_resp, more2_resp, critique_text, final_resp]
+    )
+    with patch.object(agent, "_chat_async", side_effect=fake_chat):
+        asyncio.run(agent.develop_themes_async(cb, prompt=""))
+    assert len(agent.last_turns) == 5

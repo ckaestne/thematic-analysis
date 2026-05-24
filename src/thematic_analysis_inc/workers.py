@@ -692,7 +692,7 @@ def run_theme_coding_job(
     Raises ``ValueError`` if the pinned codebook revision is missing.
     Agent failures propagate; nothing is written on failure.
     """
-    themes = asyncio.run(
+    themes, _agent = asyncio.run(
         _run_theme_coder_async(
             job.codebook_used_id, job.prompt, agent_factory=agent_factory,
         )
@@ -719,7 +719,12 @@ async def _run_theme_coder_async(
     prompt: str,
     *,
     agent_factory: ThemeCoderFactory | None = None,
-) -> list[Theme]:
+) -> tuple[list[Theme], ThemeCoderAgent]:
+    """Build a theme coder agent, run it, return ``(themes, agent)``.
+
+    The agent is returned so dry-run callers can inspect its per-turn
+    debug state (``agent.last_turns``).
+    """
     codebook = db_codebook.get_codebook_with_codes_and_research_context(
         codebook_version
     )
@@ -734,7 +739,7 @@ async def _run_theme_coder_async(
     # case a test stub forgot.
     for t in themes:
         t.codebook_used_id = codebook.version
-    return themes
+    return themes, agent
 
 
 def run_pending_theme_coding_jobs(
@@ -765,11 +770,12 @@ def test_theme_code(
 ) -> dict:
     """Dry-run a theme coder against a codebook revision without writing
     anything to the DB. Returns a result dict with the transient
-    ``Theme`` rows the agent produced and timing info; the worker that
-    calls this is responsible for *not* persisting them.
+    ``Theme`` rows the agent produced, the per-turn debug trace
+    (``turns``), and timing info; the worker that calls this is
+    responsible for *not* persisting them.
     """
     t0 = time.monotonic()
-    themes = asyncio.run(
+    themes, agent = asyncio.run(
         _run_theme_coder_async(
             codebook_version, prompt, agent_factory=agent_factory,
         )
@@ -777,5 +783,6 @@ def test_theme_code(
     return {
         "codebook_version": codebook_version,
         "themes": themes,
+        "turns": list(getattr(agent, "last_turns", [])),
         "elapsed": time.monotonic() - t0,
     }
