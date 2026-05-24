@@ -289,17 +289,20 @@ def test_develop_themes_async_runs_five_step_flow_and_returns_final():
         assert len(calls[i]["messages"]) > len(calls[i - 1]["messages"])
 
     # Step 4: critic — fresh session with the critic system prompt and
-    # the merged theme list (no codebook, no turn boundaries). No JSON
-    # schema, since the critique is free-form.
+    # the merged theme list (no codebook header, no turn boundaries).
+    # No JSON schema, since the critique is free-form.
     assert "critical reviewer" in calls[3]["system"].lower()
     assert calls[3]["schema"] is None
     critic_user = calls[3]["last_user"]
-    assert "version 3" not in critic_user  # codebook is not included
+    assert "version 3" not in critic_user  # codebook header is not included
     # Themes from all three turns appear by title; turn headers do not.
     assert "T1" in critic_user
     assert "T2" in critic_user
     assert "turn 1" not in critic_user.lower()
     assert "turn 2" not in critic_user.lower()
+    # Inline codes/quotes give the critic enough context to interpret ids.
+    assert '"code": "x"' in critic_user
+    assert '"code": "y"' in critic_user
 
     # Step 5: final consolidation — back in the original chat with the
     # critique injected. Schema is on again; chat carries everything.
@@ -313,17 +316,34 @@ def test_develop_themes_async_runs_five_step_flow_and_returns_final():
     assert {q.quote_id for q in themes[0].supporting_quotes} == {11, 12, 13}
 
 
-def test_merge_theme_responses_flattens_across_turns_and_skips_garbage():
+def test_merge_theme_responses_inlines_codes_and_quotes_by_id():
+    cb = _codebook(
+        codes=[
+            _code(1, "isolation", quotes=[_quote(11, "alone")]),
+            _code(2, "support", quotes=[_quote(12, "they helped"),
+                                        _quote(13, "kind")]),
+            _code(3, "agency", quotes=[_quote(14, "I chose")]),
+        ],
+    )
     t1 = _resp([{"title": "A", "description": "", "rationale": "",
-                 "code_ids": [1], "quote_ids": []}])
-    t2 = "not json at all"
+                 "code_ids": [1], "quote_ids": [11]}])
+    t2 = "not json at all"  # skipped silently
     t3 = _resp([{"title": "B", "description": "", "rationale": "",
-                 "code_ids": [2], "quote_ids": []},
+                 # 99 is unknown — must be dropped.
+                 "code_ids": [2, 99], "quote_ids": [12, 13]},
                 {"title": "C", "description": "", "rationale": "",
-                 "code_ids": [3], "quote_ids": []}])
-    merged_str = ThemeCoderAgent._merge_theme_responses([t1, t2, t3])
+                 "code_ids": [3], "quote_ids": [14]}])
+    merged_str = ThemeCoderAgent._merge_theme_responses([t1, t2, t3], cb)
     merged = json.loads(merged_str)
     assert [t["title"] for t in merged["themes"]] == ["A", "B", "C"]
+    # Codes / quotes are inlined as {id, code} / {id, text} so the critic
+    # can read what each theme is about without the full codebook.
+    b = merged["themes"][1]
+    assert b["codes"] == [{"id": 2, "code": "support"}]
+    assert b["quotes"] == [
+        {"id": 12, "text": "they helped"},
+        {"id": 13, "text": "kind"},
+    ]
 
 
 def test_develop_themes_async_records_every_turn_on_last_turns():

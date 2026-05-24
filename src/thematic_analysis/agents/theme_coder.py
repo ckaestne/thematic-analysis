@@ -99,10 +99,11 @@ has proposed a set of themes. You do not see the underlying codebook
    or descriptive, themes that overlap and should be consolidated,
    and gaps where a deeper or more interpretive theme is warranted.
 
-Be concrete and constructive. Refer to themes by their titles. Your
-output is free-form feedback for the analyst — no JSON, no schema.
-Keep it focused and actionable; the analyst will use it to produce a
-final consolidated list."""
+Be concrete and constructive. Refer to themes by title and, where
+useful, to specific codes or quotes by their `id` from the inlined
+lists. Your output is free-form feedback for the analyst — no JSON,
+no schema. Keep it focused and actionable; the analyst will use it
+to produce a final consolidated list."""
 
 
 _FINAL_PROMPT_TEMPLATE = """\
@@ -307,6 +308,7 @@ class ThemeCoderAgent(BaseAgent):
 
     def _build_critic_user_prompt(
         self,
+        codebook: Codebook,
         prompt: str,
         prior_responses: list[str],
     ) -> str:
@@ -314,10 +316,11 @@ class ThemeCoderAgent(BaseAgent):
 
         The critic sees the researcher's framing plus the combined set
         of themes proposed across the analyst's three turns, merged
-        into one list. The codebook is not included — the critic is
-        asked to judge the themes on their own (relevance to the
-        research focus, analytic depth), not to re-ground them in the
-        underlying data.
+        into one list. Each theme is rewritten with inline ``codes``
+        and ``quotes`` objects (``{id, code}`` / ``{id, text}``) so
+        the critic can interpret what the analyst grouped together and
+        refer back to specific ids in its feedback — without dumping
+        the whole codebook into the prompt.
         """
         sections: list[str] = []
         framing = (prompt or "").strip()
@@ -326,26 +329,45 @@ class ThemeCoderAgent(BaseAgent):
                 _RESEARCHER_FRAMING_HEADER.format(framing=framing)
             )
 
-        merged = self._merge_theme_responses(prior_responses)
+        merged = self._merge_theme_responses(prior_responses, codebook)
         sections.append(
             "## Themes proposed by the analyst\n\n"
             "Below is the combined set of themes the analyst proposed "
-            "across several rounds, merged into one list. Review them "
-            "as a whole.\n\n"
+            "across several rounds, merged into one list. Each theme "
+            "lists the codes and quotes it draws on with their ids — "
+            "use those ids if you need to refer to specific codes or "
+            "quotes in your feedback. The full codebook is not shown.\n\n"
             f"```json\n{merged}\n```"
         )
         return "\n\n".join(sections)
 
     @staticmethod
-    def _merge_theme_responses(responses: list[str]) -> str:
+    def _merge_theme_responses(
+        responses: list[str], codebook: Codebook
+    ) -> str:
         """Flatten the analyst's per-turn JSON responses into one list.
 
-        Each response is expected to be ``{"themes": [...]}``. Items
-        from later turns are concatenated after earlier ones; turn
-        boundaries are not preserved. On parse failure for a given
-        turn, that turn is skipped — the merged list contains whatever
-        could be recovered from the well-formed turns.
+        Each response is expected to be ``{"themes": [...]}`` with
+        ``code_ids`` and ``quote_ids`` referencing the codebook. The
+        merged output rewrites those id lists as ``codes`` /
+        ``quotes`` arrays of ``{id, code}`` / ``{id, text}`` so the
+        critic can read what each theme is actually about. Items from
+        later turns are concatenated after earlier ones; turn
+        boundaries are not preserved. Unknown ids and malformed turns
+        are silently dropped.
         """
+        code_by_id: dict[int, Code] = {
+            c.code_id: c
+            for c in (codebook.codes or [])
+            if c.code_id is not None
+        }
+        quote_by_id: dict[int, Quote] = {
+            q.quote_id: q
+            for c in (codebook.codes or [])
+            for q in (c.supporting_quotes or [])
+            if q.quote_id is not None
+        }
+
         themes: list = []
         for raw in responses:
             json_str = extract_json_str(raw)
@@ -356,7 +378,27 @@ class ThemeCoderAgent(BaseAgent):
             except json.JSONDecodeError:
                 continue
             for t in data.get("themes", []) or []:
-                themes.append(t)
+                if not isinstance(t, dict):
+                    continue
+                codes = [
+                    {"id": cid, "code": code_by_id[cid].code}
+                    for cid in (t.get("code_ids") or [])
+                    if isinstance(cid, int) and cid in code_by_id
+                ]
+                quotes = [
+                    {"id": qid, "text": quote_by_id[qid].text}
+                    for qid in (t.get("quote_ids") or [])
+                    if isinstance(qid, int) and qid in quote_by_id
+                ]
+                themes.append(
+                    {
+                        "title": t.get("title", ""),
+                        "description": t.get("description", ""),
+                        "rationale": t.get("rationale", ""),
+                        "codes": codes,
+                        "quotes": quotes,
+                    }
+                )
         return json.dumps({"themes": themes}, indent=2)
 
     # -- response parsing ----------------------------------------------------
@@ -537,7 +579,7 @@ class ThemeCoderAgent(BaseAgent):
         messages.append(self._assistant(more2))
 
         critic_user = self._build_critic_user_prompt(
-            prompt, [initial, more1, more2]
+            codebook, prompt, [initial, more1, more2]
         )
         critic_messages: list[Message] = [
             self._system(_CRITIC_SYSTEM_PROMPT),
