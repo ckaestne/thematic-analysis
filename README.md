@@ -32,6 +32,25 @@ export LLM_API_KEY=your-api-key
 # optional: export LLM_BASE_URL=https://...
 ```
 
+### Per-task model overrides
+
+Each LLM-using task can be pointed at a different model / temperature /
+max output tokens. Task-specific vars override the global `LLM_MODEL` etc.;
+values explicitly passed in code or via the CLI still win over env.
+
+```bash
+# pick a stronger model for coding, a cheaper one for aggregation
+export LLM_MODEL_CODER=anthropic/claude-opus-4-7
+export LLM_MODEL_AGGREGATOR=anthropic/claude-haiku-4-5
+export LLM_TEMPERATURE_REVIEWER=0.2
+export LLM_MAX_TOKENS_THEME_CODER=8192
+export LLM_MODEL_SEGMENTER=gemini/gemini-2.5-pro
+export LLM_MODEL_TAILOR=anthropic/claude-sonnet-4-6
+```
+
+Recognised task names: `CODER`, `AGGREGATOR`, `REVIEWER`, `THEME_CODER`,
+`SEGMENTER`, `TAILOR` (research-context prompt generation).
+
 ## Pipeline (`ta`)
 
 A SQLite-backed pipeline that stores every intermediate result so each step

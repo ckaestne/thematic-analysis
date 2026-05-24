@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 class CoderConfig(AgentConfig):
     """Configuration for the Coder agent."""
 
+    task: str = "coder"
     max_codes_per_segment: int = 5
     include_6rs_guidance: bool = True
     custom_prompts: CoderPrompts | None = None

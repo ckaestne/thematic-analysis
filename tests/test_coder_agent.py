@@ -69,7 +69,11 @@ class TestCoderConfig:
     def test_default_config(self):
         config = CoderConfig()
         assert config.max_codes_per_segment == 5
-        assert config.temperature == 0.7
+        # task drives env-var lookup (LLM_MODEL_CODER etc.)
+        assert config.task == "coder"
+        # model/temperature/max_tokens default to None; concrete values are
+        # resolved from env vars (or fallbacks) when the LLM is created.
+        assert config.temperature is None
 
     def test_custom_config(self):
         config = CoderConfig(max_codes_per_segment=3)

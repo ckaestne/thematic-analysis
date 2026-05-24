@@ -15,6 +15,15 @@ from dataclasses import dataclass
 
 from openhands.sdk import LLM, Message, TextContent
 
+from thematic_analysis.llm_config import (
+    env_max_tokens,
+    env_model,
+    env_temperature,
+)
+
+
+_SEGMENTER_DEFAULT_MODEL = "gemini/gemini-2.5-flash-lite"
+
 
 _SYSTEM_PROMPT = (
     "You segment documents into topical sections for qualitative analysis. "
@@ -179,7 +188,7 @@ def _merge_short(
 def segment_by_llm(
     text: str,
     doc_id: str,
-    model: str = "gemini/gemini-2.5-flash-lite",
+    model: str | None = None,
     min_words: int = 50,
 ) -> list[TitledSegment]:
     """Segment a document via LLM-chosen boundaries.
@@ -187,9 +196,21 @@ def segment_by_llm(
     Returns titled segments sliced from the original text. The model
     never emits segment text; it only picks boundary line numbers and
     titles.
+
+    Model selection: explicit ``model`` arg > ``LLM_MODEL_SEGMENTER`` env >
+    built-in default.  ``LLM_TEMPERATURE_SEGMENTER`` and
+    ``LLM_MAX_TOKENS_SEGMENTER`` likewise override temperature (default 0.0)
+    and max output tokens.
     """
     numbered, lines = _number_lines(text)
-    llm = LLM(usage_id="segmenter", model=model, temperature=0.0)
+    effective_model = model or env_model("segmenter") or _SEGMENTER_DEFAULT_MODEL
+    temperature = env_temperature("segmenter")
+    if temperature is None:
+        temperature = 0.0
+    llm = LLM(usage_id="segmenter", model=effective_model, temperature=temperature)
+    max_tokens = env_max_tokens("segmenter")
+    if max_tokens is not None:
+        llm.max_output_tokens = max_tokens
     last_error: Exception | None = None
     for _attempt in range(3):
         response = llm.completion(
