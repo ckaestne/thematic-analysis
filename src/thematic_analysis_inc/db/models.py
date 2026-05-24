@@ -154,6 +154,7 @@ class ResearchContext(SQLModel, table=True):
     coder_prompt: Optional[str] = None
     coding_critic_prompt: Optional[str] = None
     reviewer_prompt: Optional[str] = None
+    theme_coder_prompt: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
