@@ -1299,6 +1299,7 @@ def create_app(db_path: str | Path) -> FastAPI:
             "code": c.code,
             "description": c.description,
             "coder_id": c.coder_id,
+            "n_quotes": len(c.supporting_quotes or []),
         }
 
     def _theme_summary(t) -> dict[str, Any]:
