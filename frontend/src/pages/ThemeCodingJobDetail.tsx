@@ -1,6 +1,9 @@
 import {
+  Alert,
   Anchor,
+  Badge,
   Breadcrumbs,
+  Button,
   Card,
   Code as CodeText,
   Group,
@@ -8,12 +11,25 @@ import {
   Text,
   Title,
 } from "@mantine/core";
+import { IconInfoCircle, IconPlayerPlay } from "@tabler/icons-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, type ThemeCodingJobRunStatus } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { ThemeCard } from "../components/ThemeCard";
 import { useConfirmDelete } from "../components/ConfirmDelete";
+
+const STATUS_LABEL: Record<ThemeCodingJobRunStatus, string> = {
+  not_run: "not run",
+  no_themes: "ran — no themes produced",
+  has_themes: "ran",
+};
+
+const STATUS_COLOR: Record<ThemeCodingJobRunStatus, string> = {
+  not_run: "yellow",
+  no_themes: "gray",
+  has_themes: "green",
+};
 
 export function ThemeCodingJobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -25,6 +41,15 @@ export function ThemeCodingJobDetailPage() {
     queryKey: ["theme-coding-job", jobId],
     queryFn: () => api.themeCodingJob(jobId),
     enabled: Number.isFinite(jobId),
+  });
+
+  const run = useMutation({
+    mutationFn: () => api.runThemeCodingJob(jobId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["theme-coding-job", jobId] });
+      qc.invalidateQueries({ queryKey: ["theme-coding-jobs"] });
+      qc.invalidateQueries({ queryKey: ["themes"] });
+    },
   });
 
   const del = useMutation({
@@ -64,7 +89,12 @@ export function ThemeCodingJobDetailPage() {
       <Card padding="md" withBorder>
         <Stack gap="xs">
           <Group justify="space-between" align="flex-start">
-            <Title order={3}>Job #{d.id}</Title>
+            <Group gap="xs">
+              <Title order={3}>Job #{d.id}</Title>
+              <Badge color={STATUS_COLOR[d.run_status]} variant="light">
+                {STATUS_LABEL[d.run_status]}
+              </Badge>
+            </Group>
             <Text size="xs" c="dimmed">
               {d.created_at?.slice(0, 19).replace("T", " ")}
             </Text>
@@ -94,54 +124,92 @@ export function ThemeCodingJobDetailPage() {
         </Stack>
       </Card>
 
-      <Group justify="space-between" align="flex-end">
-        <Title order={3}>Themes ({active.length})</Title>
-      </Group>
-
-      {active.length === 0 ? (
+      {d.run_status === "not_run" && (
         <Card padding="md" withBorder>
-          <Text c="dimmed" ta="center" py="md">
-            No active themes from this job.
-          </Text>
+          <Stack gap="sm">
+            <Text size="sm">
+              This job has not been run yet. Running it invokes the LLM
+              theme coder against codebook v{d.codebook_used_id}; the
+              call may take a minute.
+            </Text>
+            {run.error && <ErrorAlert error={run.error} />}
+            <Group>
+              <Button
+                leftSection={<IconPlayerPlay size={16} />}
+                loading={run.isPending}
+                onClick={() => run.mutate()}
+              >
+                Run now
+              </Button>
+            </Group>
+          </Stack>
         </Card>
-      ) : (
-        <Stack gap="sm">
-          {active.map((t) => (
-            <ThemeCard
-              key={t.theme_id}
-              theme={t}
-              onDelete={() =>
-                ask({
-                  title: "Delete theme?",
-                  body: (
-                    <>
-                      Mark <b>{t.title}</b> as deleted? It will move to the
-                      end of this page and disappear from the top-level
-                      Themes listing.
-                    </>
-                  ),
-                  onConfirm: () => del.mutateAsync(t.theme_id),
-                })
-              }
-            />
-          ))}
-        </Stack>
       )}
 
-      {deleted.length > 0 && (
+      {d.run_status === "no_themes" && (
+        <Alert
+          color="gray"
+          icon={<IconInfoCircle size={16} />}
+          title="No themes produced"
+        >
+          The theme coder ran against codebook v{d.codebook_used_id} but
+          did not return any themes. The empty result is recorded so the
+          job won't be picked up again by "run pending".
+        </Alert>
+      )}
+
+      {d.run_status === "has_themes" && (
         <>
-          <Title order={4} c="dimmed" mt="md">
-            Deleted ({deleted.length})
-          </Title>
-          <Stack gap="sm">
-            {deleted.map((t) => (
-              <ThemeCard
-                key={t.theme_id}
-                theme={t}
-                onRestore={() => restore.mutate(t.theme_id)}
-              />
-            ))}
-          </Stack>
+          <Group justify="space-between" align="flex-end">
+            <Title order={3}>Themes ({active.length})</Title>
+          </Group>
+
+          {active.length === 0 ? (
+            <Card padding="md" withBorder>
+              <Text c="dimmed" ta="center" py="md">
+                No active themes from this job (all have been deleted).
+              </Text>
+            </Card>
+          ) : (
+            <Stack gap="sm">
+              {active.map((t) => (
+                <ThemeCard
+                  key={t.theme_id}
+                  theme={t}
+                  onDelete={() =>
+                    ask({
+                      title: "Delete theme?",
+                      body: (
+                        <>
+                          Mark <b>{t.title}</b> as deleted? It will move to
+                          the end of this page and disappear from the
+                          top-level Themes listing.
+                        </>
+                      ),
+                      onConfirm: () => del.mutateAsync(t.theme_id),
+                    })
+                  }
+                />
+              ))}
+            </Stack>
+          )}
+
+          {deleted.length > 0 && (
+            <>
+              <Title order={4} c="dimmed" mt="md">
+                Deleted ({deleted.length})
+              </Title>
+              <Stack gap="sm">
+                {deleted.map((t) => (
+                  <ThemeCard
+                    key={t.theme_id}
+                    theme={t}
+                    onRestore={() => restore.mutate(t.theme_id)}
+                  />
+                ))}
+              </Stack>
+            </>
+          )}
         </>
       )}
       {modal}

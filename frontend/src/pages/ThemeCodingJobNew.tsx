@@ -100,14 +100,15 @@ export function ThemeCodingJobNewPage() {
       <Title order={2}>New theme coding job</Title>
 
       <Text c="dimmed" size="sm">
-        A theme coding job runs an LLM theme coder once over the chosen
-        codebook revision. The model receives every code in that revision —
-        with its description and supporting quotes — and proposes a small
-        set of overarching themes. Your prompt below is added to the user
-        message verbatim, in a clearly-delimited block, as the
-        researcher's framing for this specific run (study focus, persona,
-        special instructions). Each job is independent; running another
-        one does not modify earlier results.
+        A theme coding job pins a codebook revision and a researcher
+        prompt. Creating it here records those parameters but does not
+        invoke the LLM — you'll be sent to the job's page where you can
+        run it. (You can also run every pending job at once from the
+        list page.) When run, the model receives every code in the
+        pinned revision — with its description and supporting quotes —
+        and proposes a small set of overarching themes. Your prompt is
+        spliced into the user message verbatim, in a clearly-delimited
+        block, as the researcher's framing for this specific run.
       </Text>
 
       <Card padding="md" withBorder>
@@ -231,14 +232,9 @@ export function ThemeCodingJobNewPage() {
               loading={create.isPending}
               onClick={() => create.mutate()}
             >
-              Create and run
+              Create job
             </Button>
           </Group>
-          {create.isPending && (
-            <Text size="xs" c="dimmed">
-              The LLM call runs in-line; this may take a minute.
-            </Text>
-          )}
         </Stack>
       </Card>
     </Stack>

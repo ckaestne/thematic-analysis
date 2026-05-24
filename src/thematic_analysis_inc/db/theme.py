@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
+    SENTINEL_THEME_TITLE,
     SOURCE_JOB,
     SOURCE_MANUAL,
     Code,
@@ -55,6 +56,26 @@ def list_theme_coding_jobs() -> list[ThemeCodingJob]:
         rows = list(
             s.exec(
                 select(ThemeCodingJob).order_by(ThemeCodingJob.id)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+def list_unrun_theme_coding_jobs() -> list[ThemeCodingJob]:
+    """Jobs that have no `Theme` rows attributed to them — neither real
+    nor the sentinel saved by the worker when the agent returned
+    nothing. These are the jobs ``create-themes`` needs to run."""
+    with session() as s:
+        run_ids = select(Theme.theme_coding_job_id).where(
+            Theme.theme_coding_job_id.is_not(None)  # type: ignore[union-attr]
+        )
+        rows = list(
+            s.exec(
+                select(ThemeCodingJob)
+                .where(~ThemeCodingJob.id.in_(run_ids))  # type: ignore[union-attr]
+                .order_by(ThemeCodingJob.id)
             ).all()
         )
         for r in rows:
@@ -109,7 +130,9 @@ def get_theme(theme_id: int) -> Theme | None:
 
 
 def list_current_themes() -> list[Theme]:
-    """Themes that are not deleted and not folded into a derived theme."""
+    """Themes that are not deleted and not folded into a derived theme.
+    Sentinel themes (empty title — "the job ran but produced nothing")
+    are filtered out; they're worker-only book-keeping, not results."""
     with session() as s:
         src_ids = select(ThemesDerived.source_theme_id)
         rows = list(
@@ -117,6 +140,7 @@ def list_current_themes() -> list[Theme]:
                 select(Theme)
                 .where(
                     Theme.deleted == False,                  # noqa: E712
+                    Theme.title != SENTINEL_THEME_TITLE,
                     ~Theme.theme_id.in_(src_ids),
                 )
                 .order_by(Theme.theme_id)
@@ -133,23 +157,29 @@ def list_current_themes() -> list[Theme]:
         return rows
 
 
-def list_themes_for_job(job_id: int) -> list[Theme]:
-    """All themes (deleted or not) attributed to a job, ordered by id."""
+def list_themes_for_job(
+    job_id: int, *, include_sentinel: bool = False
+) -> list[Theme]:
+    """All themes attributed to a job, ordered by id. By default
+    excludes the sentinel row the worker writes when the agent returned
+    no themes; pass ``include_sentinel=True`` to see it (e.g. to detect
+    "this job already ran")."""
     with session() as s:
-        rows = list(
-            s.exec(
-                select(Theme)
-                .where(
-                    Theme.source == SOURCE_JOB,
-                    Theme.theme_coding_job_id == job_id,
-                )
-                .order_by(Theme.theme_id)
-                .options(
-                    selectinload(Theme.codes),               # type: ignore[arg-type]
-                    selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
-                )
-            ).all()
+        stmt = (
+            select(Theme)
+            .where(
+                Theme.source == SOURCE_JOB,
+                Theme.theme_coding_job_id == job_id,
+            )
+            .order_by(Theme.theme_id)
+            .options(
+                selectinload(Theme.codes),               # type: ignore[arg-type]
+                selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
+            )
         )
+        if not include_sentinel:
+            stmt = stmt.where(Theme.title != SENTINEL_THEME_TITLE)
+        rows = list(s.exec(stmt).all())
         for t in rows:
             _ = list(t.codes)
             _ = list(t.supporting_quotes)

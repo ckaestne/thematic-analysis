@@ -1325,15 +1325,31 @@ def create_app(db_path: str | Path) -> FastAPI:
             ],
         }
 
+    def _job_run_status(
+        all_themes: list, real_themes: list
+    ) -> str:
+        """Three-state job status used by the UI:
+        - "not_run":   no Theme rows at all for this job
+        - "no_themes": ran, but only sentinel — agent returned nothing
+        - "has_themes": ran and produced at least one real theme
+        """
+        if not all_themes:
+            return "not_run"
+        if not real_themes:
+            return "no_themes"
+        return "has_themes"
+
     @app.get("/api/theme-coding-jobs")
     def list_theme_coding_jobs() -> list[dict[str, Any]]:
         _ensure_connected()
+        from thematic_analysis_inc.db.models import is_sentinel_theme
         from thematic_analysis_inc.db.theme import list_themes_for_job
 
         out: list[dict[str, Any]] = []
         for job in store.list_theme_coding_jobs():
-            themes = list_themes_for_job(job.id)
-            n_active = sum(1 for t in themes if not t.deleted)
+            all_themes = list_themes_for_job(job.id, include_sentinel=True)
+            real_themes = [t for t in all_themes if not is_sentinel_theme(t)]
+            n_active = sum(1 for t in real_themes if not t.deleted)
             out.append(
                 {
                     "id": job.id,
@@ -1344,19 +1360,19 @@ def create_app(db_path: str | Path) -> FastAPI:
                         if job.created_at
                         else None
                     ),
-                    "n_themes": len(themes),
+                    "n_themes": len(real_themes),
                     "n_themes_active": n_active,
+                    "run_status": _job_run_status(all_themes, real_themes),
                 }
             )
         return out
 
     @app.post("/api/theme-coding-jobs")
     def create_theme_coding_job(body: ThemeCodingJobIn) -> dict[str, Any]:
-        """Create a job and synchronously run the theme coder against the
-        chosen codebook revision. Returns the new job + the produced
-        themes. May take a while — the LLM call is in-line."""
+        """Create a theme-coding job (codebook revision + researcher
+        prompt). The job is NOT run — call ``POST .../{id}/run`` or the
+        bulk ``POST .../run-pending`` endpoint to invoke the theme coder."""
         _ensure_connected()
-        from thematic_analysis_inc import workers
 
         if not body.prompt.strip():
             raise HTTPException(
@@ -1371,29 +1387,73 @@ def create_app(db_path: str | Path) -> FastAPI:
         job = store.add_theme_coding_job(
             codebook_used_id=body.codebook_version, prompt=body.prompt
         )
+        return {
+            "id": job.id,
+            "codebook_used_id": job.codebook_used_id,
+            "prompt": job.prompt,
+            "created_at": (
+                job.created_at.isoformat() if job.created_at else None
+            ),
+            "run_status": "not_run",
+        }
+
+    @app.post("/api/theme-coding-jobs/{job_id}/run")
+    def run_theme_coding_job_endpoint(job_id: int) -> dict[str, Any]:
+        """Synchronously run a single job. Refuses if it has already
+        been run (i.e. has any Theme rows). May take a while — the LLM
+        call is in-line."""
+        _ensure_connected()
+        from thematic_analysis_inc import workers
+        from thematic_analysis_inc.db.theme import list_themes_for_job
+
+        job = store.get_theme_coding_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        existing = list_themes_for_job(job_id, include_sentinel=True)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="job has already been run",
+            )
         try:
             themes = workers.run_theme_coding_job(job)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {
             "id": job.id,
-            "codebook_used_id": job.codebook_used_id,
-            "prompt": job.prompt,
-            "created_at": (
-                job.created_at.isoformat() if job.created_at else None
-            ),
             "n_themes": len(themes),
+            "run_status": "has_themes" if themes else "no_themes",
+        }
+
+    @app.post("/api/theme-coding-jobs/run-pending")
+    def run_pending_theme_coding_jobs_endpoint() -> dict[str, Any]:
+        """Run every job that has not yet been run. Sequential."""
+        _ensure_connected()
+        from thematic_analysis_inc import workers
+
+        try:
+            results = workers.run_pending_theme_coding_jobs()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        n_themes = sum(len(themes) for _, themes in results)
+        n_empty = sum(1 for _, themes in results if not themes)
+        return {
+            "n_jobs_run": len(results),
+            "n_themes": n_themes,
+            "n_jobs_empty": n_empty,
         }
 
     @app.get("/api/theme-coding-jobs/{job_id}")
     def get_theme_coding_job(job_id: int) -> dict[str, Any]:
         _ensure_connected()
+        from thematic_analysis_inc.db.models import is_sentinel_theme
         from thematic_analysis_inc.db.theme import list_themes_for_job
 
         job = store.get_theme_coding_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
-        themes = list_themes_for_job(job_id)
+        all_themes = list_themes_for_job(job_id, include_sentinel=True)
+        real_themes = [t for t in all_themes if not is_sentinel_theme(t)]
         return {
             "id": job.id,
             "codebook_used_id": job.codebook_used_id,
@@ -1401,7 +1461,8 @@ def create_app(db_path: str | Path) -> FastAPI:
             "created_at": (
                 job.created_at.isoformat() if job.created_at else None
             ),
-            "themes": [_theme_full_payload(t) for t in themes],
+            "run_status": _job_run_status(all_themes, real_themes),
+            "themes": [_theme_full_payload(t) for t in real_themes],
         }
 
     @app.get("/api/theme-coding-jobs/meta/system-prompt")

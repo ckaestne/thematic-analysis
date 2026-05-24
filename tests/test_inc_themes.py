@@ -180,17 +180,31 @@ def test_add_theme_coding_job_with_unknown_codebook_fails_fk(
         store.add_theme_coding_job(codebook_used_id=999, prompt="…")
 
 
-def test_run_theme_coding_job_empty_result_persists_nothing(
+def test_run_theme_coding_job_empty_result_persists_sentinel(
     tmp_path: Path,
 ) -> None:
+    """When the agent returns no themes the worker writes a sentinel
+    Theme so we can tell "ran, produced nothing" from "not yet run"
+    (parallel to ``SENTINEL_CODE_LABEL`` in the coder pipeline)."""
     store.init_db(tmp_path / "x.sqlite")
     version = _seed_codebook_with_codes(n_codes=2)
     job = store.add_theme_coding_job(codebook_used_id=version, prompt="x")
     themes = workers.run_theme_coding_job(
         job, agent_factory=_stub_agent_factory([]),
     )
+    # Worker returns only real themes; the sentinel is internal.
     assert themes == []
+    # Default listing hides the sentinel — it's not a result theme.
     assert store.list_themes_for_job(job.id) == []
+    # But it IS persisted so the job is no longer "unrun".
+    from thematic_analysis_inc.db.models import is_sentinel_theme
+    all_for_job = store.list_themes_for_job(job.id, include_sentinel=True)
+    assert len(all_for_job) == 1
+    assert is_sentinel_theme(all_for_job[0])
+    # And the sentinel never appears in the current themes set.
+    assert store.list_current_themes() == []
+    # The job is no longer pending — "create-themes" would skip it.
+    assert store.list_unrun_theme_coding_jobs() == []
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +264,64 @@ def test_list_current_themes_excludes_deleted_and_derivation_sources(
         s.commit()
     current = store.list_current_themes()
     assert [t.title for t in current] == ["C"]
+
+
+def test_list_unrun_theme_coding_jobs_excludes_run_and_empty_jobs(
+    tmp_path: Path,
+) -> None:
+    """`create-themes` picks up only jobs with no Theme rows attached.
+    A job whose run produced no themes still gets a sentinel and is
+    therefore considered "run"."""
+    store.init_db(tmp_path / "x.sqlite")
+    version = _seed_codebook_with_codes(n_codes=2)
+
+    pending_a = store.add_theme_coding_job(codebook_used_id=version, prompt="a")
+    pending_b = store.add_theme_coding_job(codebook_used_id=version, prompt="b")
+    ran = store.add_theme_coding_job(codebook_used_id=version, prompt="c")
+    ran_empty = store.add_theme_coding_job(codebook_used_id=version, prompt="d")
+
+    workers.run_theme_coding_job(
+        ran,
+        agent_factory=_stub_agent_factory(
+            [{
+                "title": "T", "description": "", "rationale": "",
+                "code_indices": [0, 1], "quote_ids": [],
+            }]
+        ),
+    )
+    workers.run_theme_coding_job(
+        ran_empty, agent_factory=_stub_agent_factory([]),
+    )
+
+    pending_ids = {j.id for j in store.list_unrun_theme_coding_jobs()}
+    assert pending_ids == {pending_a.id, pending_b.id}
+
+
+def test_run_pending_theme_coding_jobs_runs_only_unrun(tmp_path: Path) -> None:
+    store.init_db(tmp_path / "x.sqlite")
+    version = _seed_codebook_with_codes(n_codes=2)
+    already = store.add_theme_coding_job(codebook_used_id=version, prompt="x")
+    workers.run_theme_coding_job(
+        already,
+        agent_factory=_stub_agent_factory(
+            [{
+                "title": "Old", "description": "", "rationale": "",
+                "code_indices": [0, 1], "quote_ids": [],
+            }]
+        ),
+    )
+    new_job = store.add_theme_coding_job(codebook_used_id=version, prompt="y")
+
+    results = workers.run_pending_theme_coding_jobs(
+        agent_factory=_stub_agent_factory(
+            [{
+                "title": "New", "description": "", "rationale": "",
+                "code_indices": [0, 1], "quote_ids": [],
+            }]
+        ),
+    )
+    assert [j.id for j, _ in results] == [new_job.id]
+    assert [t.title for _, themes in results for t in themes] == ["New"]
 
 
 def test_test_theme_code_dry_run_does_not_persist(tmp_path: Path) -> None:

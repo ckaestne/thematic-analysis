@@ -42,6 +42,7 @@ from thematic_analysis_inc.db.models import (
     DECISION_ADD,
     DECISION_MERGE,
     DECISION_MERGE_AND_RENAME,
+    SENTINEL_THEME_TITLE,
     SOURCE_JOB,
     Theme,
     ThemeCodingJob,
@@ -700,7 +701,9 @@ def run_theme_coding_job(
     Loads the codebook revision pinned by ``job``, hands it to a fresh
     ``ThemeCoderAgent`` together with ``job.prompt`` as the researcher's
     framing, then persists every returned theme (with its code + quote
-    links) in one transaction. Returns the persisted (detached) themes.
+    links) in one transaction. Returns the persisted (detached) real
+    themes — the sentinel placeholder written when the agent produced
+    nothing is for book-keeping only and is not returned.
 
     Raises ``ValueError`` if the pinned codebook revision is missing.
     Agent failures propagate; nothing is written on failure.
@@ -713,6 +716,17 @@ def run_theme_coding_job(
     for t in themes:
         t.source = SOURCE_JOB
         t.theme_coding_job_id = job.id
+    if not themes:
+        # Same idea as the coder sentinel: persist a marker so we can
+        # tell "job has not run yet" from "job ran, produced nothing".
+        sentinel = Theme(
+            codebook_used_id=job.codebook_used_id,
+            source=SOURCE_JOB,
+            theme_coding_job_id=job.id,
+            title=SENTINEL_THEME_TITLE,
+        )
+        db_themes.save_themes([sentinel])
+        return []
     return db_themes.save_themes(themes)
 
 
@@ -737,6 +751,26 @@ async def _run_theme_coder_async(
     for t in themes:
         t.codebook_used_id = codebook.version
     return themes
+
+
+def run_pending_theme_coding_jobs(
+    *,
+    agent_factory: ThemeCoderFactory | None = None,
+    on_event: Callable[[ThemeCodingJob, list[Theme]], None] | None = None,
+) -> list[tuple[ThemeCodingJob, list[Theme]]]:
+    """Run every theme-coding job that has no associated themes (real
+    or sentinel) yet, sequentially. Returns ``(job, themes)`` pairs.
+
+    Failures propagate after the in-flight job has been processed —
+    callers that want best-effort processing can catch and retry."""
+    pending = db_themes.list_unrun_theme_coding_jobs()
+    out: list[tuple[ThemeCodingJob, list[Theme]]] = []
+    for job in pending:
+        themes = run_theme_coding_job(job, agent_factory=agent_factory)
+        out.append((job, themes))
+        if on_event is not None:
+            on_event(job, themes)
+    return out
 
 
 def test_theme_code(

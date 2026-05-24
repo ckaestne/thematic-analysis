@@ -89,6 +89,17 @@ def is_sentinel_code(code: "Code") -> bool:
     return code.code == SENTINEL_CODE_LABEL
 
 
+# Same idea as `SENTINEL_CODE_LABEL` but for the Stage 2 theme coder:
+# distinguishes "job not yet run" from "job ran, agent produced no
+# themes" without consulting a queue. A real theme always has a
+# non-empty title.
+SENTINEL_THEME_TITLE = ""
+
+
+def is_sentinel_theme(theme: "Theme") -> bool:
+    return theme.title == SENTINEL_THEME_TITLE
+
+
 # ===========================================================================
 # Entities
 # ===========================================================================
@@ -629,6 +640,8 @@ __all__ = [
     "DECISION_MERGE_AND_RENAME",
     "SENTINEL_CODE_LABEL",
     "is_sentinel_code",
+    "SENTINEL_THEME_TITLE",
+    "is_sentinel_theme",
     "SOURCE_JOB",
     "SOURCE_AGGREGATOR",
     "SOURCE_MANUAL",
