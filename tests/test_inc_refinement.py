@@ -59,6 +59,7 @@ def _rc_row(description: str = "", coder_prompt: str | None = None):
         coder_prompt=coder_prompt,
         coding_critic_prompt=None,
         reviewer_prompt=None,
+        theme_coder_prompt=None,
     )
 
 

@@ -334,6 +334,64 @@ export type Coder = {
   created_at: string;
 };
 
+export type ThemeSource = "job" | "aggregator" | "manual";
+
+export type ThemeSummary = {
+  theme_id: number;
+  title: string;
+  description: string;
+  rationale: string;
+  source: ThemeSource;
+  theme_coding_job_id: number | null;
+  codebook_used_id: number | null;
+  deleted: boolean;
+  created_at: string | null;
+  n_codes: number;
+  n_quotes: number;
+};
+
+export type ThemeCodeRef = {
+  code_id: number;
+  code: string;
+  description: string;
+  coder_id: number;
+};
+
+export type ThemeQuoteRef = {
+  quote_id: number;
+  text: string;
+  segment_id: number | null;
+  document_id: number | null;
+  document_filename: string | null;
+};
+
+export type ThemeFull = ThemeSummary & {
+  codes: ThemeCodeRef[];
+  quotes: ThemeQuoteRef[];
+};
+
+export type ThemeDetail = ThemeFull & {
+  derived_from: ThemeSummary[];
+  derived_into: ThemeSummary[];
+};
+
+export type ThemeCodingJobSummary = {
+  id: number;
+  codebook_used_id: number;
+  prompt: string;
+  created_at: string | null;
+  n_themes: number;
+  n_themes_active: number;
+};
+
+export type ThemeCodingJobDetail = {
+  id: number;
+  codebook_used_id: number;
+  prompt: string;
+  created_at: string | null;
+  themes: ThemeFull[];
+};
+
 async function jsonFetch<T>(
   url: string,
   init?: RequestInit,
@@ -557,6 +615,48 @@ export const api = {
     jsonFetch<CodebookVersionDetail>(`/api/codebook/versions/${v}`),
 
   code: (id: number) => jsonFetch<CodeDetail>(`/api/codes/${id}`),
+
+  themeCodingJobs: () =>
+    jsonFetch<ThemeCodingJobSummary[]>("/api/theme-coding-jobs"),
+  createThemeCodingJob: (body: { codebook_version: number; prompt: string }) =>
+    jsonFetch<{
+      id: number;
+      codebook_used_id: number;
+      prompt: string;
+      created_at: string | null;
+      n_themes: number;
+    }>("/api/theme-coding-jobs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  themeCodingJob: (id: number) =>
+    jsonFetch<ThemeCodingJobDetail>(`/api/theme-coding-jobs/${id}`),
+  themeCoderSystemPrompt: () =>
+    jsonFetch<{
+      system_prompt: string;
+      user_framing_template: string;
+      user_codebook_template: string;
+    }>("/api/theme-coding-jobs/meta/system-prompt"),
+
+  themes: () => jsonFetch<ThemeFull[]>("/api/themes"),
+  theme: (id: number) => jsonFetch<ThemeDetail>(`/api/themes/${id}`),
+  createManualTheme: (body: {
+    title: string;
+    description: string;
+    rationale: string;
+  }) =>
+    jsonFetch<ThemeSummary>("/api/themes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteTheme: (id: number) =>
+    jsonFetch<{ deleted: boolean }>(`/api/themes/${id}`, {
+      method: "DELETE",
+    }),
+  restoreTheme: (id: number) =>
+    jsonFetch<{ deleted: boolean }>(`/api/themes/${id}/restore`, {
+      method: "POST",
+    }),
   similarCodes: (id: number, top_k: number = 30) =>
     jsonFetch<{
       codebook_version: number | null;

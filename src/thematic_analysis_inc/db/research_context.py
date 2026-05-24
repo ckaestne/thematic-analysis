@@ -36,6 +36,7 @@ _ROLE_TO_ATTR: dict[str, str] = {
     "coder": "coder_prompt",
     "coding_critic": "coding_critic_prompt",
     "reviewer": "reviewer_prompt",
+    "theme_coder": "theme_coder_prompt",
 }
 
 
@@ -64,6 +65,7 @@ def _from_domain(ctx: DomainResearchContext) -> ResearchContext:
         coder_prompt=ctx.tailored_prompts.get("coder") or None,
         coding_critic_prompt=ctx.tailored_prompts.get("coding_critic") or None,
         reviewer_prompt=ctx.tailored_prompts.get("reviewer") or None,
+        theme_coder_prompt=ctx.tailored_prompts.get("theme_coder") or None,
     )
 
 

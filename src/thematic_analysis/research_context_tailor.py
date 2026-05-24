@@ -54,6 +54,20 @@ _ROLE_BRIEFS: dict[str, str] = {
         "question(s) vs. off-topic; how to spot codes that are merely "
         "descriptive of the segment rather than analytically relevant."
     ),
+    "theme_coder": (
+        "The downstream agent is a *theme coder*. It reads the entire "
+        "finished codebook (every code, its description, and the quotes "
+        "that support it) in one pass and proposes a small set of "
+        "overarching themes — patterns of meaning that organise the codes "
+        "into a coherent answer to the research question(s). A theme is "
+        "not a topic heading or a bucket of related codes; it is a "
+        "pattern organised around a central concept that says something "
+        "analytically interesting about the data with respect to the "
+        "research focus. Emphasise what counts as a meaningful pattern "
+        "*for this study*, which kinds of relationships between codes are "
+        "worth surfacing as themes, and any study-specific framing the "
+        "theme coder should adopt when interpreting the codebook."
+    ),
 }
 
 
