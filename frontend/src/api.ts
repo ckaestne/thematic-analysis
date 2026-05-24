@@ -484,6 +484,28 @@ export const api = {
         };
       }),
     })),
+  uploadDocument: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return fetch("/api/documents", { method: "POST", body: form }).then(
+      async (res) => {
+        if (!res.ok) {
+          let detail = `${res.status} ${res.statusText}`;
+          try {
+            const body = await res.json();
+            if (body && typeof body.detail === "string") detail = body.detail;
+          } catch { /* ignore */ }
+          throw new Error(detail);
+        }
+        return res.json() as Promise<{
+          document_id: number;
+          filename: string;
+          created_at: string | null;
+          segments_total: number;
+        }>;
+      },
+    );
+  },
   deleteDocument: (id: number) =>
     jsonFetch(`/api/documents/${id}`, { method: "DELETE" }),
   enqueueDocument: (id: number) =>

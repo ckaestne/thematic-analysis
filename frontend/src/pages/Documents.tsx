@@ -20,9 +20,10 @@ import {
   IconChevronUp,
   IconChevronDown,
   IconSelector,
+  IconUpload,
 } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { notifications } from "@mantine/notifications";
 import { api, type Document } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
@@ -144,6 +145,7 @@ export function Documents() {
     queryFn: api.documents,
   });
   const confirm = useConfirmDelete();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [sort, setSort] = useState<SortState>({
     key: "document_id",
     dir: "asc",
@@ -175,6 +177,23 @@ export function Documents() {
     mutationFn: (id: number) => api.deleteDocument(id),
     onSuccess: () => {
       notifications.show({ message: "Document deleted", color: "teal" });
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      qc.invalidateQueries({ queryKey: ["status"] });
+    },
+    onError: (e) =>
+      notifications.show({
+        message: e instanceof Error ? e.message : String(e),
+        color: "red",
+      }),
+  });
+
+  const upload = useMutation({
+    mutationFn: (file: File) => api.uploadDocument(file),
+    onSuccess: (res) => {
+      notifications.show({
+        message: `Uploaded "${res.filename}" — ${res.segments_total} segment${res.segments_total === 1 ? "" : "s"} created`,
+        color: "teal",
+      });
       qc.invalidateQueries({ queryKey: ["documents"] });
       qc.invalidateQueries({ queryKey: ["status"] });
     },
@@ -237,16 +256,39 @@ export function Documents() {
       {confirm.modal}
       <Group justify="space-between">
         <Title order={2}>Documents</Title>
-        <Tooltip label="Pick 10 random documents that have never been enqueued and queue every segment for all coders">
-          <Button
-            variant="light"
-            leftSection={<IconDice size={16} />}
-            loading={enqueueRandom.isPending}
-            onClick={() => enqueueRandom.mutate()}
-          >
-            Enqueue 10 random
-          </Button>
-        </Tooltip>
+        <Group gap="xs">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.text"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) upload.mutate(file);
+              e.target.value = "";
+            }}
+          />
+          <Tooltip label="Upload a plain-text or Markdown file; it will be split into paragraph-based segments">
+            <Button
+              variant="light"
+              leftSection={<IconUpload size={16} />}
+              loading={upload.isPending}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Upload document
+            </Button>
+          </Tooltip>
+          <Tooltip label="Pick 10 random documents that have never been enqueued and queue every segment for all coders">
+            <Button
+              variant="light"
+              leftSection={<IconDice size={16} />}
+              loading={enqueueRandom.isPending}
+              onClick={() => enqueueRandom.mutate()}
+            >
+              Enqueue 10 random
+            </Button>
+          </Tooltip>
+        </Group>
       </Group>
       <Card padding={0}>
         <Table verticalSpacing="sm" highlightOnHover>
