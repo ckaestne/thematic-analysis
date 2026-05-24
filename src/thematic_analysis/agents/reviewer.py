@@ -69,7 +69,9 @@ The user message is a JSON object:
 - **merge_and_rename**: same as merge, but neither the existing label nor the
   new label is a good fit — propose a more representative label that captures
   both. Set `target_code` to the existing code's label and `new_label` to your
-  proposed name.
+  proposed name. Avoid labels that are simply an AND connection between two ,
+  distinct concepts; in that case prefer to add new codes. 
+  
 
 ## Output Format
 Respond with a single JSON object:
