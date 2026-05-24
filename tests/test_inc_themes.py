@@ -74,7 +74,7 @@ def _stub_agent_factory(themes_payload):
     """
 
     class _StubAgent:
-        def develop_themes(self, codebook, prompt):
+        async def develop_themes_async(self, codebook, prompt):
             out: list[Theme] = []
             for spec in themes_payload:
                 codes = [codebook.codes[i] for i in spec["code_indices"]]
@@ -249,6 +249,29 @@ def test_list_current_themes_excludes_deleted_and_derivation_sources(
         s.commit()
     current = store.list_current_themes()
     assert [t.title for t in current] == ["C"]
+
+
+def test_test_theme_code_dry_run_does_not_persist(tmp_path: Path) -> None:
+    store.init_db(tmp_path / "x.sqlite")
+    version = _seed_codebook_with_codes(n_codes=2)
+
+    res = workers.test_theme_code(
+        version,
+        "framing X",
+        agent_factory=_stub_agent_factory(
+            [{
+                "title": "Dry T", "description": "", "rationale": "",
+                "code_indices": [0, 1], "quote_ids": [],
+            }]
+        ),
+    )
+
+    assert res["codebook_version"] == version
+    assert [t.title for t in res["themes"]] == ["Dry T"]
+    # No persisted themes anywhere.
+    assert store.list_current_themes() == []
+    # No theme_coding_job either — test-theme is a pure dry run.
+    assert store.list_theme_coding_jobs() == []
 
 
 def test_mark_theme_deleted_round_trip(tmp_path: Path) -> None:
