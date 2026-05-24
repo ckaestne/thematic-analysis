@@ -272,7 +272,7 @@ def test_code_one_persists_codes(tmp_path: Path) -> None:
     store.coding.enqueue_document(doc.document_id)
 
     res = workers.code_one(
-        conn, c.coder_id, use_mock_embeddings=True,
+        c.coder_id, use_mock_embeddings=True,
         agent_factory=_stub_factory(),
     )
     assert res is not None and res["ok"]
@@ -300,8 +300,8 @@ def test_code_one_returns_none_when_done(tmp_path: Path) -> None:
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
     store.coding.enqueue_document(doc.document_id)
-    workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
-    res = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
+    workers.code_one(c.coder_id, agent_factory=_stub_factory())
+    res = workers.code_one(c.coder_id, agent_factory=_stub_factory())
     assert res is None
 
 
@@ -312,7 +312,7 @@ def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
     sids = _add_segments(conn, doc, 1)
     store.coding.enqueue_document(doc.document_id)
     res = workers.code_one(
-        conn, c.coder_id,
+        c.coder_id,
         agent_factory=_stub_factory(raise_on=str(sids[0])),
     )
     assert res is not None and res["ok"] is False
@@ -325,7 +325,7 @@ def test_code_one_failure_records_error_in_queue(tmp_path: Path) -> None:
     # Reset failed → retry.
     cleared = store.coding.reset_failed_assignments(store.get_coder(c.coder_id))
     assert cleared == 1
-    res2 = workers.code_one(conn, c.coder_id, agent_factory=_stub_factory())
+    res2 = workers.code_one(c.coder_id, agent_factory=_stub_factory())
     assert res2 is not None and res2["ok"]
 
 
@@ -336,9 +336,9 @@ def test_code_one_two_coders_independent(tmp_path: Path) -> None:
     doc = _seed_document(conn)
     _add_segments(conn, doc, 2)
     store.coding.enqueue_document(doc.document_id)
-    while workers.code_one(conn, a.coder_id, agent_factory=_stub_factory()) is not None:
+    while workers.code_one(a.coder_id, agent_factory=_stub_factory()) is not None:
         pass
-    while workers.code_one(conn, b.coder_id, agent_factory=_stub_factory()) is not None:
+    while workers.code_one(b.coder_id, agent_factory=_stub_factory()) is not None:
         pass
     rows = conn.execute(
         "SELECT coder_id, COUNT(*) AS n FROM coding_queue "

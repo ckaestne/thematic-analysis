@@ -142,7 +142,7 @@ def _seed_two_coders_done(conn, n: int = 1) -> list[int]:
     sids = _add_segments(conn, doc, n)
     store.coding.enqueue_document(doc.document_id)
     for c in store.list_coders():
-        while workers.code_one(conn, c.coder_id, agent_factory=_coder_factory()) is not None:
+        while workers.code_one(c.coder_id, agent_factory=_coder_factory()) is not None:
             pass
     return sids
 
@@ -159,11 +159,11 @@ def test_next_segment_requires_all_coders_done(tmp_path: Path) -> None:
     doc = _seed_document(conn)
     _add_segments(conn, doc, 1)
     store.coding.enqueue_document(doc.document_id)
-    workers.code_one(conn, a.coder_id, agent_factory=_coder_factory())
+    workers.code_one(a.coder_id, agent_factory=_coder_factory())
     assert store.aggregation.next_segment_to_aggregate() is None
     # finish bob too
     for c in store.list_coders():
-        while workers.code_one(conn, c.coder_id, agent_factory=_coder_factory()) is not None:
+        while workers.code_one(c.coder_id, agent_factory=_coder_factory()) is not None:
             pass
     row = store.aggregation.next_segment_to_aggregate()
     assert row is not None
@@ -179,7 +179,7 @@ def test_next_segment_none_with_no_coders(tmp_path: Path) -> None:
 def test_next_segment_excludes_already_aggregated(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_two_coders_done(conn, n=1)
-    workers.aggregate_one(conn, agent_factory=_agg_factory())
+    workers.aggregate_one(agent_factory=_agg_factory())
     assert store.aggregation.next_segment_to_aggregate() is None
     # Aggregator codes exist for this segment.
     assert store.aggregation.segment_has_aggregator_code(sids[0])
@@ -194,7 +194,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
     sids = _seed_two_coders_done(conn, n=1)
 
-    res = workers.aggregate_one(conn, agent_factory=_agg_factory())
+    res = workers.aggregate_one(agent_factory=_agg_factory())
     assert res is not None and res["ok"] is True
     assert res["n_new"] == 2
     assert res["n_in"] == 4  # 2 coders × 2 codes
@@ -230,7 +230,7 @@ def test_aggregate_one_persists_codes_and_provenance(tmp_path: Path) -> None:
 
 def test_aggregate_one_returns_none_when_idle(tmp_path: Path) -> None:
     conn = store.init_db(tmp_path / "x.sqlite")
-    assert workers.aggregate_one(conn, agent_factory=_agg_factory()) is None
+    assert workers.aggregate_one(agent_factory=_agg_factory()) is None
 
 
 def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
@@ -251,7 +251,7 @@ def test_aggregate_one_empty_result_marks_segment_done(tmp_path: Path) -> None:
                 )
             ]
 
-    res = workers.aggregate_one(conn, agent_factory=_Empty)
+    res = workers.aggregate_one(agent_factory=_Empty)
     assert res is not None and res["ok"]
     assert store.aggregation.segment_has_aggregator_code(sids[0])
     s = store.status.derive_segment_status(sids[0])
@@ -288,7 +288,7 @@ def test_coder_writes_sentinel_when_no_codes(tmp_path: Path) -> None:
     sids = _add_segments(conn, doc, 1)
     store.coding.enqueue_document(doc.document_id)
     res = workers.code_one(
-        conn, agent_factory=_empty_coder_factory()
+        agent_factory=_empty_coder_factory()
     )
     assert res is not None and res["ok"] is True
     rows = conn.execute(
@@ -307,13 +307,13 @@ def test_aggregator_emits_sentinel_when_all_coders_sentinel(tmp_path: Path) -> N
     store.coding.enqueue_document(doc.document_id)
     for c in store.list_coders():
         while workers.code_one(
-            conn, c.coder_id, agent_factory=_empty_coder_factory()
+            c.coder_id, agent_factory=_empty_coder_factory()
         ) is not None:
             pass
 
     # Real aggregator (no stub) — all inputs are sentinels, so the agent
     # short-circuits to its own sentinel without an LLM call.
-    res = workers.aggregate_one(conn)
+    res = workers.aggregate_one()
     assert res is not None and res["ok"] is True
     assert res.get("empty") is True
     # Aggregator sentinel persisted as a single empty-code row.
@@ -331,7 +331,7 @@ def test_drain_aggregate_processes_all_segments(tmp_path: Path) -> None:
     _seed_two_coders_done(conn, n=3)
 
     counters = workers.drain_aggregate(
-        conn, agent_factory=_agg_factory()
+        agent_factory=_agg_factory()
     )
     assert counters == {"done": 3, "failed": 0}
     n_agg_segments = conn.execute(
@@ -453,7 +453,7 @@ def test_aggregate_one_uses_codebook_version_from_db(tmp_path: Path) -> None:
     # Advance codebook — aggregate_one must still process the v1 work.
     _advance_codebook(conn)
 
-    res = workers.aggregate_one(conn, agent_factory=_agg_factory())
+    res = workers.aggregate_one(agent_factory=_agg_factory())
     assert res is not None and res["ok"] is True
     assert res["codebook_version"] == v1
 
@@ -484,7 +484,7 @@ def test_unaggregated_codebook_versions_for_segment(tmp_path: Path) -> None:
     assert versions == [v1, v2]
 
     # After aggregating v1, only v2 should remain.
-    workers.aggregate_one(conn, agent_factory=_agg_factory())
+    workers.aggregate_one(agent_factory=_agg_factory())
     versions = store.aggregation.unaggregated_codebook_versions_for_segment(sid)
     assert versions == [v2]
 
@@ -504,7 +504,7 @@ def test_aggregate_segment_processes_all_versions(tmp_path: Path) -> None:
     v2 = _advance_codebook(conn)
     _seed_segment_coded_at_version(conn, sid, [coder_a], v2)
 
-    results = workers.aggregate_segment(conn, sid, agent_factory=_agg_factory())
+    results = workers.aggregate_segment(sid, agent_factory=_agg_factory())
     assert len(results) == 2
     assert all(r["ok"] for r in results)
     processed_versions = {r["codebook_version"] for r in results}
