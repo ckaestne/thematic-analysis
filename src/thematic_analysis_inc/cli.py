@@ -642,12 +642,14 @@ def _cmd_review(args: SimpleNamespace) -> int:
 
 
 def _cmd_update_codebook(args: SimpleNamespace) -> int:
-    rc = _cmd_aggregate(args)
-    if rc:
-        return rc
-    rc = _cmd_review(args)
-    if rc:
-        return rc
+    if not getattr(args, "skip_aggregate", False):
+        rc = _cmd_aggregate(args)
+        if rc:
+            return rc
+    if not getattr(args, "skip_review", False):
+        rc = _cmd_review(args)
+        if rc:
+            return rc
     # Materialize one new Codebook revision capturing all reviewer
     # decisions written above (no-op if nothing changed).
     new_version = workers.finalize_codebook()
@@ -1581,6 +1583,20 @@ def _cli_update_codebook(
             help="use deterministic mock embeddings (testing / no-network)",
         ),
     ] = False,
+    skip_aggregate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-aggregate",
+            help="skip the aggregate step; use already-aggregated rows as-is",
+        ),
+    ] = False,
+    skip_review: Annotated[
+        bool,
+        typer.Option(
+            "--skip-review",
+            help="skip the review step; use already-reviewed rows as-is",
+        ),
+    ] = False,
 ) -> None:
     _run(
         ctx,
@@ -1588,6 +1604,8 @@ def _cli_update_codebook(
         limit=limit,
         retry_failed=retry_failed,
         mock_embeddings=mock_embeddings,
+        skip_aggregate=skip_aggregate,
+        skip_review=skip_review,
     )
 
 
