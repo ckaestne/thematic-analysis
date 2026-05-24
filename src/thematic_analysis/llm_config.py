@@ -72,6 +72,20 @@ def resolve_max_tokens(task: str, fallback: int | None = None) -> int:
     return fallback if fallback is not None else DEFAULT_MAX_TOKENS
 
 
+def llm_configured() -> tuple[bool, str | None]:
+    """Cheap pre-flight: does the environment have what the agents need
+    to call an LLM? Returns ``(ok, reason)`` — ``reason`` is a short
+    human-readable hint when ``ok`` is False, suitable for showing in
+    the web UI.
+
+    Only checks for an API key; model name has a built-in default so
+    its absence is not blocking.
+    """
+    if not os.environ.get("LLM_API_KEY"):
+        return False, "LLM_API_KEY environment variable is not set"
+    return True, None
+
+
 def ensure_llm_model_env() -> None:
     """Ensure ``LLM_MODEL`` is set so ``LLM.load_from_env()`` validation
     doesn't fail when the user hasn't configured one. Idempotent.

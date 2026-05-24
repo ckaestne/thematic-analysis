@@ -388,6 +388,29 @@ export type ThemeCodingJobSummary = {
   run_status: ThemeCodingJobRunStatus;
 };
 
+export type BackgroundRunnerStatus = {
+  running: boolean;
+  workers: number;
+  use_mock_embeddings: boolean;
+  batch_size: number;
+  started_at: number | null;
+  counters: {
+    coded: number;
+    aggregated: number;
+    reviewed: number;
+    failed: number;
+  };
+  last_event: null | {
+    kind: "coded" | "aggregated" | "reviewed";
+    ok: boolean;
+    at: number;
+    [k: string]: unknown;
+  };
+  last_error: string | null;
+  llm_configured: boolean;
+  llm_unavailable_reason: string | null;
+};
+
 export type ThemeCodingJobDetail = {
   id: number;
   codebook_used_id: number;
@@ -703,4 +726,20 @@ export const api = {
       },
     ),
   quote: (id: number) => jsonFetch<CodebookQuote>(`/api/quotes/${id}`),
+
+  backgroundRunner: () =>
+    jsonFetch<BackgroundRunnerStatus>("/api/background-runner"),
+  startBackgroundRunner: (body: {
+    workers: number;
+    use_mock_embeddings?: boolean;
+  }) =>
+    jsonFetch<BackgroundRunnerStatus & { started: boolean }>(
+      "/api/background-runner/start",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  stopBackgroundRunner: () =>
+    jsonFetch<BackgroundRunnerStatus & { stopped: boolean }>(
+      "/api/background-runner/stop",
+      { method: "POST", body: JSON.stringify({}) },
+    ),
 };
