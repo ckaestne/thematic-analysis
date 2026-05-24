@@ -85,11 +85,14 @@ from thematic_analysis_inc.db.status import (
     status_counts,
 )
 from thematic_analysis_inc.db.theme import (
+    add_manual_theme,
     add_theme_coding_job,
     get_theme,
     get_theme_coding_job,
     list_current_themes,
     list_theme_coding_jobs,
+    list_themes_derived_from,
+    list_themes_derived_into,
     list_themes_for_job,
     mark_theme_deleted,
     save_themes,
@@ -167,12 +170,15 @@ __all__ = [
     "StatusCounts",
     "status_counts",
     # themes
+    "add_manual_theme",
     "add_theme_coding_job",
     "get_theme_coding_job",
     "list_theme_coding_jobs",
     "save_themes",
     "get_theme",
     "list_current_themes",
+    "list_themes_derived_from",
+    "list_themes_derived_into",
     "list_themes_for_job",
     "mark_theme_deleted",
 ]

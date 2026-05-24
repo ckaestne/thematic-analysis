@@ -13,6 +13,7 @@ from sqlmodel import select
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
     SOURCE_JOB,
+    SOURCE_MANUAL,
     Code,
     Quote,
     Theme,
@@ -166,3 +167,77 @@ def mark_theme_deleted(theme_id: int, deleted: bool = True) -> bool:
         s.add(t)
         s.commit()
         return True
+
+
+def add_manual_theme(
+    title: str, description: str = "", rationale: str = ""
+) -> Theme:
+    """Insert a hand-curated theme (``source='manual'``) with no codes,
+    quotes, codebook pin, or job link. Returns the persisted row."""
+    t = Theme(
+        source=SOURCE_MANUAL,
+        title=title,
+        description=description,
+        rationale=rationale,
+    )
+    with session() as s:
+        s.add(t)
+        s.commit()
+        s.refresh(t)
+        # Touch the collection relationships so the caller can read them
+        # after expunge — they're empty for a manual theme but the
+        # payload helpers still call len() on them.
+        _ = list(t.codes)
+        _ = list(t.supporting_quotes)
+        s.expunge(t)
+        return t
+
+
+def list_themes_derived_into(theme_id: int) -> list[Theme]:
+    """Themes that have ``theme_id`` as one of their ``derived_from``
+    sources — i.e. forward lineage. Order: ascending theme id."""
+    with session() as s:
+        new_ids = list(
+            s.exec(
+                select(ThemesDerived.new_theme_id).where(
+                    ThemesDerived.source_theme_id == theme_id
+                )
+            ).all()
+        )
+        if not new_ids:
+            return []
+        rows = list(
+            s.exec(
+                select(Theme)
+                .where(Theme.theme_id.in_(new_ids))  # type: ignore[union-attr]
+                .order_by(Theme.theme_id)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows
+
+
+def list_themes_derived_from(theme_id: int) -> list[Theme]:
+    """Themes that ``theme_id`` was derived from — backward lineage.
+    Order: ascending source theme id."""
+    with session() as s:
+        src_ids = list(
+            s.exec(
+                select(ThemesDerived.source_theme_id).where(
+                    ThemesDerived.new_theme_id == theme_id
+                )
+            ).all()
+        )
+        if not src_ids:
+            return []
+        rows = list(
+            s.exec(
+                select(Theme)
+                .where(Theme.theme_id.in_(src_ids))  # type: ignore[union-attr]
+                .order_by(Theme.theme_id)
+            ).all()
+        )
+        for r in rows:
+            s.expunge(r)
+        return rows

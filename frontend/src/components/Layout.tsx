@@ -2,10 +2,12 @@ import { AppShell, Burger, Group, NavLink, ScrollArea, Text, Title } from "@mant
 import { useDisclosure } from "@mantine/hooks";
 import {
   IconBook2,
+  IconBulb,
   IconChartBar,
   IconFile,
   IconFlag,
   IconLayoutDashboard,
+  IconListDetails,
   IconUsers,
 } from "@tabler/icons-react";
 import { NavLink as RouterLink, useLocation } from "react-router-dom";
@@ -39,6 +41,17 @@ const navGroups: NavGroup[] = [
     items: [
       { to: "/coders", label: "Coders", icon: IconUsers },
       { to: "/codebook", label: "Codebook", icon: IconBook2 },
+    ],
+  },
+  {
+    label: "Phase 2",
+    items: [
+      {
+        to: "/theme-coding-jobs",
+        label: "Theme coding jobs",
+        icon: IconListDetails,
+      },
+      { to: "/themes", label: "Themes", icon: IconBulb },
     ],
   },
 ];

@@ -20,6 +20,7 @@ AGENT_ROLES: tuple[str, ...] = (
     "coder",
     "coding_critic",
     "reviewer",
+    "theme_coder",
 )
 
 

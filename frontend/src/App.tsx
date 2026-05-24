@@ -9,6 +9,11 @@ import { SegmentDetail } from "./pages/SegmentDetail";
 import { Coders } from "./pages/Coders";
 import { CodebookPage } from "./pages/Codebook";
 import { CodePage } from "./pages/Code";
+import { ThemeCodingJobsPage } from "./pages/ThemeCodingJobs";
+import { ThemeCodingJobNewPage } from "./pages/ThemeCodingJobNew";
+import { ThemeCodingJobDetailPage } from "./pages/ThemeCodingJobDetail";
+import { ThemesPage } from "./pages/Themes";
+import { ThemeDetailPage } from "./pages/ThemeDetail";
 
 export default function App() {
   return (
@@ -24,6 +29,17 @@ export default function App() {
         <Route path="/codebook" element={<CodebookPage />} />
         <Route path="/codebook/:version" element={<CodebookPage />} />
         <Route path="/code/:id" element={<CodePage />} />
+        <Route path="/theme-coding-jobs" element={<ThemeCodingJobsPage />} />
+        <Route
+          path="/theme-coding-jobs/new"
+          element={<ThemeCodingJobNewPage />}
+        />
+        <Route
+          path="/theme-coding-jobs/:id"
+          element={<ThemeCodingJobDetailPage />}
+        />
+        <Route path="/themes" element={<ThemesPage />} />
+        <Route path="/themes/:id" element={<ThemeDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppLayout>

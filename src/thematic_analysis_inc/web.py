@@ -68,6 +68,17 @@ class EnqueueIn(BaseModel):
     coder_ids: list[int] | None = None
 
 
+class ThemeCodingJobIn(BaseModel):
+    codebook_version: int
+    prompt: str
+
+
+class ManualThemeIn(BaseModel):
+    title: str
+    description: str = ""
+    rationale: str = ""
+
+
 def _coder_payload(c) -> dict[str, Any]:
     return {
         "coder_id": c.coder_id,
@@ -1261,6 +1272,212 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "derivation_sources": sources,
                 "in_codebook_versions": in_codebooks,
             }
+
+    # ── themes ───────────────────────────────────────────────────────────
+
+    def _theme_quote_payload(q) -> dict[str, Any]:
+        from thematic_analysis_inc.db.models import Document, Segment
+
+        with store.session() as s:
+            seg = s.get(Segment, q.segment_id) if q.segment_id else None
+            doc = (
+                s.get(Document, seg.document_id)
+                if seg is not None
+                else None
+            )
+            return {
+                "quote_id": q.quote_id,
+                "text": q.text,
+                "segment_id": q.segment_id,
+                "document_id": seg.document_id if seg else None,
+                "document_filename": doc.filename if doc else None,
+            }
+
+    def _theme_code_payload(c) -> dict[str, Any]:
+        return {
+            "code_id": c.code_id,
+            "code": c.code,
+            "description": c.description,
+            "coder_id": c.coder_id,
+        }
+
+    def _theme_summary(t) -> dict[str, Any]:
+        return {
+            "theme_id": t.theme_id,
+            "title": t.title,
+            "description": t.description,
+            "rationale": t.rationale,
+            "source": t.source,
+            "theme_coding_job_id": t.theme_coding_job_id,
+            "codebook_used_id": t.codebook_used_id,
+            "deleted": t.deleted,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "n_codes": len(t.codes or []),
+            "n_quotes": len(t.supporting_quotes or []),
+        }
+
+    def _theme_full_payload(t) -> dict[str, Any]:
+        return {
+            **_theme_summary(t),
+            "codes": [_theme_code_payload(c) for c in (t.codes or [])],
+            "quotes": [
+                _theme_quote_payload(q) for q in (t.supporting_quotes or [])
+            ],
+        }
+
+    @app.get("/api/theme-coding-jobs")
+    def list_theme_coding_jobs() -> list[dict[str, Any]]:
+        _ensure_connected()
+        from thematic_analysis_inc.db.theme import list_themes_for_job
+
+        out: list[dict[str, Any]] = []
+        for job in store.list_theme_coding_jobs():
+            themes = list_themes_for_job(job.id)
+            n_active = sum(1 for t in themes if not t.deleted)
+            out.append(
+                {
+                    "id": job.id,
+                    "codebook_used_id": job.codebook_used_id,
+                    "prompt": job.prompt,
+                    "created_at": (
+                        job.created_at.isoformat()
+                        if job.created_at
+                        else None
+                    ),
+                    "n_themes": len(themes),
+                    "n_themes_active": n_active,
+                }
+            )
+        return out
+
+    @app.post("/api/theme-coding-jobs")
+    def create_theme_coding_job(body: ThemeCodingJobIn) -> dict[str, Any]:
+        """Create a job and synchronously run the theme coder against the
+        chosen codebook revision. Returns the new job + the produced
+        themes. May take a while — the LLM call is in-line."""
+        _ensure_connected()
+        from thematic_analysis_inc import workers
+
+        if not body.prompt.strip():
+            raise HTTPException(
+                status_code=400, detail="prompt must not be empty"
+            )
+        cb = store.get_codebook(body.codebook_version)
+        if cb is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"codebook version {body.codebook_version} not found",
+            )
+        job = store.add_theme_coding_job(
+            codebook_used_id=body.codebook_version, prompt=body.prompt
+        )
+        try:
+            themes = workers.run_theme_coding_job(job)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            "id": job.id,
+            "codebook_used_id": job.codebook_used_id,
+            "prompt": job.prompt,
+            "created_at": (
+                job.created_at.isoformat() if job.created_at else None
+            ),
+            "n_themes": len(themes),
+        }
+
+    @app.get("/api/theme-coding-jobs/{job_id}")
+    def get_theme_coding_job(job_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        from thematic_analysis_inc.db.theme import list_themes_for_job
+
+        job = store.get_theme_coding_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        themes = list_themes_for_job(job_id)
+        return {
+            "id": job.id,
+            "codebook_used_id": job.codebook_used_id,
+            "prompt": job.prompt,
+            "created_at": (
+                job.created_at.isoformat() if job.created_at else None
+            ),
+            "themes": [_theme_full_payload(t) for t in themes],
+        }
+
+    @app.get("/api/theme-coding-jobs/meta/system-prompt")
+    def get_theme_coder_system_prompt() -> dict[str, Any]:
+        """Return the static system prompt the theme coder uses and the
+        template by which the researcher's framing is appended to the
+        user message — for display in the create-job UI."""
+        from thematic_analysis.agents.theme_coder import (
+            THEME_CODER_SYSTEM_PROMPT,
+            _CODEBOOK_HEADER,
+            _RESEARCHER_FRAMING_HEADER,
+        )
+
+        return {
+            "system_prompt": THEME_CODER_SYSTEM_PROMPT,
+            "user_framing_template": _RESEARCHER_FRAMING_HEADER,
+            "user_codebook_template": _CODEBOOK_HEADER,
+        }
+
+    @app.get("/api/themes")
+    def list_current_themes() -> list[dict[str, Any]]:
+        _ensure_connected()
+        return [_theme_full_payload(t) for t in store.list_current_themes()]
+
+    @app.post("/api/themes")
+    def create_manual_theme(body: ManualThemeIn) -> dict[str, Any]:
+        _ensure_connected()
+        from thematic_analysis_inc.db.theme import add_manual_theme
+
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(
+                status_code=400, detail="title must not be empty"
+            )
+        t = add_manual_theme(
+            title=title,
+            description=body.description,
+            rationale=body.rationale,
+        )
+        return _theme_summary(t)
+
+    @app.get("/api/themes/{theme_id}")
+    def get_theme_detail(theme_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        from thematic_analysis_inc.db.theme import (
+            list_themes_derived_from,
+            list_themes_derived_into,
+        )
+
+        t = store.get_theme(theme_id)
+        if t is None:
+            raise HTTPException(status_code=404, detail="theme not found")
+        derived_from = list_themes_derived_from(theme_id)
+        derived_into = list_themes_derived_into(theme_id)
+        return {
+            **_theme_full_payload(t),
+            "derived_from": [_theme_summary(x) for x in derived_from],
+            "derived_into": [_theme_summary(x) for x in derived_into],
+        }
+
+    @app.delete("/api/themes/{theme_id}")
+    def delete_theme(theme_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        ok = store.mark_theme_deleted(theme_id, True)
+        if not ok:
+            raise HTTPException(status_code=404, detail="theme not found")
+        return {"deleted": True}
+
+    @app.post("/api/themes/{theme_id}/restore")
+    def restore_theme(theme_id: int) -> dict[str, Any]:
+        _ensure_connected()
+        ok = store.mark_theme_deleted(theme_id, False)
+        if not ok:
+            raise HTTPException(status_code=404, detail="theme not found")
+        return {"deleted": False}
+
     # ── static SPA ───────────────────────────────────────────────────────
     static_dir = Path(__file__).parent / "web_static"
     if static_dir.exists() and (static_dir / "index.html").exists():

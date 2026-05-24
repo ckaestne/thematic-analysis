@@ -141,6 +141,18 @@ def _migrate_sqlmodel_tables(engine: Engine) -> None:
         if "embedding" not in code_cols:
             conn.exec_driver_sql("ALTER TABLE code ADD COLUMN embedding BLOB")
 
+        rc_cols = {
+            row[1]
+            for row in conn.exec_driver_sql(
+                "PRAGMA table_info('research_context')"
+            )
+        }
+        if "theme_coder_prompt" not in rc_cols:
+            conn.exec_driver_sql(
+                "ALTER TABLE research_context "
+                "ADD COLUMN theme_coder_prompt TEXT"
+            )
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open an autocommit sqlite3 connection AND set up the SQLAlchemy
