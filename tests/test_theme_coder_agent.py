@@ -216,38 +216,95 @@ def test_parse_empty_or_invalid_response_returns_empty():
 # --- public API integration via patched LLM ---------------------------------
 
 
-def test_develop_themes_async_calls_llm_and_returns_parsed():
+def _last_user_text(messages):
+    """Pull the text of the last user-role message in a Message list."""
+    for m in reversed(messages):
+        if m.role == "user":
+            return "".join(p.text for p in m.content)
+    return ""
+
+
+def _first_system_text(messages):
+    for m in messages:
+        if m.role == "system":
+            return "".join(p.text for p in m.content)
+    return ""
+
+
+def test_develop_themes_async_runs_five_step_flow_and_returns_final():
     cb = _codebook(
         version=3,
         codes=[
             _code(1, "x", quotes=[_quote(11)]),
             _code(2, "y", quotes=[_quote(12)]),
+            _code(3, "z", quotes=[_quote(13)]),
         ],
     )
     agent = ThemeCoderAgent()
-    captured: dict = {}
 
-    async def fake_call(system_prompt, user_prompt, response_format=None):
-        captured["system"] = system_prompt
-        captured["user"] = user_prompt
-        captured["schema"] = response_format
-        return _resp(
-            [
-                {
-                    "title": "T", "description": "d", "rationale": "r",
-                    "code_ids": [1, 2], "quote_ids": [11, 12],
-                }
-            ]
-        )
+    initial_resp = _resp(
+        [{"title": "T1", "description": "", "rationale": "",
+          "code_ids": [1, 2], "quote_ids": []}]
+    )
+    more1_resp = _resp(
+        [{"title": "T2", "description": "", "rationale": "",
+          "code_ids": [2, 3], "quote_ids": []}]
+    )
+    more2_resp = _resp([])  # nothing new
+    critique_text = "Theme T1 overlaps with T2; consolidate."
+    final_resp = _resp(
+        [{"title": "Final", "description": "d", "rationale": "r",
+          "code_ids": [1, 2, 3], "quote_ids": [11, 12, 13]}]
+    )
 
-    with patch.object(agent, "_call_llm_async", side_effect=fake_call):
+    calls: list[dict] = []
+    responses = iter([initial_resp, more1_resp, more2_resp, critique_text, final_resp])
+
+    async def fake_chat(messages, response_format=None):
+        calls.append({
+            "messages": list(messages),
+            "schema": response_format,
+            "last_user": _last_user_text(messages),
+            "system": _first_system_text(messages),
+        })
+        return next(responses)
+
+    with patch.object(agent, "_chat_async", side_effect=fake_chat):
         themes = asyncio.run(
             agent.develop_themes_async(cb, prompt="be analytic")
         )
 
-    assert len(themes) == 1
-    # Per-run framing is in the user message, not the system prompt.
-    assert "be analytic" not in captured["system"]
-    assert "be analytic" in captured["user"]
-    assert "version 3" in captured["user"]
-    assert captured["schema"] is not None
+    assert len(calls) == 5
+    # Step 1: initial themes — theme coder system prompt + codebook in user.
+    assert "theme coder" in calls[0]["system"].lower()
+    assert "be analytic" in calls[0]["last_user"]
+    assert "version 3" in calls[0]["last_user"]
+    assert calls[0]["schema"] is not None
+
+    # Steps 2 and 3: follow-up "more themes?" in the same chat.
+    for i in (1, 2):
+        assert "additional themes" in calls[i]["last_user"].lower()
+        assert calls[i]["schema"] is not None
+        # Chat carries the codebook + prior turns: messages list grows.
+        assert len(calls[i]["messages"]) > len(calls[i - 1]["messages"])
+
+    # Step 4: critic — fresh session with the critic system prompt and
+    # all three prior responses in the user message. No JSON schema.
+    assert "critical reviewer" in calls[3]["system"].lower()
+    assert calls[3]["schema"] is None
+    critic_user = calls[3]["last_user"]
+    assert "version 3" in critic_user
+    assert initial_resp in critic_user
+    assert more1_resp in critic_user
+    assert more2_resp in critic_user
+
+    # Step 5: final consolidation — back in the original chat with the
+    # critique injected. Schema is on again; chat carries everything.
+    assert critique_text in calls[4]["last_user"]
+    assert "final" in calls[4]["last_user"].lower()
+    assert calls[4]["schema"] is not None
+    assert "theme coder" in calls[4]["system"].lower()
+
+    # Only the final response is parsed and returned.
+    assert [t.title for t in themes] == ["Final"]
+    assert {q.quote_id for q in themes[0].supporting_quotes} == {11, 12, 13}
