@@ -19,17 +19,13 @@ import { ErrorAlert } from "../components/ErrorAlert";
 const ROLE_LABELS: Record<string, string> = {
   coder: "Coder",
   coding_critic: "Coding critic",
-  theme_coder: "Theme coder",
   reviewer: "Reviewer",
-  theme_aggregator: "Theme aggregator",
 };
 
 const DEFAULT_ROLES = [
   "coder",
   "coding_critic",
-  "theme_coder",
   "reviewer",
-  "theme_aggregator",
 ];
 
 export function ResearchContextPage() {
@@ -175,8 +171,8 @@ export function ResearchContextPage() {
           </Group>
           <Text size="sm" c="dimmed">
             Each role gets a prompt section authored for its specific job
-            (coding, theme building, review, aggregation). Generated from
-            the description above by an LLM; you can edit by hand.
+            (coding, critique, review). Generated from the description
+            above by an LLM; you can edit by hand.
           </Text>
           <Accordion variant="separated" multiple>
             {roles.map((role) => (

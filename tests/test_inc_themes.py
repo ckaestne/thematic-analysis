@@ -166,17 +166,18 @@ def test_run_theme_coding_job_persists_themes_with_provenance(
         assert len(t.codes) == 2
 
 
-def test_run_theme_coding_job_missing_codebook_raises(tmp_path: Path) -> None:
+def test_add_theme_coding_job_with_unknown_codebook_fails_fk(
+    tmp_path: Path,
+) -> None:
+    """The FK on ``theme_coding_job.codebook_used_id`` rejects unknown
+    codebook versions at insert time, so the worker never sees the
+    'missing codebook' case for jobs it created itself."""
     store.init_db(tmp_path / "x.sqlite")
     import pytest
+    from sqlalchemy.exc import IntegrityError
 
-    job = store.add_theme_coding_job(
-        codebook_used_id=999, prompt="…",   # 999 doesn't exist
-    )
-    with pytest.raises(ValueError, match="codebook version 999"):
-        workers.run_theme_coding_job(
-            job, agent_factory=_stub_agent_factory([]),
-        )
+    with pytest.raises(IntegrityError):
+        store.add_theme_coding_job(codebook_used_id=999, prompt="…")
 
 
 def test_run_theme_coding_job_empty_result_persists_nothing(
