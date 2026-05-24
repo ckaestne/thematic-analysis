@@ -145,13 +145,17 @@ def list_current_themes() -> list[Theme]:
                 )
                 .order_by(Theme.theme_id)
                 .options(
-                    selectinload(Theme.codes),               # type: ignore[arg-type]
+                    selectinload(Theme.codes).selectinload(   # type: ignore[arg-type]
+                        Code.supporting_quotes
+                    ),
                     selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
                 )
             ).all()
         )
         for t in rows:
             _ = list(t.codes)
+            for c in t.codes:
+                _ = list(c.supporting_quotes)
             _ = list(t.supporting_quotes)
         s.expunge_all()
         return rows
@@ -173,7 +177,9 @@ def list_themes_for_job(
             )
             .order_by(Theme.theme_id)
             .options(
-                selectinload(Theme.codes),               # type: ignore[arg-type]
+                selectinload(Theme.codes).selectinload(   # type: ignore[arg-type]
+                    Code.supporting_quotes
+                ),
                 selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
             )
         )
@@ -182,6 +188,8 @@ def list_themes_for_job(
         rows = list(s.exec(stmt).all())
         for t in rows:
             _ = list(t.codes)
+            for c in t.codes:
+                _ = list(c.supporting_quotes)
             _ = list(t.supporting_quotes)
         s.expunge_all()
         return rows
