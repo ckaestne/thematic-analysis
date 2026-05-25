@@ -120,22 +120,55 @@ def derive_segment_status(segment: Segment | int) -> str:
 
 def segments_by_derived_status() -> dict[str, int]:
     """Bucket every Segment into the same status categories as
-    :func:`derive_segment_status`, in a handful of set-based queries.
+    :func:`derive_segment_status`, in one SQL round trip.
 
     Polled every few seconds by the dashboard, so per-segment iteration
-    is not affordable — keep this O(queries), not O(segments).
+    in Python is not affordable. The query builds a per-segment row of
+    queue/aggregator/reviewer counts (LEFT JOIN to ``coding_queue`` plus
+    two correlated scalar subqueries on ``code``) and applies the same
+    bucketing rules as :func:`derive_segment_status` via a ``CASE``,
+    then groups on that expression to return one count per status.
     """
-    with session() as s:
-        all_ids = {
-            int(sid) for sid in s.exec(select(Segment.segment_id)).all()  # type: ignore[arg-type]
-        }
-
-        # One row per segment that has any queue entries, aggregating
-        # the boolean conditions the bucketing rules need.
-        n_errored = func.sum(
-            case((CodingQueueEntry.error.is_not(None), 1), else_=0)  # type: ignore[union-attr]
+    outgoing_r = (
+        select(CodesDerived.source_code_id)
+        .where(
+            CodesDerived.source_code_id == Code.code_id,
+            CodesDerived.derivation_type == DERIVATION_REVIEW,
         )
-        n_in_flight = func.sum(
+        .exists()
+    )
+    n_agg = (
+        select(func.count())
+        .select_from(Code)
+        .where(
+            Code.segment_id == Segment.segment_id,
+            Code.coder_id == 0,
+        )
+        .correlate(Segment)
+        .scalar_subquery()
+    )
+    n_unreviewed = (
+        select(func.count())
+        .select_from(Code)
+        .where(
+            Code.segment_id == Segment.segment_id,
+            Code.coder_id == 0,
+            Code.code != SENTINEL_CODE_LABEL,
+            ~outgoing_r,
+        )
+        .correlate(Segment)
+        .scalar_subquery()
+    )
+
+    n_queue = func.count(CodingQueueEntry.segment_id)
+    n_errored = func.coalesce(
+        func.sum(
+            case((CodingQueueEntry.error.is_not(None), 1), else_=0)  # type: ignore[union-attr]
+        ),
+        0,
+    )
+    n_in_flight = func.coalesce(
+        func.sum(
             case(
                 (
                     (CodingQueueEntry.claimed_at.is_not(None))  # type: ignore[union-attr]
@@ -144,76 +177,58 @@ def segments_by_derived_status() -> dict[str, int]:
                 ),
                 else_=0,
             )
-        )
-        n_unclaimed = func.sum(
+        ),
+        0,
+    )
+    n_unclaimed = func.coalesce(
+        func.sum(
             case((CodingQueueEntry.claimed_at.is_(None), 1), else_=0)  # type: ignore[union-attr]
+        ),
+        0,
+    )
+
+    per_seg = (
+        select(
+            Segment.segment_id.label("sid"),
+            n_queue.label("n_queue"),
+            n_errored.label("n_errored"),
+            n_in_flight.label("n_in_flight"),
+            n_unclaimed.label("n_unclaimed"),
+            n_agg.label("n_agg"),
+            n_unreviewed.label("n_unreviewed"),
         )
-        queue_rows = list(
+        .select_from(Segment)
+        .outerjoin(
+            CodingQueueEntry,
+            CodingQueueEntry.segment_id == Segment.segment_id,
+        )
+        .group_by(Segment.segment_id)
+        .subquery()
+    )
+
+    status_expr = case(
+        (per_seg.c.n_queue == 0, "pending"),
+        (per_seg.c.n_errored > 0, "failed"),
+        (per_seg.c.n_in_flight > 0, "coding"),
+        (per_seg.c.n_unclaimed > 0, "pending"),
+        (per_seg.c.n_agg == 0, "aggregating"),
+        (per_seg.c.n_unreviewed > 0, "reviewing"),
+        else_="done",
+    )
+
+    with session() as s:
+        rows = list(
             s.exec(
-                select(
-                    CodingQueueEntry.segment_id,
-                    n_errored.label("n_errored"),
-                    n_in_flight.label("n_in_flight"),
-                    n_unclaimed.label("n_unclaimed"),
-                ).group_by(CodingQueueEntry.segment_id)  # type: ignore[arg-type]
+                select(status_expr.label("status"), func.count())
+                .select_from(per_seg)
+                .group_by(status_expr)
             ).all()
         )
-
-        agg_seg_ids = {
-            int(sid)
-            for sid in s.exec(
-                select(Code.segment_id)
-                .where(Code.coder_id == 0)
-                .distinct()
-            ).all()
-        }
-
-        outgoing_r = (
-            select(CodesDerived.source_code_id)
-            .where(
-                CodesDerived.source_code_id == Code.code_id,
-                CodesDerived.derivation_type == DERIVATION_REVIEW,
-            )
-            .exists()
-        )
-        unreviewed_seg_ids = {
-            int(sid)
-            for sid in s.exec(
-                select(Code.segment_id)
-                .where(
-                    Code.coder_id == 0,
-                    Code.code != SENTINEL_CODE_LABEL,
-                    ~outgoing_r,
-                )
-                .distinct()
-            ).all()
-        }
 
     out: dict[str, int] = {}
-    seen_with_queue: set[int] = set()
-    for row in queue_rows:
-        sid = int(row[0])
-        seen_with_queue.add(sid)
-        errored = int(row[1] or 0)
-        in_flight = int(row[2] or 0)
-        unclaimed = int(row[3] or 0)
-        if errored > 0:
-            st = "failed"
-        elif in_flight > 0:
-            st = "coding"
-        elif unclaimed > 0:
-            st = "pending"
-        elif sid not in agg_seg_ids:
-            st = "aggregating"
-        elif sid in unreviewed_seg_ids:
-            st = "reviewing"
-        else:
-            st = "done"
-        out[st] = out.get(st, 0) + 1
-
-    no_queue = len(all_ids - seen_with_queue)
-    if no_queue:
-        out["pending"] = out.get("pending", 0) + no_queue
+    for status_name, n in rows:
+        key = str(status_name)
+        out[key] = out.get(key, 0) + int(n)
     return out
 
 
