@@ -72,18 +72,79 @@ def resolve_max_tokens(task: str, fallback: int | None = None) -> int:
     return fallback if fallback is not None else DEFAULT_MAX_TOKENS
 
 
+# Provider prefix (as used by litellm model strings) → env vars that
+# litellm itself will pick up when ``LLM_API_KEY`` is not set. Empty
+# list means no key needed (e.g. local Ollama).
+PROVIDER_API_KEY_ENV: dict[str, list[str]] = {
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "openai": ["OPENAI_API_KEY"],
+    "azure": ["AZURE_API_KEY", "AZURE_OPENAI_API_KEY"],
+    "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    "vertex_ai": ["GOOGLE_APPLICATION_CREDENTIALS"],
+    "bedrock": ["AWS_ACCESS_KEY_ID"],
+    "groq": ["GROQ_API_KEY"],
+    "mistral": ["MISTRAL_API_KEY"],
+    "cohere": ["COHERE_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "together_ai": ["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"],
+    "deepseek": ["DEEPSEEK_API_KEY"],
+    "xai": ["XAI_API_KEY"],
+    "perplexity": ["PERPLEXITYAI_API_KEY"],
+    "fireworks_ai": ["FIREWORKS_API_KEY", "FIREWORKS_AI_API_KEY"],
+    "ollama": [],
+    "ollama_chat": [],
+}
+
+
+def _provider_from_model(model: str) -> str | None:
+    if "/" in model:
+        return model.split("/", 1)[0].lower()
+    return None
+
+
 def llm_configured() -> tuple[bool, str | None]:
     """Cheap pre-flight: does the environment have what the agents need
     to call an LLM? Returns ``(ok, reason)`` — ``reason`` is a short
     human-readable hint when ``ok`` is False, suitable for showing in
     the web UI.
 
-    Only checks for an API key; model name has a built-in default so
-    its absence is not blocking.
+    Accepts either the generic ``LLM_API_KEY`` (read by the OpenHands
+    SDK) or a provider-specific env var that litellm itself picks up
+    (e.g. ``ANTHROPIC_API_KEY``, ``GEMINI_API_KEY``,
+    ``OPENAI_API_KEY``). The set of provider keys checked is based on
+    the configured model's prefix.
     """
-    if not os.environ.get("LLM_API_KEY"):
-        return False, "LLM_API_KEY environment variable is not set"
-    return True, None
+    if os.environ.get("LLM_API_KEY"):
+        return True, None
+
+    model = resolve_model("default")
+    provider = _provider_from_model(model)
+    if provider is None:
+        return (
+            False,
+            "No API key found: set LLM_API_KEY or a provider-specific key "
+            "(e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY).",
+        )
+
+    candidates = PROVIDER_API_KEY_ENV.get(provider)
+    if candidates is None:
+        # Unknown provider — be permissive: any *_API_KEY in env passes.
+        if any(k.endswith("_API_KEY") and v for k, v in os.environ.items()):
+            return True, None
+        return (
+            False,
+            f"No API key found for provider '{provider}'. "
+            f"Set LLM_API_KEY or the provider's API key env var.",
+        )
+
+    if not candidates:
+        return True, None  # local provider, no key required
+
+    if any(os.environ.get(k) for k in candidates):
+        return True, None
+
+    names = " or ".join(candidates)
+    return False, f"No API key found: set LLM_API_KEY or {names}."
 
 
 def ensure_llm_model_env() -> None:

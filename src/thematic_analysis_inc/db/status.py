@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlmodel import select
 
 from thematic_analysis_inc.db.connection import session
@@ -119,21 +119,128 @@ def derive_segment_status(segment: Segment | int) -> str:
 
 
 def segments_by_derived_status() -> dict[str, int]:
-    out: dict[str, int] = {}
+    """Bucket every Segment into the same status categories as
+    :func:`derive_segment_status`, in a handful of set-based queries.
+
+    Polled every few seconds by the dashboard, so per-segment iteration
+    is not affordable — keep this O(queries), not O(segments).
+    """
     with session() as s:
-        ids = list(s.exec(select(Segment.segment_id)).all())  # type: ignore[arg-type]
-    for sid in ids:
-        st = derive_segment_status(sid)
+        all_ids = {
+            int(sid) for sid in s.exec(select(Segment.segment_id)).all()  # type: ignore[arg-type]
+        }
+
+        # One row per segment that has any queue entries, aggregating
+        # the boolean conditions the bucketing rules need.
+        n_errored = func.sum(
+            case((CodingQueueEntry.error.is_not(None), 1), else_=0)  # type: ignore[union-attr]
+        )
+        n_in_flight = func.sum(
+            case(
+                (
+                    (CodingQueueEntry.claimed_at.is_not(None))  # type: ignore[union-attr]
+                    & (CodingQueueEntry.finished_at.is_(None)),  # type: ignore[union-attr]
+                    1,
+                ),
+                else_=0,
+            )
+        )
+        n_unclaimed = func.sum(
+            case((CodingQueueEntry.claimed_at.is_(None), 1), else_=0)  # type: ignore[union-attr]
+        )
+        queue_rows = list(
+            s.exec(
+                select(
+                    CodingQueueEntry.segment_id,
+                    n_errored.label("n_errored"),
+                    n_in_flight.label("n_in_flight"),
+                    n_unclaimed.label("n_unclaimed"),
+                ).group_by(CodingQueueEntry.segment_id)  # type: ignore[arg-type]
+            ).all()
+        )
+
+        agg_seg_ids = {
+            int(sid)
+            for sid in s.exec(
+                select(Code.segment_id)
+                .where(Code.coder_id == 0)
+                .distinct()
+            ).all()
+        }
+
+        outgoing_r = (
+            select(CodesDerived.source_code_id)
+            .where(
+                CodesDerived.source_code_id == Code.code_id,
+                CodesDerived.derivation_type == DERIVATION_REVIEW,
+            )
+            .exists()
+        )
+        unreviewed_seg_ids = {
+            int(sid)
+            for sid in s.exec(
+                select(Code.segment_id)
+                .where(
+                    Code.coder_id == 0,
+                    Code.code != SENTINEL_CODE_LABEL,
+                    ~outgoing_r,
+                )
+                .distinct()
+            ).all()
+        }
+
+    out: dict[str, int] = {}
+    seen_with_queue: set[int] = set()
+    for row in queue_rows:
+        sid = int(row[0])
+        seen_with_queue.add(sid)
+        errored = int(row[1] or 0)
+        in_flight = int(row[2] or 0)
+        unclaimed = int(row[3] or 0)
+        if errored > 0:
+            st = "failed"
+        elif in_flight > 0:
+            st = "coding"
+        elif unclaimed > 0:
+            st = "pending"
+        elif sid not in agg_seg_ids:
+            st = "aggregating"
+        elif sid in unreviewed_seg_ids:
+            st = "reviewing"
+        else:
+            st = "done"
         out[st] = out.get(st, 0) + 1
+
+    no_queue = len(all_ids - seen_with_queue)
+    if no_queue:
+        out["pending"] = out.get("pending", 0) + no_queue
     return out
 
 
 def _coding_queue_by_status() -> dict[str, int]:
-    out: dict[str, int] = {}
+    """Counts per ``CodingQueueEntry.status`` bucket, computed in SQL.
+
+    Mirrors the ``status`` property on the model: ``failed`` if
+    ``error`` is set, else ``done`` / ``running`` / ``pending`` based on
+    ``finished_at`` / ``claimed_at``.
+    """
+    out: dict[str, int] = {"pending": 0, "running": 0, "done": 0, "failed": 0}
     with session() as s:
-        rows = list(s.exec(select(CodingQueueEntry)).all())
-    for r in rows:
-        out[r.status] = out.get(r.status, 0) + 1
+        rows = list(
+            s.exec(
+                select(
+                    case(
+                        (CodingQueueEntry.error.is_not(None), "failed"),  # type: ignore[union-attr]
+                        (CodingQueueEntry.finished_at.is_not(None), "done"),  # type: ignore[union-attr]
+                        (CodingQueueEntry.claimed_at.is_not(None), "running"),  # type: ignore[union-attr]
+                        else_="pending",
+                    ).label("status"),
+                    func.count(),
+                ).group_by("status")
+            ).all()
+        )
+    for status_name, n in rows:
+        out[str(status_name)] = int(n)
     return out
 
 
