@@ -21,6 +21,7 @@ import {
 import { ErrorAlert } from "../components/ErrorAlert";
 import { StatCard } from "../components/StatCard";
 import { StatusBar } from "../components/StatusBar";
+import { BackgroundRunnerCard } from "../components/BackgroundRunnerCard";
 
 function kindColor(kind: RecentCode["kind"]): string {
   if (kind === "review") return "violet";
@@ -181,6 +182,8 @@ export function CodingProgressPage() {
   return (
     <Stack gap="md">
       <Title order={2}>Coding progress</Title>
+
+      <BackgroundRunnerCard />
 
       <SimpleGrid cols={{ base: 2, sm: 3, md: 4 }} spacing="md">
         <StatCard

@@ -6,6 +6,7 @@ These compose the helpers in :mod:`thematic_analysis_inc.db`.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any, Callable
 
@@ -786,3 +787,237 @@ def test_theme_code(
         "turns": list(getattr(agent, "last_turns", [])),
         "elapsed": time.monotonic() - t0,
     }
+
+
+# ── Background runner ───────────────────────────────────────────────────────
+
+
+class BackgroundRunner:
+    """A long-lived worker that drains the review, aggregation, and coding
+    queues in priority order.
+
+    On each iteration it processes up to ``batch_size`` items of the
+    highest-priority non-empty queue (reviews first, then aggregations,
+    then coding), then re-checks from the top so newly available
+    higher-priority work is picked up promptly. Coding uses
+    :func:`drain_code_async` with ``workers`` concurrent tasks; reviews
+    and aggregations are sequential (matching the CLI commands).
+
+    Never updates the codebook itself — :func:`finalize_codebook` stays
+    a separate action.
+
+    Lifecycle: ``start()`` spins up a daemon thread that owns its own
+    asyncio loop; ``stop()`` signals the loop to exit between batches
+    and waits for the thread to join. ``status()`` is safe to call from
+    any thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._workers = 1
+        self._use_mock_embeddings = False
+        self._batch_size = 8
+        self._idle_sleep = 5.0
+        self._started_at: float | None = None
+        self._counters: dict[str, int] = {
+            "coded": 0,
+            "aggregated": 0,
+            "reviewed": 0,
+            "failed": 0,
+        }
+        self._last_event: dict[str, Any] | None = None
+        self._last_error: str | None = None
+
+    # ── public API ──────────────────────────────────────────────────────
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self._thread is not None and self._thread.is_alive(),
+                "workers": self._workers,
+                "use_mock_embeddings": self._use_mock_embeddings,
+                "batch_size": self._batch_size,
+                "started_at": self._started_at,
+                "counters": dict(self._counters),
+                "last_event": dict(self._last_event) if self._last_event else None,
+                "last_error": self._last_error,
+            }
+
+    def start(
+        self,
+        *,
+        workers: int = 1,
+        use_mock_embeddings: bool = False,
+        batch_size: int | None = None,
+        idle_sleep: float = 5.0,
+    ) -> bool:
+        """Start the background loop. Returns ``False`` if already running."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._workers = max(1, int(workers))
+            self._use_mock_embeddings = bool(use_mock_embeddings)
+            self._batch_size = (
+                int(batch_size) if batch_size is not None else max(8, self._workers * 4)
+            )
+            self._idle_sleep = max(0.5, float(idle_sleep))
+            self._stop_event.clear()
+            self._started_at = time.time()
+            self._counters = {
+                "coded": 0,
+                "aggregated": 0,
+                "reviewed": 0,
+                "failed": 0,
+            }
+            self._last_event = None
+            self._last_error = None
+            t = threading.Thread(
+                target=self._thread_main,
+                name="ta-background-runner",
+                daemon=True,
+            )
+            self._thread = t
+            t.start()
+        return True
+
+    def stop(self, *, timeout: float = 60.0) -> bool:
+        """Signal the loop to stop and wait for it to exit. Returns
+        ``False`` if it wasn't running."""
+        with self._lock:
+            t = self._thread
+            running = t is not None and t.is_alive()
+        if not running:
+            return False
+        self._stop_event.set()
+        assert t is not None
+        t.join(timeout=timeout)
+        with self._lock:
+            if self._thread is t and not t.is_alive():
+                self._thread = None
+        return True
+
+    # ── internals ───────────────────────────────────────────────────────
+
+    def _thread_main(self) -> None:
+        try:
+            asyncio.run(self._loop())
+        except Exception as exc:
+            with self._lock:
+                self._last_error = f"{type(exc).__name__}: {exc}"
+
+    async def _loop(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Size the executor for the coder's refining critique fan-out,
+        # mirroring the CLI's `_cmd_code` setup.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=max(8, self._workers * 3))
+        )
+
+        while not self._stop_event.is_set():
+            try:
+                did_work = await self._drain_one_priority()
+            except Exception as exc:
+                with self._lock:
+                    self._counters["failed"] += 1
+                    self._last_error = f"{type(exc).__name__}: {exc}"
+                did_work = False
+            if did_work:
+                continue
+            await self._sleep_unless_stopped(self._idle_sleep)
+
+    async def _sleep_unless_stopped(self, seconds: float) -> None:
+        # Poll the stop event in small slices for snappy shutdown.
+        slice_s = 0.1
+        elapsed = 0.0
+        while elapsed < seconds and not self._stop_event.is_set():
+            await asyncio.sleep(slice_s)
+            elapsed += slice_s
+
+    async def _drain_one_priority(self) -> bool:
+        """Process a batch of the highest-priority non-empty queue.
+        Returns ``True`` if any work was done (loop should re-check from
+        the top), ``False`` if nothing was pending in any queue.
+        """
+        # 1) Reviews — highest priority.
+        n = await asyncio.to_thread(
+            drain_review,
+            limit=self._batch_size,
+            use_mock_embeddings=self._use_mock_embeddings,
+            on_event=self._on_review_event,
+        )
+        if n["done"] + n["failed"] > 0:
+            return True
+
+        # 2) Aggregations.
+        n = await asyncio.to_thread(
+            drain_aggregate,
+            limit=self._batch_size,
+            use_mock_embeddings=self._use_mock_embeddings,
+            on_event=self._on_aggregate_event,
+        )
+        if n["done"] + n["failed"] > 0:
+            return True
+
+        # 3) Coding — concurrent across coders/segments. ``claim_next_assignment``
+        # orders by segment_id and skips segments with in-flight claims, so
+        # workers naturally finish a segment's queue rows before moving to
+        # the next segment.
+        n = await drain_code_async(
+            workers=self._workers,
+            limit=self._batch_size,
+            use_mock_embeddings=self._use_mock_embeddings,
+            on_event=self._on_code_event,
+        )
+        if n["done"] + n["failed"] > 0:
+            return True
+
+        return False
+
+    # ── per-event hooks ─────────────────────────────────────────────────
+
+    def _record_event(self, kind: str, ok: bool, payload: dict[str, Any]) -> None:
+        slim = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("codes", "trace")
+        }
+        with self._lock:
+            if ok:
+                self._counters[kind] = self._counters.get(kind, 0) + 1
+            else:
+                self._counters["failed"] = self._counters.get("failed", 0) + 1
+            self._last_event = {
+                "kind": kind,
+                "ok": ok,
+                "at": time.time(),
+                **slim,
+            }
+
+    def _on_code_event(self, res: dict, _counters: dict) -> None:
+        self._record_event("coded", bool(res.get("ok")), res)
+
+    def _on_aggregate_event(self, res: dict, _counters: dict) -> None:
+        self._record_event("aggregated", bool(res.get("ok")), res)
+
+    def _on_review_event(self, res: dict, _counters: dict) -> None:
+        self._record_event("reviewed", bool(res.get("ok", True)), res)
+
+
+_background_runner: BackgroundRunner | None = None
+
+
+def get_background_runner() -> BackgroundRunner:
+    """Return the process-wide background runner singleton."""
+    global _background_runner
+    if _background_runner is None:
+        _background_runner = BackgroundRunner()
+    return _background_runner

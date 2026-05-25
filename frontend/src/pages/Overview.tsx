@@ -19,6 +19,7 @@ import {
 } from "@tabler/icons-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { BackgroundRunnerCard } from "../components/BackgroundRunnerCard";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { StatCard } from "../components/StatCard";
 import { StatusBar } from "../components/StatusBar";
@@ -109,6 +110,8 @@ export function Overview() {
           icon={<IconBulb size={28} />}
         />
       </SimpleGrid>
+
+      <BackgroundRunnerCard />
 
       <Card padding="md">
         <Stack gap="sm">

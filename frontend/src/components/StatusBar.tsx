@@ -9,6 +9,12 @@ const colors: Record<string, string> = {
   done: "teal",
   failed: "red",
   applied: "teal",
+  fully_coded: "teal",
+  "fully coded": "teal",
+  partially_coded: "blue",
+  "partially coded": "blue",
+  not_coded: "gray",
+  "not coded": "gray",
 };
 
 export function StatusBar({

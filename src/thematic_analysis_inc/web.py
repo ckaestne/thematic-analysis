@@ -16,13 +16,16 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from thematic_analysis.llm_config import llm_configured
 from thematic_analysis.research_context import AGENT_ROLES, ResearchContext
-from thematic_analysis_inc import db as store
+from thematic_analysis_inc import db as store, workers
 from thematic_analysis_inc.db import (
     aggregation as db_aggregation,
     cascades as db_cascades,
@@ -77,6 +80,11 @@ class ManualThemeIn(BaseModel):
     title: str
     description: str = ""
     rationale: str = ""
+
+
+class BackgroundRunnerStartIn(BaseModel):
+    workers: int = 1
+    use_mock_embeddings: bool = False
 
 
 def _coder_payload(c) -> dict[str, Any]:
@@ -251,7 +259,21 @@ def create_app(db_path: str | Path) -> FastAPI:
     _DB_PATH = Path(db_path)
     store.init_db(_DB_PATH).close()
 
-    app = FastAPI(title="Thematic Analysis Inspector", version="0.2.0")
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            try:
+                workers.get_background_runner().stop(timeout=10.0)
+            except Exception:
+                pass
+
+    app = FastAPI(
+        title="Thematic Analysis Inspector",
+        version="0.2.0",
+        lifespan=_lifespan,
+    )
 
     @app.get("/api/status")
     def get_status() -> dict[str, Any]:
@@ -1744,6 +1766,41 @@ def create_app(db_path: str | Path) -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail="theme not found")
         return {"deleted": False}
+
+    # ── background runner ───────────────────────────────────────────────
+    def _runner_payload() -> dict[str, Any]:
+        runner = workers.get_background_runner()
+        st = runner.status()
+        ok, reason = llm_configured()
+        st["llm_configured"] = ok
+        st["llm_unavailable_reason"] = reason
+        return st
+
+    @app.get("/api/background-runner")
+    def get_background_runner_state() -> dict[str, Any]:
+        return _runner_payload()
+
+    @app.post("/api/background-runner/start")
+    def start_background_runner(body: BackgroundRunnerStartIn) -> dict[str, Any]:
+        ok, reason = llm_configured()
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=f"LLM not configured: {reason}",
+            )
+        _ensure_connected()
+        runner = workers.get_background_runner()
+        started = runner.start(
+            workers=body.workers,
+            use_mock_embeddings=body.use_mock_embeddings,
+        )
+        return {"started": started, **_runner_payload()}
+
+    @app.post("/api/background-runner/stop")
+    def stop_background_runner() -> dict[str, Any]:
+        runner = workers.get_background_runner()
+        stopped = runner.stop()
+        return {"stopped": stopped, **_runner_payload()}
 
     # ── static SPA ───────────────────────────────────────────────────────
     static_dir = Path(__file__).parent / "web_static"
