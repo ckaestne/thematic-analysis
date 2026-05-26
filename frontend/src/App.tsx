@@ -41,7 +41,7 @@ export default function App() {
           element={<ThemeCodingJobDetailPage />}
         />
         <Route path="/themes" element={<ThemesPage />} />
-        <Route path="/themes/:id" element={<ThemeDetailPage />} />
+        <Route path="/theme/:id" element={<ThemeDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppLayout>

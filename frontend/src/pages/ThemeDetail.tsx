@@ -11,7 +11,12 @@ import {
   Title,
 } from "@mantine/core";
 import { IconArrowBackUp, IconTrash } from "@tabler/icons-react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, type ThemeSummary } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
@@ -30,7 +35,7 @@ function ThemeRefLine({ t }: { t: ThemeSummary }) {
       <Group gap="xs" wrap="nowrap" align="flex-start">
         <Stack gap={2} style={{ flex: 1, minWidth: 0 }}>
           <Group gap="xs">
-            <Anchor component={Link} to={`/themes/${t.theme_id}`}>
+            <Anchor component={Link} to={`/theme/${t.theme_id}`}>
               <Text fw={600}>{t.title}</Text>
             </Anchor>
             <Badge size="xs" color={SOURCE_COLOR[t.source] ?? "gray"}>
@@ -84,9 +89,41 @@ export function ThemeDetailPage() {
     },
   });
 
+  const codeQueries = useQueries({
+    queries: (detail.data?.codes ?? []).map((c) => ({
+      queryKey: ["code", c.code_id],
+      queryFn: () => api.code(c.code_id),
+    })),
+  });
+
   if (detail.error) return <ErrorAlert error={detail.error} />;
   if (!detail.data) return <Text c="dimmed">Loading…</Text>;
   const d = detail.data;
+
+  const codeQuotes: Array<{
+    code_id: number;
+    code: string;
+    quotes: typeof d.quotes;
+  }> = [];
+  codeQueries.forEach((cq, idx) => {
+    const ref = d.codes[idx];
+    if (!ref || !cq.data) return;
+    codeQuotes.push({
+      code_id: ref.code_id,
+      code: ref.code,
+      quotes: cq.data.quotes.map((q) => ({
+        quote_id: q.quote_id,
+        text: q.text,
+        segment_id: q.segment_id,
+        document_id: q.document_id,
+        document_filename: q.document_filename,
+      })),
+    });
+  });
+  const totalCodeQuotes = codeQuotes.reduce(
+    (n, c) => n + c.quotes.length,
+    0,
+  );
 
   return (
     <Stack gap="md">
@@ -211,11 +248,41 @@ export function ThemeDetailPage() {
       {d.quotes.length > 0 && (
         <Card padding="md" withBorder>
           <Title order={5} mb="xs">
-            Supporting quotes ({d.quotes.length})
+            Select supporting quotes ({d.quotes.length})
           </Title>
           <Stack gap={4}>
             {d.quotes.map((q) => (
               <QuoteLink key={q.quote_id} q={q} />
+            ))}
+          </Stack>
+        </Card>
+      )}
+
+      {d.codes.length > 0 && (
+        <Card padding="md" withBorder>
+          <Title order={5} mb="xs">
+            All quotes from mapped codes ({totalCodeQuotes})
+          </Title>
+          {codeQueries.some((q) => q.isLoading) && (
+            <Text size="xs" c="dimmed" mb="xs">
+              Loading…
+            </Text>
+          )}
+          <Stack gap="md">
+            {codeQuotes.map((c) => (
+              <Stack key={c.code_id} gap={4}>
+                <Group gap="xs">
+                  <Anchor component={Link} to={`/code/${c.code_id}`}>
+                    <CodeText style={{ fontSize: 13 }}>{c.code}</CodeText>
+                  </Anchor>
+                  <Text size="xs" c="dimmed">
+                    ({c.quotes.length})
+                  </Text>
+                </Group>
+                {c.quotes.map((q) => (
+                  <QuoteLink key={q.quote_id} q={q} />
+                ))}
+              </Stack>
             ))}
           </Stack>
         </Card>

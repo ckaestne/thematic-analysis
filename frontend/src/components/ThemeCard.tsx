@@ -49,7 +49,7 @@ export function ThemeCard({
             <Group gap="xs" wrap="nowrap">
               <Anchor
                 component={Link}
-                to={`/themes/${theme.theme_id}`}
+                to={`/theme/${theme.theme_id}`}
                 style={{ minWidth: 0 }}
               >
                 <Title order={4} style={{ margin: 0 }}>

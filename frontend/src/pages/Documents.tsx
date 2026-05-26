@@ -146,7 +146,7 @@ export function Documents() {
   const confirm = useConfirmDelete();
   const [sort, setSort] = useState<SortState>({
     key: "document_id",
-    dir: "asc",
+    dir: "desc",
   });
 
   const toggleSort = (key: SortKey) => {
