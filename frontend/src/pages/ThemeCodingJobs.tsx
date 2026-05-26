@@ -17,12 +17,14 @@ import { ErrorAlert } from "../components/ErrorAlert";
 
 const STATUS_LABEL: Record<ThemeCodingJobRunStatus, string> = {
   not_run: "not run",
+  running: "running…",
   no_themes: "no themes",
   has_themes: "ran",
 };
 
 const STATUS_COLOR: Record<ThemeCodingJobRunStatus, string> = {
   not_run: "yellow",
+  running: "blue",
   no_themes: "gray",
   has_themes: "green",
 };
@@ -32,6 +34,9 @@ export function ThemeCodingJobsPage() {
   const jobs = useQuery({
     queryKey: ["theme-coding-jobs"],
     queryFn: api.themeCodingJobs,
+    // Refresh while any job is in-flight so its badge flips when done.
+    refetchInterval: (q) =>
+      q.state.data?.some((j) => j.run_status === "running") ? 2000 : false,
   });
 
   const runPending = useMutation({
@@ -135,7 +140,8 @@ export function ThemeCodingJobsPage() {
                       </Anchor>
                     </Table.Td>
                     <Table.Td>
-                      {j.run_status === "not_run" ? (
+                      {j.run_status === "not_run" ||
+                      j.run_status === "running" ? (
                         <Text size="xs" c="dimmed">
                           —
                         </Text>

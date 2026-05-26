@@ -180,6 +180,71 @@ def test_add_theme_coding_job_with_unknown_codebook_fails_fk(
         store.add_theme_coding_job(codebook_used_id=999, prompt="…")
 
 
+def test_run_theme_coding_job_marks_running_during_agent_call(
+    tmp_path: Path,
+) -> None:
+    """The worker drops a running-sentinel Theme before invoking the
+    agent and clears it on exit, so a concurrent listener sees the job
+    as "running" rather than "not run yet" mid-flight."""
+    store.init_db(tmp_path / "x.sqlite")
+    version = _seed_codebook_with_codes(n_codes=1)
+    job = store.add_theme_coding_job(codebook_used_id=version, prompt="x")
+
+    seen: dict[str, object] = {}
+
+    from thematic_analysis_inc.db.models import (
+        is_running_sentinel_theme,
+        is_sentinel_theme,
+    )
+
+    class _PeekingAgent:
+        async def develop_themes_async(self, codebook, prompt):
+            # Observe what's in the theme table while the agent is
+            # "thinking" — should include the running sentinel.
+            seen["mid"] = store.list_themes_for_job(
+                job.id, include_sentinel=True
+            )
+            return []
+
+    workers.run_theme_coding_job(job, agent_factory=lambda: _PeekingAgent())
+
+    mid = seen["mid"]
+    assert len(mid) == 1
+    assert is_running_sentinel_theme(mid[0])
+    assert is_sentinel_theme(mid[0])
+
+    # After the run, the running sentinel is gone; only the empty
+    # sentinel remains.
+    after = store.list_themes_for_job(job.id, include_sentinel=True)
+    assert len(after) == 1
+    assert not is_running_sentinel_theme(after[0])
+    assert is_sentinel_theme(after[0])
+
+
+def test_run_theme_coding_job_clears_running_sentinel_on_failure(
+    tmp_path: Path,
+) -> None:
+    """If the agent raises, the running sentinel must still be cleared
+    so the job goes back to "not run" rather than getting stuck."""
+    store.init_db(tmp_path / "x.sqlite")
+    version = _seed_codebook_with_codes(n_codes=1)
+    job = store.add_theme_coding_job(codebook_used_id=version, prompt="x")
+
+    class _BoomAgent:
+        async def develop_themes_async(self, codebook, prompt):
+            raise RuntimeError("boom")
+
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        workers.run_theme_coding_job(job, agent_factory=lambda: _BoomAgent())
+
+    assert store.list_themes_for_job(job.id, include_sentinel=True) == []
+    assert store.list_unrun_theme_coding_jobs() == [
+        j for j in store.list_unrun_theme_coding_jobs() if j.id == job.id
+    ]
+
+
 def test_run_theme_coding_job_empty_result_persists_sentinel(
     tmp_path: Path,
 ) -> None:

@@ -92,12 +92,28 @@ def is_sentinel_code(code: "Code") -> bool:
 # Same idea as `SENTINEL_CODE_LABEL` but for the Stage 2 theme coder:
 # distinguishes "job not yet run" from "job ran, agent produced no
 # themes" without consulting a queue. A real theme always has a
-# non-empty title.
+# non-empty, printable title.
 SENTINEL_THEME_TITLE = ""
+# A second sentinel, written at the start of a theme-coding run and
+# removed when it finishes (or fails). Its presence means "the worker
+# is currently running this job"; the UI surfaces that as a "running"
+# status so users don't see "not run yet" mid-flight. The NUL byte
+# prefix keeps it out of the space of titles a researcher could type.
+SENTINEL_RUNNING_THEME_TITLE = "\x00running"
+
+
+def is_empty_sentinel_theme(theme: "Theme") -> bool:
+    return theme.title == SENTINEL_THEME_TITLE
+
+
+def is_running_sentinel_theme(theme: "Theme") -> bool:
+    return theme.title == SENTINEL_RUNNING_THEME_TITLE
 
 
 def is_sentinel_theme(theme: "Theme") -> bool:
-    return theme.title == SENTINEL_THEME_TITLE
+    """True for either internal book-keeping row (empty or running).
+    Callers that need to distinguish them use the specific predicates."""
+    return is_empty_sentinel_theme(theme) or is_running_sentinel_theme(theme)
 
 
 # ===========================================================================
@@ -641,7 +657,10 @@ __all__ = [
     "SENTINEL_CODE_LABEL",
     "is_sentinel_code",
     "SENTINEL_THEME_TITLE",
+    "SENTINEL_RUNNING_THEME_TITLE",
     "is_sentinel_theme",
+    "is_empty_sentinel_theme",
+    "is_running_sentinel_theme",
     "SOURCE_JOB",
     "SOURCE_AGGREGATOR",
     "SOURCE_MANUAL",

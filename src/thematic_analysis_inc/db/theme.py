@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from thematic_analysis_inc.db.connection import session
 from thematic_analysis_inc.db.models import (
+    SENTINEL_RUNNING_THEME_TITLE,
     SENTINEL_THEME_TITLE,
     SOURCE_JOB,
     SOURCE_MANUAL,
@@ -21,6 +22,8 @@ from thematic_analysis_inc.db.models import (
     ThemeCodingJob,
     ThemesDerived,
 )
+
+_SENTINEL_TITLES = (SENTINEL_THEME_TITLE, SENTINEL_RUNNING_THEME_TITLE)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +64,56 @@ def list_theme_coding_jobs() -> list[ThemeCodingJob]:
         for r in rows:
             s.expunge(r)
         return rows
+
+
+def mark_theme_job_running(job: ThemeCodingJob) -> Theme:
+    """Insert a running-sentinel Theme row for ``job``. Returns the
+    persisted (detached) sentinel so callers can clear it by id.
+
+    Idempotent-ish: if a running sentinel already exists for this job
+    the existing one is returned and no new row is written, so a stuck
+    sentinel from a crashed previous run still blocks duplicates."""
+    with session() as s:
+        existing = s.exec(
+            select(Theme).where(
+                Theme.theme_coding_job_id == job.id,
+                Theme.title == SENTINEL_RUNNING_THEME_TITLE,
+            )
+        ).first()
+        if existing is not None:
+            s.expunge(existing)
+            return existing
+        sentinel = Theme(
+            codebook_used_id=job.codebook_used_id,
+            source=SOURCE_JOB,
+            theme_coding_job_id=job.id,
+            title=SENTINEL_RUNNING_THEME_TITLE,
+        )
+        s.add(sentinel)
+        s.commit()
+        s.refresh(sentinel)
+        s.expunge(sentinel)
+        return sentinel
+
+
+def clear_theme_job_running(job_id: int) -> bool:
+    """Delete the running-sentinel row(s) for ``job_id``. Returns True
+    if anything was removed. Safe to call when none exists."""
+    with session() as s:
+        rows = list(
+            s.exec(
+                select(Theme).where(
+                    Theme.theme_coding_job_id == job_id,
+                    Theme.title == SENTINEL_RUNNING_THEME_TITLE,
+                )
+            ).all()
+        )
+        if not rows:
+            return False
+        for r in rows:
+            s.delete(r)
+        s.commit()
+        return True
 
 
 def list_unrun_theme_coding_jobs() -> list[ThemeCodingJob]:
@@ -140,7 +193,7 @@ def list_current_themes() -> list[Theme]:
                 select(Theme)
                 .where(
                     Theme.deleted == False,                  # noqa: E712
-                    Theme.title != SENTINEL_THEME_TITLE,
+                    Theme.title.not_in(_SENTINEL_TITLES),  # type: ignore[union-attr]
                     ~Theme.theme_id.in_(src_ids),
                 )
                 .order_by(Theme.theme_id)
@@ -184,7 +237,7 @@ def list_themes_for_job(
             )
         )
         if not include_sentinel:
-            stmt = stmt.where(Theme.title != SENTINEL_THEME_TITLE)
+            stmt = stmt.where(Theme.title.not_in(_SENTINEL_TITLES))  # type: ignore[union-attr]
         rows = list(s.exec(stmt).all())
         for t in rows:
             _ = list(t.codes)
