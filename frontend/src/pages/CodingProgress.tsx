@@ -15,7 +15,6 @@ import { Link } from "react-router-dom";
 import {
   api,
   type CodebookPreviewAdded,
-  type CodebookPreviewRemoved,
   type RecentCode,
 } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
@@ -113,35 +112,6 @@ function AddedCodeRow({ c }: { c: CodebookPreviewAdded }) {
         </Stack>
       )}
     </Stack>
-  );
-}
-
-function RemovedCodeRow({ c }: { c: CodebookPreviewRemoved }) {
-  return (
-    <Group
-      gap="xs"
-      wrap="nowrap"
-      style={{
-        padding: "6px 12px",
-        borderLeft: "3px solid var(--mantine-color-red-6)",
-        background: "var(--mantine-color-default-hover)",
-        borderRadius: 3,
-      }}
-    >
-      <Badge size="xs" color="red" variant="light">
-        removed
-      </Badge>
-      <Anchor component={Link} to={`/code/${c.code_id}`}>
-        <CodeText
-          style={{ fontSize: 13, textDecoration: "line-through" }}
-        >
-          {c.code}
-        </CodeText>
-      </Anchor>
-      <Text size="xs" c="dimmed">
-        {c.n_quotes} quote{c.n_quotes === 1 ? "" : "s"}
-      </Text>
-    </Group>
   );
 }
 
@@ -293,7 +263,6 @@ export function CodingProgressPage() {
             {preview.data && (
               <Text size="xs" c="dimmed">
                 {preview.data.added.length} added ·{" "}
-                {preview.data.removed.length} removed ·{" "}
                 {preview.data.unchanged_count} unchanged
               </Text>
             )}
@@ -316,13 +285,6 @@ export function CodingProgressPage() {
             <Stack gap="xs">
               {preview.data.added.map((c) => (
                 <AddedCodeRow key={c.code_id} c={c} />
-              ))}
-            </Stack>
-          )}
-          {preview.data && preview.data.removed.length > 0 && (
-            <Stack gap="xs">
-              {preview.data.removed.map((c) => (
-                <RemovedCodeRow key={c.code_id} c={c} />
               ))}
             </Stack>
           )}
