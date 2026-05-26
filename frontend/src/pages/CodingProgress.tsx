@@ -263,7 +263,6 @@ export function CodingProgressPage() {
             {preview.data && (
               <Text size="xs" c="dimmed">
                 {preview.data.added.length} added ·{" "}
-                {preview.data.removed.length} removed ·{" "}
                 {preview.data.unchanged_count} unchanged
               </Text>
             )}
