@@ -639,6 +639,7 @@ def _cmd_update_codebook(args: SimpleNamespace) -> int:
         rc = _cmd_review(args)
         if rc:
             return rc
+    store.connect(args.db)
     # Materialize one new Codebook revision capturing all reviewer
     # decisions written above (no-op if nothing changed).
     new_version = workers.finalize_codebook()
