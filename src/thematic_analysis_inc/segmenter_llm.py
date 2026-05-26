@@ -76,8 +76,49 @@ class LLMSegment:
     title: str
 
 
+_LONG_LINE_WORDS = 250
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
+
+
+def _split_long_lines(
+    text: str,
+    max_words: int = _LONG_LINE_WORDS,
+    chunk_words: int = 50,
+) -> str:
+    """Split any line over ``max_words`` into sentence-grouped chunks.
+
+    Transcripts and similar dumps sometimes pack the whole body into a
+    single physical line, which collapses the line-numbered segmentation
+    prompt. Such lines are broken on sentence boundaries and then
+    re-merged into ~``chunk_words``-word chunks so the LLM sees a
+    sensible number of boundary candidates rather than hundreds of
+    single-sentence lines.
+    """
+    out: list[str] = []
+    for ln in text.splitlines():
+        if len(ln.split()) <= max_words:
+            out.append(ln)
+            continue
+        sentences = [s for s in _SENTENCE_SPLIT.split(ln) if s]
+        buf: list[str] = []
+        buf_words = 0
+        for s in sentences:
+            buf.append(s)
+            buf_words += len(s.split())
+            if buf_words >= chunk_words:
+                out.append(" ".join(buf))
+                buf = []
+                buf_words = 0
+        if buf:
+            if out and buf_words < chunk_words:
+                out[-1] = out[-1] + " " + " ".join(buf)
+            else:
+                out.append(" ".join(buf))
+    return "\n".join(out)
+
+
 def _number_lines(text: str) -> tuple[str, list[str]]:
-    lines = text.splitlines()
+    lines = _split_long_lines(text).splitlines()
     width = max(4, len(str(len(lines))))
     numbered = "\n".join(f"{i + 1:0{width}d} | {ln}" for i, ln in enumerate(lines))
     return numbered, lines

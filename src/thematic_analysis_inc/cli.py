@@ -1688,7 +1688,7 @@ research_context_cli.register_typer(app, _run, panel=PANEL_SETUP)
 
 
 @app.command(
-    name="segment",
+    name="test-segment",
     rich_help_panel=PANEL_DEBUG,
     help="segment a document and print segments (no DB write)",
 )
@@ -1701,7 +1701,7 @@ def _cli_segment(
             "--method",
             click_type=click.Choice(["paragraph", "sentence", "fixed", "llm"]),
         ),
-    ] = "paragraph",
+    ] = "llm",
     min_words: Annotated[
         int,
         typer.Option(
