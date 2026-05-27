@@ -11,7 +11,11 @@ import {
   Text,
   Title,
 } from "@mantine/core";
-import { IconInfoCircle, IconPlayerPlay } from "@tabler/icons-react";
+import {
+  IconInfoCircle,
+  IconLoader2,
+  IconPlayerPlay,
+} from "@tabler/icons-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api, type ThemeCodingJobRunStatus } from "../api";
@@ -21,12 +25,14 @@ import { useConfirmDelete } from "../components/ConfirmDelete";
 
 const STATUS_LABEL: Record<ThemeCodingJobRunStatus, string> = {
   not_run: "not run",
+  running: "running…",
   no_themes: "ran — no themes produced",
   has_themes: "ran",
 };
 
 const STATUS_COLOR: Record<ThemeCodingJobRunStatus, string> = {
   not_run: "yellow",
+  running: "blue",
   no_themes: "gray",
   has_themes: "green",
 };
@@ -41,6 +47,10 @@ export function ThemeCodingJobDetailPage() {
     queryKey: ["theme-coding-job", jobId],
     queryFn: () => api.themeCodingJob(jobId),
     enabled: Number.isFinite(jobId),
+    // While the worker is running we want the badge / themes list to
+    // update without a manual refresh.
+    refetchInterval: (q) =>
+      q.state.data?.run_status === "running" ? 2000 : false,
   });
 
   const run = useMutation({
@@ -144,6 +154,18 @@ export function ThemeCodingJobDetailPage() {
             </Group>
           </Stack>
         </Card>
+      )}
+
+      {d.run_status === "running" && (
+        <Alert
+          color="blue"
+          icon={<IconLoader2 size={16} />}
+          title="Theme coder running"
+        >
+          The LLM theme coder is processing this job against codebook v
+          {d.codebook_used_id}. This page refreshes automatically; results
+          will appear once it finishes.
+        </Alert>
       )}
 
       {d.run_status === "no_themes" && (

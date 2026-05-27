@@ -21,6 +21,7 @@ from thematic_analysis_inc.db.models import (
     Theme,
     DERIVATION_REVIEW,
     SENTINEL_CODE_LABEL,
+    SENTINEL_RUNNING_THEME_TITLE,
     SENTINEL_THEME_TITLE,
 )
 
@@ -365,7 +366,9 @@ def _themes_total() -> int:
                 .select_from(Theme)
                 .where(
                     Theme.deleted == False,  # noqa: E712
-                    Theme.title != SENTINEL_THEME_TITLE,
+                    Theme.title.not_in(  # type: ignore[union-attr]
+                        (SENTINEL_THEME_TITLE, SENTINEL_RUNNING_THEME_TITLE)
+                    ),
                 )
             ).one()
         )

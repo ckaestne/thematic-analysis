@@ -437,7 +437,11 @@ export type ThemeDetail = ThemeFull & {
   derived_into: ThemeSummary[];
 };
 
-export type ThemeCodingJobRunStatus = "not_run" | "no_themes" | "has_themes";
+export type ThemeCodingJobRunStatus =
+  | "not_run"
+  | "running"
+  | "no_themes"
+  | "has_themes";
 
 export type ThemeCodingJobSummary = {
   id: number;

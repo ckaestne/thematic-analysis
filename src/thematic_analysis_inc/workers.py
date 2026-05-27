@@ -699,11 +699,19 @@ def run_theme_coding_job(
     Raises ``ValueError`` if the pinned codebook revision is missing.
     Agent failures propagate; nothing is written on failure.
     """
-    themes, _agent = asyncio.run(
-        _run_theme_coder_async(
-            job.codebook_used_id, job.prompt, agent_factory=agent_factory,
+    # Drop a "running" sentinel before the LLM call so the UI can show
+    # "in progress" instead of "not run yet" while the request is in
+    # flight. Cleared in `finally` so a failed run does not leave the
+    # job looking permanently busy.
+    db_themes.mark_theme_job_running(job)
+    try:
+        themes, _agent = asyncio.run(
+            _run_theme_coder_async(
+                job.codebook_used_id, job.prompt, agent_factory=agent_factory,
+            )
         )
-    )
+    finally:
+        db_themes.clear_theme_job_running(job.id)
     for t in themes:
         t.source = SOURCE_JOB
         t.theme_coding_job_id = job.id

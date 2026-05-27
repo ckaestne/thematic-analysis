@@ -1556,16 +1556,21 @@ def create_app(db_path: str | Path) -> FastAPI:
     def _job_run_status(
         all_themes: list, real_themes: list
     ) -> str:
-        """Three-state job status used by the UI:
+        """Four-state job status used by the UI:
         - "not_run":   no Theme rows at all for this job
-        - "no_themes": ran, but only sentinel — agent returned nothing
+        - "running":   a running-sentinel row is present (worker in flight)
+        - "no_themes": ran, but only the empty sentinel — agent returned nothing
         - "has_themes": ran and produced at least one real theme
         """
+        from thematic_analysis_inc.db.models import is_running_sentinel_theme
+
         if not all_themes:
             return "not_run"
-        if not real_themes:
-            return "no_themes"
-        return "has_themes"
+        if real_themes:
+            return "has_themes"
+        if any(is_running_sentinel_theme(t) for t in all_themes):
+            return "running"
+        return "no_themes"
 
     @app.get("/api/theme-coding-jobs")
     def list_theme_coding_jobs() -> list[dict[str, Any]]:
