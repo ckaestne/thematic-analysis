@@ -348,12 +348,13 @@ def create_app(db_path: str | Path) -> FastAPI:
         can see what the next codebook will look like.
         """
         _ensure_connected()
+        from sqlalchemy.orm import selectinload
         from sqlmodel import select
         from thematic_analysis_inc.db.codebook import live_codes_for_batch
         from thematic_analysis_inc.db.models import (
+            Code,
             CodesDerived,
             DERIVATION_REVIEW,
-            Document,
             Segment,
         )
 
@@ -399,60 +400,68 @@ def create_app(db_path: str | Path) -> FastAPI:
             }
 
         added: list[dict[str, Any]] = []
-        for cid in sorted(added_ids):
-            c = live_by_id[cid]
-            payload = _code_summary(c)
-            # Find R edges and pretty-print the source codes so the user
-            # can see which codes were merged into this one.
+        added_ids_sorted = sorted(added_ids)
+        if added_ids_sorted:
             with store.session() as s:
-                edges = list(
+                all_edges = list(
                     s.exec(
-                        select(CodesDerived).where(
-                            CodesDerived.new_code_id == cid,
+                        select(CodesDerived)
+                        .where(
+                            CodesDerived.new_code_id.in_(  # type: ignore[union-attr]
+                                added_ids_sorted
+                            ),
                             CodesDerived.derivation_type == DERIVATION_REVIEW,
+                        )
+                        .options(
+                            selectinload(CodesDerived.source_code)  # type: ignore[arg-type]
+                            .selectinload(Code.segment)
+                            .selectinload(Segment.document),
                         )
                     ).all()
                 )
-                sources: list[dict[str, Any]] = []
-                for e in edges:
-                    src = s.get(store.Code, e.source_code_id)
-                    src_seg = (
-                        s.get(Segment, src.segment_id)
-                        if src is not None and src.segment_id
-                        else None
-                    )
-                    src_doc = (
-                        s.get(Document, src_seg.document_id)
-                        if src_seg is not None
-                        else None
-                    )
-                    sources.append(
-                        {
-                            "code_id": e.source_code_id,
-                            "code": src.code if src else None,
-                            "coder_id": src.coder_id if src else None,
-                            "decision": e.decision,
-                            "rationale": e.rationale,
-                            "segment_id": (
-                                src.segment_id if src else None
-                            ),
-                            "document_id": (
-                                src_seg.document_id if src_seg else None
-                            ),
-                            "document_filename": (
-                                src_doc.filename if src_doc else None
-                            ),
-                        }
-                    )
-                # Decision summary: "merge" if any 'M'/'U', else "new"
-                decisions = {e.decision for e in edges}
-                if decisions & {"M", "U"}:
-                    payload["change"] = "merge"
-                elif "A" in decisions:
-                    payload["change"] = "new"
-                else:
-                    payload["change"] = "added"
-                payload["sources"] = sources
+                s.expunge_all()
+            edges_by_cid: dict[int, list[CodesDerived]] = {}
+            for e in all_edges:
+                edges_by_cid.setdefault(e.new_code_id, []).append(e)
+        else:
+            edges_by_cid = {}
+        for cid in added_ids_sorted:
+            c = live_by_id[cid]
+            payload = _code_summary(c)
+            edges = edges_by_cid.get(cid, [])
+            sources: list[dict[str, Any]] = []
+            for e in edges:
+                src = e.source_code
+                src_seg = (
+                    src.segment
+                    if src is not None and src.segment_id
+                    else None
+                )
+                src_doc = src_seg.document if src_seg is not None else None
+                sources.append(
+                    {
+                        "code_id": e.source_code_id,
+                        "code": src.code if src else None,
+                        "coder_id": src.coder_id if src else None,
+                        "decision": e.decision,
+                        "rationale": e.rationale,
+                        "segment_id": src.segment_id if src else None,
+                        "document_id": (
+                            src_seg.document_id if src_seg else None
+                        ),
+                        "document_filename": (
+                            src_doc.filename if src_doc else None
+                        ),
+                    }
+                )
+            decisions = {e.decision for e in edges}
+            if decisions & {"M", "U"}:
+                payload["change"] = "merge"
+            elif "A" in decisions:
+                payload["change"] = "new"
+            else:
+                payload["change"] = "added"
+            payload["sources"] = sources
             added.append(payload)
 
         removed: list[dict[str, Any]] = []
@@ -482,11 +491,10 @@ def create_app(db_path: str | Path) -> FastAPI:
         carries enough metadata to render a row and link to /code/:id for
         full lineage."""
         _ensure_connected()
+        from sqlalchemy.orm import selectinload
         from sqlmodel import select
         from thematic_analysis_inc.db.models import (
             Code,
-            Coder,
-            Document,
             Segment,
             SENTINEL_CODE_LABEL,
         )
@@ -499,14 +507,18 @@ def create_app(db_path: str | Path) -> FastAPI:
                     .where(Code.code != SENTINEL_CODE_LABEL)
                     .order_by(Code.code_id.desc())  # type: ignore[union-attr]
                     .limit(limit)
+                    .options(
+                        selectinload(Code.coder),  # type: ignore[arg-type]
+                        selectinload(Code.segment).selectinload(  # type: ignore[arg-type]
+                            Segment.document
+                        ),
+                    )
                 ).all()
             )
             for c in rows:
-                coder = s.get(Coder, c.coder_id)
-                seg = s.get(Segment, c.segment_id) if c.segment_id else None
-                doc = (
-                    s.get(Document, seg.document_id) if seg is not None else None
-                )
+                coder = c.coder
+                seg = c.segment if c.segment_id else None
+                doc = seg.document if seg is not None else None
                 if c.coder_id == 0:
                     kind = "aggregation"
                 elif c.coder_id == -1:
@@ -916,21 +928,32 @@ def create_app(db_path: str | Path) -> FastAPI:
             coder, limit=limit, offset=offset
         )
         items = []
-        for q in entries:
-            with store.session() as s:
-                from sqlalchemy import func
-                from sqlmodel import select
+        if entries:
+            from sqlalchemy import func, tuple_
+            from sqlmodel import select
 
-                n_codes = int(
-                    s.exec(
-                        select(func.count())
-                        .select_from(store.Code)
-                        .where(
-                            store.Code.segment_id == q.segment_id,
-                            store.Code.coder_id == q.coder_id,
+            keys = [(q.segment_id, q.coder_id) for q in entries]
+            with store.session() as s:
+                count_rows = s.exec(
+                    select(
+                        store.Code.segment_id,
+                        store.Code.coder_id,
+                        func.count(store.Code.code_id),
+                    )
+                    .where(
+                        tuple_(store.Code.segment_id, store.Code.coder_id).in_(
+                            keys
                         )
-                    ).one()
-                )
+                    )
+                    .group_by(store.Code.segment_id, store.Code.coder_id)
+                ).all()
+            counts: dict[tuple[int, int], int] = {
+                (seg_id, cid): int(n) for seg_id, cid, n in count_rows
+            }
+        else:
+            counts = {}
+        for q in entries:
+            n_codes = counts.get((q.segment_id, q.coder_id), 0)
             items.append(
                 {
                     "segment_id": q.segment_id,
@@ -1046,21 +1069,20 @@ def create_app(db_path: str | Path) -> FastAPI:
             decision, limit=limit, offset=offset
         )
         items = []
-        with store.session() as s:
-            for d in rows:
-                src = s.get(store.Code, d.source_code_id)
-                new = s.get(store.Code, d.new_code_id)
-                items.append(
-                    {
-                        "new_code_id": d.new_code_id,
-                        "source_code_id": d.source_code_id,
-                        "decision": d.decision,
-                        "rationale": d.rationale,
-                        "source_code": src.code if src else None,
-                        "segment_id": src.segment_id if src else None,
-                        "new_code": new.code if new else None,
-                    }
-                )
+        for d in rows:
+            src = d.source_code
+            new = d.new_code
+            items.append(
+                {
+                    "new_code_id": d.new_code_id,
+                    "source_code_id": d.source_code_id,
+                    "decision": d.decision,
+                    "rationale": d.rationale,
+                    "source_code": src.code if src else None,
+                    "segment_id": src.segment_id if src else None,
+                    "new_code": new.code if new else None,
+                }
+            )
         return {"total": total, "items": items}
 
     # ── codebook versions ────────────────────────────────────────────────
@@ -1071,41 +1093,40 @@ def create_app(db_path: str | Path) -> FastAPI:
         from sqlmodel import select
         from thematic_analysis_inc.db.models import CodebookCode
 
-        out = []
         with store.session() as s:
-            for cv in store.list_codebooks():
-                n = int(
-                    s.exec(
-                        select(func.count())
-                        .select_from(CodebookCode)
-                        .where(CodebookCode.codebook_version == cv.version)
-                    ).one()
-                )
-                out.append(
-                    {
-                        "version": cv.version,
-                        "parent_version": cv.parent_version,
-                        "research_context_version": cv.research_context_version,
-                        "created_at": (
-                            cv.created_at.isoformat()
-                            if cv.created_at
-                            else None
-                        ),
-                        "n_codes": n,
-                    }
-                )
-        return out
+            counts = dict(
+                s.exec(
+                    select(
+                        CodebookCode.codebook_version,
+                        func.count(CodebookCode.code_id),
+                    ).group_by(CodebookCode.codebook_version)
+                ).all()
+            )
+        return [
+            {
+                "version": cv.version,
+                "parent_version": cv.parent_version,
+                "research_context_version": cv.research_context_version,
+                "created_at": (
+                    cv.created_at.isoformat() if cv.created_at else None
+                ),
+                "n_codes": int(counts.get(cv.version, 0)),
+            }
+            for cv in store.list_codebooks()
+        ]
 
     @app.get("/api/codebook/versions/{version}")
     def get_codebook_version(version: int) -> dict[str, Any]:
         _ensure_connected()
+        from sqlalchemy.orm import selectinload
         from sqlmodel import select
         from thematic_analysis_inc.db.coders import SYSTEM_REVIEWER_ID
         from thematic_analysis_inc.db.models import (
             Code,
             CodebookCode,
+            CodesDerived,
             DERIVATION_REVIEW,
-            Document,
+            Quote,
             Segment,
         )
 
@@ -1121,6 +1142,14 @@ def create_app(db_path: str | Path) -> FastAPI:
                     .join(CodebookCode, CodebookCode.code_id == Code.code_id)
                     .where(CodebookCode.codebook_version == version)
                     .order_by(Code.code)
+                    .options(
+                        selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
+                        .selectinload(Quote.segment)
+                        .selectinload(Segment.document),
+                        selectinload(Code.derivation_sources).selectinload(  # type: ignore[arg-type]
+                            CodesDerived.source_code
+                        ),
+                    )
                 ).all()
             )
 
@@ -1164,12 +1193,8 @@ def create_app(db_path: str | Path) -> FastAPI:
                 for q in sorted(
                     c.supporting_quotes, key=lambda x: x.quote_id
                 ):
-                    qseg = s.get(Segment, q.segment_id)
-                    qdoc = (
-                        s.get(Document, qseg.document_id)
-                        if qseg is not None
-                        else None
-                    )
+                    qseg = q.segment
+                    qdoc = qseg.document if qseg is not None else None
                     quotes.append(
                         {
                             "quote_id": q.quote_id,
@@ -1216,12 +1241,12 @@ def create_app(db_path: str | Path) -> FastAPI:
         current code (so they're candidates for a merge in the same
         codebook context)."""
         _ensure_connected()
+        from sqlalchemy.orm import selectinload
         from sqlmodel import select
         from thematic_analysis_inc.db import embeddings as db_embeddings
         from thematic_analysis_inc.db.models import (
             Code,
             CodebookCode,
-            Segment,
         )
 
         with store.session() as s:
@@ -1244,26 +1269,26 @@ def create_app(db_path: str | Path) -> FastAPI:
             if not in_versions:
                 return {"codebook_version": None, "items": []}
             codebook_version = max(in_versions)
-            peer_ids = [
-                int(cid)
-                for cid in s.exec(
-                    select(CodebookCode.code_id).where(
+            peers = list(
+                s.exec(
+                    select(Code)
+                    .join(CodebookCode, CodebookCode.code_id == Code.code_id)
+                    .where(
                         CodebookCode.codebook_version == codebook_version,
                         CodebookCode.code_id != code_id,
                     )
+                    .options(
+                        selectinload(Code.segment),  # type: ignore[arg-type]
+                        selectinload(Code.supporting_quotes),  # type: ignore[arg-type]
+                    )
                 ).all()
-            ]
-            peers = [s.get(Code, pid) for pid in peer_ids]
-            peers = [p for p in peers if p is not None and p.embedding is not None]
+            )
+            peers = [p for p in peers if p.embedding is not None]
             query_emb = db_embeddings.decode(c.embedding)
             similar = db_embeddings.find_similar(query_emb, peers, top_k=top_k)
             items: list[dict[str, Any]] = []
             for entry, score in similar:
-                seg = (
-                    s.get(Segment, entry.segment_id)
-                    if entry.segment_id
-                    else None
-                )
+                seg = entry.segment if entry.segment_id else None
                 items.append(
                     {
                         "code_id": entry.code_id,
@@ -1362,34 +1387,49 @@ def create_app(db_path: str | Path) -> FastAPI:
         ``code_id`` to ``/api/codes/{id}`` returns its own sources.
         """
         _ensure_connected()
+        from sqlalchemy import func as _func
+        from sqlalchemy.orm import selectinload
         from sqlmodel import select
         from thematic_analysis_inc.db.models import (
             Code,
             CodebookCode,
             CodesDerived,
-            Coder,
-            Document,
+            Quote,
             Segment,
         )
 
         with store.session() as s:
-            c = s.get(Code, code_id)
+            c = s.exec(
+                select(Code)
+                .where(Code.code_id == code_id)
+                .options(
+                    selectinload(Code.coder),  # type: ignore[arg-type]
+                    selectinload(Code.segment).selectinload(  # type: ignore[arg-type]
+                        Segment.document
+                    ),
+                    selectinload(Code.supporting_quotes)  # type: ignore[arg-type]
+                    .selectinload(Quote.segment)
+                    .selectinload(Segment.document),
+                    selectinload(Code.derivation_sources)  # type: ignore[arg-type]
+                    .selectinload(CodesDerived.source_code)
+                    .options(
+                        selectinload(Code.coder),
+                        selectinload(Code.segment).selectinload(
+                            Segment.document
+                        ),
+                    ),
+                )
+            ).first()
             if c is None:
                 raise HTTPException(status_code=404, detail="code not found")
-            seg = s.get(Segment, c.segment_id) if c.segment_id else None
-            seg_doc = (
-                s.get(Document, seg.document_id) if seg is not None else None
-            )
-            coder = s.get(Coder, c.coder_id)
+            seg = c.segment if c.segment_id else None
+            seg_doc = seg.document if seg is not None else None
+            coder = c.coder
 
             quotes = []
             for q in sorted(c.supporting_quotes, key=lambda x: x.quote_id):
-                qseg = s.get(Segment, q.segment_id)
-                qdoc = (
-                    s.get(Document, qseg.document_id)
-                    if qseg is not None
-                    else None
-                )
+                qseg = q.segment
+                qdoc = qseg.document if qseg is not None else None
                 quotes.append(
                     {
                         "quote_id": q.quote_id,
@@ -1400,40 +1440,31 @@ def create_app(db_path: str | Path) -> FastAPI:
                     }
                 )
 
-            edges = list(
-                s.exec(
-                    select(CodesDerived).where(
-                        CodesDerived.new_code_id == code_id
+            edges = list(c.derivation_sources)
+            # Batch "has_more_sources": one grouped query for every source
+            # code id, instead of N count queries inside the loop.
+            src_ids = [e.source_code_id for e in edges]
+            has_more_map: dict[int, bool] = {}
+            if src_ids:
+                hm_rows = s.exec(
+                    select(
+                        CodesDerived.new_code_id,
+                        _func.count(CodesDerived.source_code_id),
                     )
+                    .where(CodesDerived.new_code_id.in_(src_ids))  # type: ignore[union-attr]
+                    .group_by(CodesDerived.new_code_id)
                 ).all()
-            )
+                has_more_map = {int(nid): int(n) > 0 for nid, n in hm_rows}
             sources: list[dict[str, Any]] = []
             for e in edges:
-                src = s.get(Code, e.source_code_id)
-                src_coder = (
-                    s.get(Coder, src.coder_id) if src is not None else None
-                )
+                src = e.source_code
+                src_coder = src.coder if src is not None else None
                 src_seg = (
-                    s.get(Segment, src.segment_id)
+                    src.segment
                     if src is not None and src.segment_id
                     else None
                 )
-                # Does this source itself have any further sources?
-                has_more = False
-                if src is not None:
-                    from sqlalchemy import func as _func
-                    has_more = (
-                        int(
-                            s.exec(
-                                select(_func.count())
-                                .select_from(CodesDerived)
-                                .where(
-                                    CodesDerived.new_code_id == src.code_id
-                                )
-                            ).one()
-                        )
-                        > 0
-                    )
+                src_doc = src_seg.document if src_seg is not None else None
                 sources.append(
                     {
                         "code_id": e.source_code_id,
@@ -1454,12 +1485,11 @@ def create_app(db_path: str | Path) -> FastAPI:
                             src_seg.document_id if src_seg else None
                         ),
                         "document_filename": (
-                            s.get(Document, src_seg.document_id).filename
-                            if src_seg is not None
-                            and s.get(Document, src_seg.document_id) is not None
-                            else None
+                            src_doc.filename if src_doc else None
                         ),
-                        "has_more_sources": has_more,
+                        "has_more_sources": has_more_map.get(
+                            e.source_code_id, False
+                        ),
                     }
                 )
 
@@ -1503,22 +1533,15 @@ def create_app(db_path: str | Path) -> FastAPI:
     # ── themes ───────────────────────────────────────────────────────────
 
     def _theme_quote_payload(q) -> dict[str, Any]:
-        from thematic_analysis_inc.db.models import Document, Segment
-
-        with store.session() as s:
-            seg = s.get(Segment, q.segment_id) if q.segment_id else None
-            doc = (
-                s.get(Document, seg.document_id)
-                if seg is not None
-                else None
-            )
-            return {
-                "quote_id": q.quote_id,
-                "text": q.text,
-                "segment_id": q.segment_id,
-                "document_id": seg.document_id if seg else None,
-                "document_filename": doc.filename if doc else None,
-            }
+        seg = q.segment
+        doc = seg.document if seg is not None else None
+        return {
+            "quote_id": q.quote_id,
+            "text": q.text,
+            "segment_id": q.segment_id,
+            "document_id": seg.document_id if seg else None,
+            "document_filename": doc.filename if doc else None,
+        }
 
     def _theme_code_payload(c) -> dict[str, Any]:
         return {
