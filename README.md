@@ -100,6 +100,21 @@ For frontend development, run `npm install && npm run dev` inside `frontend/`
 (it proxies `/api` to `127.0.0.1:8765`). The production build outputs to
 `src/thematic_analysis_inc/web_static/`, which `ta-web` serves directly.
 
+### Multi-database Docker deployment
+
+To serve several databases from one container, mount a directory of `*.db`
+files and run the dispatcher:
+
+```bash
+cd docker/webview
+# drop your databases into ./data/
+docker compose up --build
+# http://localhost:8765/      → index of databases
+# http://localhost:8765/foo/  → UI for data/foo.db
+```
+
+See `docker/webview/README.md` for details.
+
 ## Supported File Formats
 
 - **PDF** (`.pdf`) — automatic text extraction

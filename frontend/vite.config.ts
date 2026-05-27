@@ -11,6 +11,7 @@ const outDir = path.resolve(
 
 export default defineConfig({
   plugins: [react()],
+  base: "./",
   build: {
     outDir,
     emptyOutDir: true,

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+frontend/node_modules
+frontend/dist
+src/thematic_analysis_inc/web_static
+docker
+*.db
+*.sqlite
+*.sqlite3
+tests
+stage2_backup.txt
+stage2_notes.md

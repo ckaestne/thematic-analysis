@@ -1,0 +1,11 @@
+services:
+  webview:
+    build:
+      context: ../..
+      dockerfile: docker/webview/Dockerfile
+    image: ta-webview:latest
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

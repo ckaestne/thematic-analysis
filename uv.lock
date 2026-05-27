@@ -3136,6 +3136,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "openhands-sdk" },
     { name = "pymupdf" },
@@ -3160,6 +3161,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.110.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "openhands-sdk", specifier = ">=1.11.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.3.0" },
