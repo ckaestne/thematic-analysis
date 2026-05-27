@@ -2,12 +2,22 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from thematic_analysis.agents import CoderAgent, CoderConfig
+from thematic_analysis.agents.coder import QuoteVerificationError
 from thematic_analysis_inc.db.models import SENTINEL_CODE_LABEL, is_sentinel_code
+
+
+def _mock_completion(text: str) -> MagicMock:
+    """Build a fake LLM completion response with the given text payload."""
+    from openhands.sdk import TextContent
+
+    resp = MagicMock()
+    resp.message.content = [TextContent(text=text)]
+    return resp
 
 
 def _seg(text: str, quotes=None):
@@ -166,7 +176,9 @@ class TestCoderAgent:
         assert result[0].coder_id == 1
         assert result[0].codebook_used_id == 1
 
-    def test_parse_response_drops_quotes_not_in_segment(self, agent: CoderAgent):
+    def test_parse_response_raises_on_quotes_not_in_segment(
+        self, agent: CoderAgent
+    ):
         response = _resp([
             {
                 "code": "off-topic",
@@ -174,9 +186,41 @@ class TestCoderAgent:
                 "quotes": ["text not present in segment"],
             }
         ])
-        # Quote isn't a substring; code is dropped, sentinel emitted.
+        with pytest.raises(QuoteVerificationError) as exc_info:
+            agent._parse_response(response, _seg(SEG_TEXT))
+        assert exc_info.value.bad_codes == [
+            ("off-topic", ["text not present in segment"])
+        ]
+
+    def test_parse_response_accepts_quote_with_control_chars(
+        self, agent: CoderAgent
+    ):
+        # PDF extraction often emits \x12 in place of "fi" ligatures. The
+        # normalization step should let the substring check succeed when
+        # both sides carry the same control characters.
+        seg_text = "An arti\x12cial intelligence system’s lifecycle."
+        response = _resp([
+            {
+                "code": "c1",
+                "description": "d",
+                "quotes": ["arti\x12cial intelligence system’s lifecycle"],
+            }
+        ])
+        result = agent._parse_response(response, _seg(seg_text))
+        assert len(result) == 1 and result[0].code == "c1"
+
+    def test_parse_response_accepts_quote_with_collapsed_whitespace(
+        self, agent: CoderAgent
+    ):
+        response = _resp([
+            {
+                "code": "c1",
+                "description": "d",
+                "quotes": ["felt   supported    BY my friends"],
+            }
+        ])
         result = agent._parse_response(response, _seg(SEG_TEXT))
-        assert len(result) == 1 and is_sentinel_code(result[0])
+        assert len(result) == 1 and result[0].code == "c1"
 
     def test_parse_response_truncates_to_max_codes(self):
         agent = _agent(config=CoderConfig(max_codes_per_segment=2))
@@ -232,36 +276,92 @@ class TestCoderAgent:
         )
         assert result[0].supporting_quotes[0] is existing
 
-    @patch.object(CoderAgent, "_call_llm")
-    def test_code_segment(self, mock_llm, agent: CoderAgent):
-        mock_llm.return_value = _resp([
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_code_segment(self, mock_complete, agent: CoderAgent):
+        mock_complete.return_value = _mock_completion(_resp([
             {
                 "code": "emotional support",
                 "description": "Comfort from others.",
                 "quotes": ["felt supported by my friends"],
             }
-        ])
+        ]))
         result = agent.code_segment(_seg(SEG_TEXT))
         assert len(result) == 1
         assert result[0].code == "emotional support"
         assert result[0].supporting_quotes[0].text == "felt supported by my friends"
-        mock_llm.assert_called_once()
+        mock_complete.assert_called_once()
 
-    @patch.object(CoderAgent, "_call_llm")
-    def test_code_segment_fallback_on_parse_error(self, mock_llm, agent: CoderAgent):
-        mock_llm.return_value = "Invalid response"
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_code_segment_fallback_on_parse_error(
+        self, mock_complete, agent: CoderAgent
+    ):
+        mock_complete.return_value = _mock_completion("Invalid response")
         result = agent.code_segment(_seg(SEG_TEXT))
         assert len(result) == 1 and is_sentinel_code(result[0])
 
-    @patch.object(CoderAgent, "_call_llm")
-    def test_code_segments(self, mock_llm, agent: CoderAgent):
-        mock_llm.return_value = _resp([
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_code_segment_retries_in_chat_on_bad_quotes(
+        self, mock_complete, agent: CoderAgent
+    ):
+        # First response: a quote that isn't in the segment. Second
+        # response (the in-chat revision): a verbatim quote.
+        bad = _resp([
+            {
+                "code": "c1",
+                "description": "d",
+                "quotes": ["text not present in segment"],
+            }
+        ])
+        good = _resp([
+            {
+                "code": "c1",
+                "description": "d",
+                "quotes": ["felt supported"],
+            }
+        ])
+        mock_complete.side_effect = [
+            _mock_completion(bad),
+            _mock_completion(good),
+        ]
+        result = agent.code_segment(_seg(SEG_TEXT))
+        assert mock_complete.call_count == 2
+        assert len(result) == 1 and result[0].code == "c1"
+        # The retry call should carry the assistant turn + a follow-up
+        # user turn echoing the rejected quote.
+        retry_messages = mock_complete.call_args_list[1][0][0]
+        roles = [m.role for m in retry_messages]
+        assert roles == ["system", "user", "assistant", "user"]
+        followup_text = retry_messages[-1].content[0].text
+        assert "text not present in segment" in followup_text
+
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_code_segment_raises_when_second_response_also_bad(
+        self, mock_complete, agent: CoderAgent
+    ):
+        bad = _resp([
+            {
+                "code": "c1",
+                "description": "d",
+                "quotes": ["text not present in segment"],
+            }
+        ])
+        mock_complete.side_effect = [
+            _mock_completion(bad),
+            _mock_completion(bad),
+        ]
+        with pytest.raises(QuoteVerificationError):
+            agent.code_segment(_seg(SEG_TEXT))
+        assert mock_complete.call_count == 2
+
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_code_segments(self, mock_complete, agent: CoderAgent):
+        mock_complete.return_value = _mock_completion(_resp([
             {
                 "code": "emotional support",
                 "description": "Comfort.",
                 "quotes": ["felt supported"],
             }
-        ])
+        ]))
         results = agent.code_segments([_seg(SEG_TEXT)])
         assert len(results) == 1
 
@@ -325,24 +425,24 @@ class TestCoderAgentResearchContext:
         assert config.include_6rs_guidance is True
         assert CoderConfig(include_6rs_guidance=False).include_6rs_guidance is False
 
-    @patch.object(CoderAgent, "_call_llm")
-    def test_coding_with_research_context(self, mock_llm):
+    @patch.object(CoderAgent, "_completion_with_retry")
+    def test_coding_with_research_context(self, mock_complete):
         seg = "I worry about the future of our planet every single day."
-        mock_llm.return_value = _resp([
+        mock_complete.return_value = _mock_completion(_resp([
             {
                 "code": "climate anxiety",
                 "description": "Worry about climate-related futures.",
                 "quotes": ["worry about the future of our planet"],
             }
-        ])
+        ]))
         rc = _rc_row(description=CLIMATE_DESCRIPTION)
         agent = _agent(codebook=_codebook(research_context=rc))
         result = agent.code_segment(_seg(seg))
         assert len(result) == 1
         assert result[0].code == "climate anxiety"
-        mock_llm.assert_called_once()
-        call_args = mock_llm.call_args
-        system_prompt = call_args[0][0]
+        mock_complete.assert_called_once()
+        messages = mock_complete.call_args[0][0]
+        system_prompt = messages[0].content[0].text
         assert "Climate" in system_prompt
 
 
