@@ -17,7 +17,9 @@ from thematic_analysis_inc.db.models import (
     SOURCE_JOB,
     SOURCE_MANUAL,
     Code,
+    Document,
     Quote,
+    Segment,
     Theme,
     ThemeCodingJob,
     ThemesDerived,
@@ -171,13 +173,13 @@ def get_theme(theme_id: int) -> Theme | None:
                 selectinload(Theme.codes).selectinload(  # type: ignore[arg-type]
                     Code.supporting_quotes
                 ),
-                selectinload(Theme.supporting_quotes),  # type: ignore[arg-type]
+                selectinload(Theme.supporting_quotes)  # type: ignore[arg-type]
+                .selectinload(Quote.segment)
+                .selectinload(Segment.document),
             )
         ).first()
         if t is None:
             return None
-        _ = list(t.codes)
-        _ = list(t.supporting_quotes)
         s.expunge_all()
         return t
 
@@ -201,15 +203,12 @@ def list_current_themes() -> list[Theme]:
                     selectinload(Theme.codes).selectinload(   # type: ignore[arg-type]
                         Code.supporting_quotes
                     ),
-                    selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
+                    selectinload(Theme.supporting_quotes)   # type: ignore[arg-type]
+                    .selectinload(Quote.segment)
+                    .selectinload(Segment.document),
                 )
             ).all()
         )
-        for t in rows:
-            _ = list(t.codes)
-            for c in t.codes:
-                _ = list(c.supporting_quotes)
-            _ = list(t.supporting_quotes)
         s.expunge_all()
         return rows
 
@@ -233,17 +232,14 @@ def list_themes_for_job(
                 selectinload(Theme.codes).selectinload(   # type: ignore[arg-type]
                     Code.supporting_quotes
                 ),
-                selectinload(Theme.supporting_quotes),   # type: ignore[arg-type]
+                selectinload(Theme.supporting_quotes)   # type: ignore[arg-type]
+                .selectinload(Quote.segment)
+                .selectinload(Segment.document),
             )
         )
         if not include_sentinel:
             stmt = stmt.where(Theme.title.not_in(_SENTINEL_TITLES))  # type: ignore[union-attr]
         rows = list(s.exec(stmt).all())
-        for t in rows:
-            _ = list(t.codes)
-            for c in t.codes:
-                _ = list(c.supporting_quotes)
-            _ = list(t.supporting_quotes)
         s.expunge_all()
         return rows
 

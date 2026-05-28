@@ -35,19 +35,17 @@ def find_document_by_filename(filename: str) -> Document | None:
 
 def list_documents() -> list[Document]:
     """All documents, newest first. Callers can read ``doc.segments`` to count."""
+    from sqlalchemy.orm import selectinload
+
     with session() as s:
         rows = list(
             s.exec(
-                select(Document).order_by(
-                    Document.document_id.desc()  # type: ignore[union-attr]
-                )
+                select(Document)
+                .order_by(Document.document_id.desc())  # type: ignore[union-attr]
+                .options(selectinload(Document.segments))  # type: ignore[arg-type]
             ).all()
         )
-        # Force-load segments while session is open so callers can use
-        # ``doc.segments`` afterwards.
-        for d in rows:
-            _ = d.segments  # noqa: B018
-            s.expunge(d)
+        s.expunge_all()
         return rows
 
 

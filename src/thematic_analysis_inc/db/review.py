@@ -168,10 +168,13 @@ def list_review_decisions(
                 stmt.order_by(CodesDerived.new_code_id.desc())  # type: ignore[union-attr]
                 .limit(limit)
                 .offset(offset)
+                .options(
+                    selectinload(CodesDerived.source_code),  # type: ignore[arg-type]
+                    selectinload(CodesDerived.new_code),  # type: ignore[arg-type]
+                )
             ).all()
         )
-        for r in rows:
-            s.expunge(r)
+        s.expunge_all()
         return total, rows
 
 
