@@ -26,10 +26,18 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY --from=frontend /repo/src/thematic_analysis_inc/web_static ./src/thematic_analysis_inc/web_static
 
-RUN uv sync --frozen --no-dev
+# The webview is view-only and never runs embeddings, so skip the
+# sentence-transformers / torch chain (~1GB). The lock still pins them for
+# CLI users; we just don't install them in this image.
+RUN uv sync --frozen --no-dev \
+    --no-install-package torch \
+    --no-install-package sentence-transformers \
+    --no-install-package transformers
 
 EXPOSE 8765
-ENTRYPOINT ["uv", "run", "--no-dev", "ta-web-multi", \
+# --no-sync: don't let `uv run` re-sync the env from the lock at startup,
+# which would re-download the torch/transformers we deliberately excluded.
+ENTRYPOINT ["uv", "run", "--no-dev", "--no-sync", "ta-web-multi", \
             "--data-dir", "/data", \
             "--host", "0.0.0.0", \
             "--port", "8765"]
