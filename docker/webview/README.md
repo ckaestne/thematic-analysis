@@ -13,8 +13,10 @@ docker compose up --build
 
 Then open:
 
-- <http://localhost:8765/> — index of available databases
 - <http://localhost:8765/foo/> — UI for `data/foo.db`
+
+The root (<http://localhost:8765/>) does **not** list the available
+databases — you have to know a DB's name to open it.
 
 ## How it works
 
@@ -22,7 +24,7 @@ The container runs `ta-web-multi`, a tiny FastAPI dispatcher. On the first
 request to `/<name>/...`, it spawns an unmodified `ta-web` child process
 bound to a private localhost port for `data/<name>.db`, and reverse-proxies
 the request to it. Subsequent requests reuse the same child. Children that
-are idle for more than 60 minutes are terminated automatically (and
+are idle for more than 7 days are terminated automatically (and
 respawned on the next request).
 
 ## Configuration
@@ -39,5 +41,5 @@ command:
   - --data-dir=/data
   - --host=0.0.0.0
   - --port=8765
-  - --idle-timeout=3600
+  - --idle-timeout=604800
 ```

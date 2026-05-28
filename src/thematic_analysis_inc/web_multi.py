@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
-import html
 import os
 import re
 import socket
@@ -59,16 +58,11 @@ def _safe_name(name: str) -> bool:
     return bool(_NAME_RE.match(name)) and ".." not in name
 
 
-def create_app(data_dir: Path, idle_timeout: float = 3600.0) -> FastAPI:
+def create_app(data_dir: Path, idle_timeout: float = 604800.0) -> FastAPI:
     data_dir = data_dir.resolve()
     children: dict[str, Child] = {}
     lock = asyncio.Lock()
     client = httpx.AsyncClient(timeout=None)
-
-    def _list_dbs() -> list[str]:
-        if not data_dir.is_dir():
-            return []
-        return sorted(p.stem for p in data_dir.glob("*.db") if p.is_file())
 
     async def _wait_ready(port: int) -> bool:
         deadline = time.monotonic() + _READY_TIMEOUT
@@ -167,23 +161,13 @@ def create_app(data_dir: Path, idle_timeout: float = 3600.0) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def _index() -> HTMLResponse:
-        names = _list_dbs()
-        if not names:
-            body = (
-                "<h1>thematic-analysis web viewer</h1>"
-                f"<p>No <code>*.db</code> files found in "
-                f"<code>{html.escape(str(data_dir))}</code>.</p>"
-            )
-        else:
-            items = "".join(
-                f'<li><a href="./{html.escape(n)}/">{html.escape(n)}</a></li>'
-                for n in names
-            )
-            body = (
-                "<h1>thematic-analysis web viewer</h1>"
-                f"<p>Databases in <code>{html.escape(str(data_dir))}</code>:</p>"
-                f"<ul>{items}</ul>"
-            )
+        # Deliberately does not enumerate the available databases: the
+        # dispatcher must not reveal which DBs exist. Access a known DB
+        # directly at /<name>/.
+        body = (
+            "<h1>thematic-analysis web viewer</h1>"
+            "<p>Open a database directly at <code>/&lt;name&gt;/</code>.</p>"
+        )
         return HTMLResponse(
             f"<!doctype html><html><head><meta charset='utf-8'>"
             f"<title>ta-web</title></head><body>{body}</body></html>"
@@ -260,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Directory containing *.db files.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--idle-timeout", type=float, default=3600.0,
+    parser.add_argument("--idle-timeout", type=float, default=604800.0,
                         help="Seconds of inactivity before a child is killed.")
     args = parser.parse_args(argv)
 
