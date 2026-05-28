@@ -485,11 +485,18 @@ export type ThemeCodingJobDetail = {
   themes: ThemeFull[];
 };
 
+function resolveApiUrl(url: string): string {
+  if (url.startsWith("/api/") || url === "/api") {
+    return new URL("api" + url.slice(4), document.baseURI).toString();
+  }
+  return url;
+}
+
 async function jsonFetch<T>(
   url: string,
   init?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(url, {
+  const res = await fetch(resolveApiUrl(url), {
     headers: { "Content-Type": "application/json" },
     ...init,
   });

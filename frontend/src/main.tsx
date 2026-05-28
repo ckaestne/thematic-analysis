@@ -28,7 +28,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <MantineProvider theme={theme} defaultColorScheme="auto">
       <Notifications position="top-right" />
       <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
+        <BrowserRouter basename={new URL(document.baseURI).pathname.replace(/\/$/, "")}>
           <DevErrorBoundary>
             <App />
           </DevErrorBoundary>
