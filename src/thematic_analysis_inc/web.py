@@ -474,6 +474,18 @@ def create_app(db_path: str | Path) -> FastAPI:
             "has_changes": bool(added or removed),
         }
 
+    @app.post("/api/codebook/finalize")
+    def finalize_codebook_endpoint() -> dict[str, Any]:
+        """Materialize a new codebook revision from all reviewer decisions
+        made since the latest revision. Same as the final step of the
+        ``update-codebook`` CLI command."""
+        _ensure_connected()
+        new_version = workers.finalize_codebook()
+        return {
+            "new_version": new_version,
+            "changed": new_version is not None,
+        }
+
     @app.get("/api/recent-codes")
     def get_recent_codes(
         limit: int = Query(default=20, ge=1, le=200),

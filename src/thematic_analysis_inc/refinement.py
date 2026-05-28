@@ -281,32 +281,46 @@ class RefiningCoderAgent:
     # ── public API matching CoderAgent ───────────────────────────────────
 
     def code_segment(self, segment: Segment) -> list[Code]:
-        self.last_trace = None
         text = segment.content
         coder_system_prompt, coder_user_prompt, initial_msgs = (
             self._initial_messages(segment)
         )
+        self.last_trace = {
+            "segment_text": text,
+            "first_response": None,
+            "first": None,
+            "critique": None,
+            "refined_response": None,
+            "refined": None,
+            "coder_system_prompt": coder_system_prompt,
+            "coder_user_prompt": coder_user_prompt,
+            "critic_system_prompt": None,
+            "critic_user_prompt": None,
+            "refinement_user_prompt": None,
+        }
         first_response = self._coder_completion(initial_msgs)
-        first_codes = self.coder._parse_response(first_response, segment)
+        self.last_trace["first_response"] = first_response
+        try:
+            first_codes = self.coder.parse_with_retry(
+                initial_msgs, first_response, segment
+            )
+        finally:
+            self.last_trace["first_quote_retry"] = (
+                self.coder.last_quote_retry
+            )
+        self.last_trace["first"] = first_codes
         if all(is_sentinel_code(c) for c in first_codes):
-            self.last_trace = {
-                "segment_text": text,
-                "first": first_codes,
-                "critique": None,
-                "refined": None,
-                "coder_system_prompt": coder_system_prompt,
-                "coder_user_prompt": coder_user_prompt,
-                "critic_system_prompt": None,
-                "critic_user_prompt": None,
-                "refinement_user_prompt": None,
-            }
             return first_codes
 
         critic_system_prompt = self.critic._system_prompt()
         critic_user_prompt = _build_critic_user_prompt(text, first_codes)
+        self.last_trace["critic_system_prompt"] = critic_system_prompt
+        self.last_trace["critic_user_prompt"] = critic_user_prompt
         critique = self.critic.critique(text, first_codes)
+        self.last_trace["critique"] = critique
 
         refinement_user_prompt = _build_refinement_user_prompt(critique)
+        self.last_trace["refinement_user_prompt"] = refinement_user_prompt
         refined_msgs = self._append_turn(
             initial_msgs, "assistant", first_response
         )
@@ -314,47 +328,54 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = self._coder_completion(refined_msgs)
-        refined_codes = self.coder._parse_response(refined_response, segment)
-        self.last_trace = {
-            "segment_text": text,
-            "first": first_codes,
-            "critique": critique,
-            "refined": refined_codes,
-            "coder_system_prompt": coder_system_prompt,
-            "coder_user_prompt": coder_user_prompt,
-            "critic_system_prompt": critic_system_prompt,
-            "critic_user_prompt": critic_user_prompt,
-            "refinement_user_prompt": refinement_user_prompt,
-        }
+        self.last_trace["refined_response"] = refined_response
+        try:
+            refined_codes = self.coder.parse_with_retry(
+                refined_msgs, refined_response, segment
+            )
+        finally:
+            self.last_trace["refined_quote_retry"] = (
+                self.coder.last_quote_retry
+            )
+        self.last_trace["refined"] = refined_codes
         return refined_codes
 
     async def code_segment_async(self, segment: Segment) -> list[Code]:
-        self.last_trace = None
         text = segment.content
         coder_system_prompt, coder_user_prompt, initial_msgs = (
             self._initial_messages(segment)
         )
+        self.last_trace = {
+            "segment_text": text,
+            "first_response": None,
+            "first": None,
+            "critique": None,
+            "refined_response": None,
+            "refined": None,
+            "coder_system_prompt": coder_system_prompt,
+            "coder_user_prompt": coder_user_prompt,
+            "critic_system_prompt": None,
+            "critic_user_prompt": None,
+            "refinement_user_prompt": None,
+        }
         first_response = await self._coder_completion_async(initial_msgs)
-        first_codes = self.coder._parse_response(first_response, segment)
+        self.last_trace["first_response"] = first_response
+        first_codes = await self.coder.parse_with_retry_async(
+            initial_msgs, first_response, segment
+        )
+        self.last_trace["first"] = first_codes
         if all(is_sentinel_code(c) for c in first_codes):
-            self.last_trace = {
-                "segment_text": text,
-                "first": first_codes,
-                "critique": None,
-                "refined": None,
-                "coder_system_prompt": coder_system_prompt,
-                "coder_user_prompt": coder_user_prompt,
-                "critic_system_prompt": None,
-                "critic_user_prompt": None,
-                "refinement_user_prompt": None,
-            }
             return first_codes
 
         critic_system_prompt = self.critic._system_prompt()
         critic_user_prompt = _build_critic_user_prompt(text, first_codes)
+        self.last_trace["critic_system_prompt"] = critic_system_prompt
+        self.last_trace["critic_user_prompt"] = critic_user_prompt
         critique = await self.critic.critique_async(text, first_codes)
+        self.last_trace["critique"] = critique
 
         refinement_user_prompt = _build_refinement_user_prompt(critique)
+        self.last_trace["refinement_user_prompt"] = refinement_user_prompt
         refined_msgs = self._append_turn(
             initial_msgs, "assistant", first_response
         )
@@ -362,18 +383,11 @@ class RefiningCoderAgent:
             refined_msgs, "user", refinement_user_prompt
         )
         refined_response = await self._coder_completion_async(refined_msgs)
-        refined_codes = self.coder._parse_response(refined_response, segment)
-        self.last_trace = {
-            "segment_text": text,
-            "first": first_codes,
-            "critique": critique,
-            "refined": refined_codes,
-            "coder_system_prompt": coder_system_prompt,
-            "coder_user_prompt": coder_user_prompt,
-            "critic_system_prompt": critic_system_prompt,
-            "critic_user_prompt": critic_user_prompt,
-            "refinement_user_prompt": refinement_user_prompt,
-        }
+        self.last_trace["refined_response"] = refined_response
+        refined_codes = await self.coder.parse_with_retry_async(
+            refined_msgs, refined_response, segment
+        )
+        self.last_trace["refined"] = refined_codes
         return refined_codes
 
 

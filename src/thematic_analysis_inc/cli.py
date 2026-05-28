@@ -205,7 +205,7 @@ def _cmd_list_documents(args: SimpleNamespace) -> int:
 
 
 def _cmd_add_document(args: SimpleNamespace) -> int:
-    from thematic_analysis.loaders import load_text_file  # lazy
+    from thematic_analysis.loaders import load_document  # lazy
 
     paths = [Path(p) for p in args.files]
     missing = [p for p in paths if not p.exists()]
@@ -235,7 +235,7 @@ def _cmd_add_document(args: SimpleNamespace) -> int:
                 continue
 
             try:
-                doc = load_text_file(path)
+                doc = load_document(path)
             except Exception as e:  # noqa: BLE001
                 log.error("[add-document] %s: failed to load (%s)", path.name, e)
                 total_errors += 1
@@ -387,6 +387,22 @@ def _print_trace(segment_id: str, trace: dict) -> None:
     if coder_user_prompt is not None:
         print(sub)
         _print_prompt("Coder user prompt", coder_user_prompt)
+    first_response = trace.get("first_response")
+    if first_response is not None:
+        print(sub)
+        _print_prompt("First-pass raw response", first_response)
+    first_retry = trace.get("first_quote_retry")
+    if first_retry:
+        print(sub)
+        _print_prompt(
+            "Quote-verification retry follow-up",
+            first_retry.get("followup_prompt") or "",
+        )
+        print(sub)
+        _print_prompt(
+            "Second coder response after retry",
+            first_retry.get("retry_response") or "",
+        )
     print(sub)
     print("First-pass codes (coder):")
     print(_format_codes(trace.get("first")))
@@ -416,6 +432,22 @@ def _print_trace(segment_id: str, trace: dict) -> None:
         if refinement_user_prompt is not None:
             print(sub)
             _print_prompt("Refinement user prompt", refinement_user_prompt)
+    refined_response = trace.get("refined_response")
+    if refined_response is not None:
+        print(sub)
+        _print_prompt("Refined raw response", refined_response)
+    refined_retry = trace.get("refined_quote_retry")
+    if refined_retry:
+        print(sub)
+        _print_prompt(
+            "Refined quote-verification retry follow-up",
+            refined_retry.get("followup_prompt") or "",
+        )
+        print(sub)
+        _print_prompt(
+            "Second refined response after retry",
+            refined_retry.get("retry_response") or "",
+        )
     print(sub)
     print("Refined codes (coder after critique):")
     print(_format_codes(trace.get("refined") or trace.get("first")))
@@ -782,6 +814,80 @@ def _cmd_segment(args: SimpleNamespace) -> int:
     return 0
 
 
+def _print_coder_interaction(trace: dict) -> None:
+    """Dump every LLM message in the coder's chat session.
+
+    Used by ``test-code`` so the human debugger sees the full
+    interaction: initial system + user prompts, the first response, any
+    quote-verification retry follow-up + retry response, and (on
+    success) the critic and refinement turns. Trace values may be
+    ``None`` when a phase didn't run.
+    """
+    sep = "─" * 72
+    print(sep)
+    print("Coder system prompt")
+    print(sep)
+    print(trace.get("coder_system_prompt") or "(missing)")
+    print(sep)
+    print("Coder user prompt")
+    print(sep)
+    print(trace.get("coder_user_prompt") or "(missing)")
+    print(sep)
+    print("First coder response (assistant)")
+    print(sep)
+    first_response = trace.get("first_response")
+    print(first_response if first_response is not None
+          else "(no response — LLM call failed before returning)")
+
+    first_retry = trace.get("first_quote_retry")
+    if first_retry:
+        print(sep)
+        print("Quote-verification retry follow-up (user)")
+        print(sep)
+        print(first_retry.get("followup_prompt") or "(missing)")
+        print(sep)
+        print("Second coder response after retry (assistant)")
+        print(sep)
+        print(first_retry.get("retry_response") or "(missing)")
+
+    critique = trace.get("critique")
+    if critique is not None:
+        print(sep)
+        print("Critic system prompt")
+        print(sep)
+        print(trace.get("critic_system_prompt") or "(missing)")
+        print(sep)
+        print("Critic user prompt")
+        print(sep)
+        print(trace.get("critic_user_prompt") or "(missing)")
+        print(sep)
+        print("Critic response (assistant)")
+        print(sep)
+        print(critique)
+        print(sep)
+        print("Refinement user prompt")
+        print(sep)
+        print(trace.get("refinement_user_prompt") or "(missing)")
+        print(sep)
+        print("Refined coder response (assistant)")
+        print(sep)
+        refined_response = trace.get("refined_response")
+        print(refined_response if refined_response is not None
+              else "(no response)")
+
+        refined_retry = trace.get("refined_quote_retry")
+        if refined_retry:
+            print(sep)
+            print("Refined quote-verification retry follow-up (user)")
+            print(sep)
+            print(refined_retry.get("followup_prompt") or "(missing)")
+            print(sep)
+            print("Second refined response after retry (assistant)")
+            print(sep)
+            print(refined_retry.get("retry_response") or "(missing)")
+    print(sep)
+
+
 def _cmd_test_code(args: SimpleNamespace) -> int:
     store.connect(args.db)
     cid = _parse_coder_id(args.coder_id)
@@ -795,8 +901,11 @@ def _cmd_test_code(args: SimpleNamespace) -> int:
             cid,
             use_mock_embeddings=args.mock_embeddings,
         )
-    except ValueError as e:
-        print(str(e), file=sys.stderr)
+    except Exception as e:
+        trace = getattr(e, "coder_trace", None)
+        if trace is not None:
+            _print_coder_interaction(trace)
+        print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
     trace = res.get("trace")
@@ -1271,7 +1380,7 @@ def _cli_init(ctx: typer.Context) -> None:
 @app.command(
     name="add-document",
     rich_help_panel=PANEL_DOCUMENTS,
-    help="load .md/.txt files, segment, and add",
+    help="load .md/.txt/.pdf files, segment, and add",
 )
 def _cli_add_document(
     ctx: typer.Context,

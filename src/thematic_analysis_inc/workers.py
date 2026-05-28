@@ -91,10 +91,16 @@ async def _run_coder_for_segment(
     agent = factory(codebook, coder)
 
     t0 = time.monotonic()
-    if hasattr(agent, "code_segment_async"):
-        codes = await agent.code_segment_async(seg)
-    else:
-        codes = agent.code_segment(seg)
+    try:
+        if hasattr(agent, "code_segment_async"):
+            codes = await agent.code_segment_async(seg)
+        else:
+            codes = agent.code_segment(seg)
+    except Exception as exc:
+        trace = getattr(agent, "last_trace", None)
+        if trace is not None:
+            exc.coder_trace = trace  # type: ignore[attr-defined]
+        raise
 
     res: dict[str, Any] = {
         "ok": True,

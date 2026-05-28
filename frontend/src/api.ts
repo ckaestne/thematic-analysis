@@ -519,6 +519,11 @@ export const api = {
   recentCodes: (limit: number = 20) =>
     jsonFetch<RecentCode[]>(`/api/recent-codes?limit=${limit}`),
   codebookPreview: () => jsonFetch<CodebookPreview>("/api/codebook-preview"),
+  finalizeCodebook: () =>
+    jsonFetch<{ new_version: number | null; changed: boolean }>(
+      "/api/codebook/finalize",
+      { method: "POST", body: JSON.stringify({}) },
+    ),
 
   researchContext: () =>
     jsonFetch<ResearchContext | null>("/api/research-context"),

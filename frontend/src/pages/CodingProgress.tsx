@@ -1,6 +1,7 @@
 import {
   Anchor,
   Badge,
+  Button,
   Card,
   Code as CodeText,
   Group,
@@ -10,7 +11,7 @@ import {
   Text,
   Title,
 } from "@mantine/core";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   api,
@@ -127,6 +128,15 @@ export function CodingProgressPage() {
   const preview = useQuery({
     queryKey: ["codebook-preview"],
     queryFn: api.codebookPreview,
+  });
+  const qc = useQueryClient();
+  const finalize = useMutation({
+    mutationFn: api.finalizeCodebook,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["codebook-preview"] });
+      qc.invalidateQueries({ queryKey: ["status"] });
+      qc.invalidateQueries({ queryKey: ["recent-codes", 20] });
+    },
   });
 
   if (status.error) return <ErrorAlert error={status.error} />;
@@ -260,13 +270,24 @@ export function CodingProgressPage() {
                 </Text>
               )}
             </Title>
-            {preview.data && (
-              <Text size="xs" c="dimmed">
-                {preview.data.added.length} added ·{" "}
-                {preview.data.unchanged_count} unchanged
-              </Text>
-            )}
+            <Group gap="xs">
+              {preview.data && (
+                <Text size="xs" c="dimmed">
+                  {preview.data.added.length} added ·{" "}
+                  {preview.data.unchanged_count} unchanged
+                </Text>
+              )}
+              <Button
+                size="xs"
+                onClick={() => finalize.mutate()}
+                loading={finalize.isPending}
+                disabled={!preview.data?.has_changes}
+              >
+                Update codebook
+              </Button>
+            </Group>
           </Group>
+          {finalize.error && <ErrorAlert error={finalize.error} />}
           <Text size="xs" c="dimmed">
             Reviewer decisions made since the latest codebook revision, in
             the form they would take when the codebook is next
