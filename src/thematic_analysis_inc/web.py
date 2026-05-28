@@ -87,6 +87,11 @@ class BackgroundRunnerStartIn(BaseModel):
     use_mock_embeddings: bool = False
 
 
+class MergeIn(BaseModel):
+    selected_code_ids: list[int]
+    codebook_version: int | None = None
+
+
 def _coder_payload(c) -> dict[str, Any]:
     return {
         "coder_id": c.coder_id,
@@ -1280,10 +1285,6 @@ def create_app(db_path: str | Path) -> FastAPI:
                 "codebook_version": codebook_version,
                 "items": items,
             }
-
-    class MergeIn(BaseModel):
-        selected_code_ids: list[int]
-        codebook_version: int | None = None
 
     @app.post("/api/codes/{code_id}/merge")
     def merge_codes(code_id: int, body: MergeIn) -> dict[str, Any]:
