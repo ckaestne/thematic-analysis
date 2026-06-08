@@ -148,6 +148,36 @@ ta --db analysis.sqlite update-codebook --retry-failed
 ta --db analysis.sqlite update-codebook --limit 20
 ```
 
+### 5b. Large jobs — `batch`
+
+For corpora at the scale of thousands of documents, run the whole loop
+(code → aggregate → review → finalize codebook) one batch at a time:
+
+```bash
+ta --db analysis.sqlite batch --batch-size 100 --workers auto
+```
+
+Each iteration randomly picks `--batch-size` documents that have no
+queue entries yet, enqueues them for every registered coder, drains
+coding/aggregation/review, then materialises a new codebook revision
+before starting the next batch. Per-segment failures (quote mismatches,
+duplicate codes, …) are recorded on the queue entry and the run
+continues; nothing aborts a batch.
+
+The run is resumable: if it crashes or you Ctrl-C it, just re-run the
+same command. Any unfinished queue entries are picked up first as the
+"current batch" before a new batch is enqueued, so partially-coded
+documents always finish before the codebook is updated.
+
+Progress output includes per-stage progress bars, average wall time per
+completed batch, remaining documents, and an ETA for the rest of the
+job — useful for runs expected to span days.
+
+```bash
+# stop after N batches (e.g. for a smoke test)
+ta --db analysis.sqlite batch --batch-size 50 --max-batches 3
+```
+
 ### 6. Check progress
 
 ```bash
@@ -206,6 +236,8 @@ ta --db DB add-document    FILES... [--segmentation llm|paragraph|sentence|fixed
 ta --db DB code            ID [--workers K] [--limit N] [--retry-failed]
                                      [--mock-embeddings]
 ta --db DB update-codebook [--limit N] [--retry-failed] [--mock-embeddings]
+ta --db DB batch           [--batch-size N] [--workers K] [--max-batches N]
+                                     [--mock-embeddings]
 ta --db DB status
 ta --db DB export-codebook [--version N] [-o FILE]
 ```

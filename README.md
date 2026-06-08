@@ -71,6 +71,14 @@ entry point sharing one SQLite file:
 | Subcommand group | Stage |
 |---|---|
 | `code`, `aggregate`, `review`, `status` | Stage 1: Coding → Aggregation → Review → Codebook |
+| `batch` | Stage 1, run end-to-end in document-batches for large corpora |
+
+For large jobs (thousands of documents), `ta batch` iterates the full
+loop one batch of documents at a time, finalising a new codebook
+revision after each batch. It is resumable across crashes / restarts
+and tolerates per-segment failures (e.g. quote-match errors). See
+[the pipeline guide](src/thematic_analysis_inc/README.md#5b-large-jobs--batch)
+for details.
 
 Stage 2 (theme development) is being rewritten and currently has no
 subcommands.
