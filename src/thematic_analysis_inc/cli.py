@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, Callable
 
 
 # Quiet down noisy ML deps before anything imports them. The Coder/Reviewer
@@ -695,6 +695,223 @@ def _format_eta(seconds: float) -> str:
     return f"{h:d}h{m:02d}m{s:02d}s"
 
 
+class _PendingCounts(SimpleNamespace):
+    coding_unfinished: bool
+    aggregation_pending: int
+    review_pending: int
+
+    @property
+    def any_pending(self) -> bool:
+        return bool(
+            self.coding_unfinished
+            or self.aggregation_pending
+            or self.review_pending
+        )
+
+    def describe(self) -> str:
+        return (
+            f"coding_unfinished={self.coding_unfinished}, "
+            f"aggregation_pending={self.aggregation_pending}, "
+            f"review_pending={self.review_pending}"
+        )
+
+
+def _pending_stage_counts() -> _PendingCounts:
+    return _PendingCounts(
+        coding_unfinished=store.coding.has_unfinished_assignments(),
+        aggregation_pending=store.aggregation.pending_aggregation_count(),
+        review_pending=store.review.pending_review_count(),
+    )
+
+
+def _run_stage(
+    label: str,
+    todo: int,
+    run_drain: Callable[[Callable[[dict, dict], None]], dict],
+    *,
+    extras: str = "",
+    on_event: Callable[[dict, dict], None] | None = None,
+    crash_continuation: str,
+) -> None:
+    """Drive one drain inside a progress bar.
+
+    ``run_drain`` is a thunk that, given an ``on_event`` callback, calls
+    the underlying ``drain_*`` worker and returns its counters dict. We
+    isolate the try/except + progress wiring here so the per-stage
+    blocks in ``_cmd_batch`` stay tiny.
+    """
+    suffix = f" {extras}" if extras else ""
+    print(f"{label} todo={todo}{suffix}")
+    if todo <= 0:
+        return
+    with _make_progress(label) as prog:
+        task = prog.add_task("", total=todo)
+
+        def _advance(res: dict, c: dict) -> None:
+            if on_event is not None:
+                on_event(res, c)
+            prog.advance(task)
+
+        try:
+            counters = run_drain(_advance)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"{label} drain crashed: {type(exc).__name__}: {exc}; "
+                f"{crash_continuation}",
+                file=sys.stderr,
+            )
+            counters = {"done": 0, "failed": 0}
+    print(
+        f"{label} done: {counters['done']} ok, {counters['failed']} failed"
+    )
+
+
+def _drain_code_stage(n_workers: int, mock_embeddings: bool) -> None:
+    def _run(on_event: Callable[[dict, dict], None]) -> dict:
+        async def _async() -> dict:
+            from concurrent.futures import ThreadPoolExecutor
+
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
+            )
+            return await workers.drain_code_async(
+                workers=n_workers,
+                use_mock_embeddings=mock_embeddings,
+                on_event=on_event,
+            )
+
+        return asyncio.run(_async())
+
+    def _on_event(res: dict, _c: dict) -> None:
+        if not res["ok"]:
+            print(
+                f"[batch.code] segment={res['segment_id']} "
+                f"coder={res['coder_id']} FAILED: {res['error']}",
+                file=sys.stderr,
+            )
+
+    _run_stage(
+        "[batch.code]",
+        store.coding.pending_count(),
+        _run,
+        extras=f"workers={n_workers}",
+        on_event=_on_event,
+        crash_continuation="continuing with aggregate/review",
+    )
+
+
+def _drain_aggregate_stage(mock_embeddings: bool) -> None:
+    def _run(on_event: Callable[[dict, dict], None]) -> dict:
+        return workers.drain_aggregate(
+            use_mock_embeddings=mock_embeddings,
+            on_event=on_event,
+        )
+
+    def _on_event(res: dict, _c: dict) -> None:
+        if not res.get("ok"):
+            print(
+                f"[batch.aggregate] segment={res['segment_id']} "
+                f"FAILED: {res.get('error')}",
+                file=sys.stderr,
+            )
+
+    _run_stage(
+        "[batch.aggregate]",
+        store.aggregation.pending_aggregation_count(),
+        _run,
+        on_event=_on_event,
+        crash_continuation="continuing with review",
+    )
+
+
+def _drain_review_stage(mock_embeddings: bool) -> None:
+    def _run(on_event: Callable[[dict, dict], None]) -> dict:
+        return workers.drain_review(
+            use_mock_embeddings=mock_embeddings,
+            on_event=on_event,
+        )
+
+    _run_stage(
+        "[batch.review]",
+        store.review.pending_review_count(),
+        _run,
+        crash_continuation="continuing to finalize",
+    )
+
+
+def _finalize_codebook_step(label: str) -> int | None:
+    try:
+        v = workers.finalize_codebook()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"{label} finalize crashed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+    if v is None:
+        print(f"{label} codebook unchanged")
+    else:
+        print(f"{label} created codebook v{v}")
+    return v
+
+
+def _enqueue_new_batch(batch_size: int) -> int:
+    """Pick and enqueue up to ``batch_size`` random uncoded documents.
+    Returns the number of documents enqueued (0 means: nothing left)."""
+    docs = store.list_documents_without_queue_entries(batch_size)
+    if not docs:
+        return 0
+    total_enqueued = 0
+    for d in docs:
+        total_enqueued += store.coding.enqueue_document(d.document_id)
+    preview = [d.filename for d in docs[:3]]
+    ellipsis = "..." if len(docs) > 3 else ""
+    print(
+        f"[batch] enqueued batch of {len(docs)} document(s), "
+        f"{total_enqueued} assignment(s) ({preview}{ellipsis})"
+    )
+    return len(docs)
+
+
+def _print_batch_start(
+    batches_run: int, batch_size: int, durations: list[float]
+) -> None:
+    remaining_docs = store.count_documents_without_queue_entries()
+    total_est = batches_run + 1 + (remaining_docs + batch_size - 1) // batch_size
+    avg = sum(durations) / len(durations) if durations else 0.0
+    eta = avg * (total_est - batches_run - 1) if avg else 0.0
+    print(
+        f"[batch] starting batch {batches_run + 1}/~{total_est} "
+        f"(remaining docs after this batch: {remaining_docs}, "
+        f"avg/batch: {_format_eta(avg) if avg else 'n/a'}, "
+        f"eta remaining: {_format_eta(eta) if avg else 'n/a'})"
+    )
+
+
+def _print_batch_done(
+    batches_run: int, elapsed: float, batch_size: int, durations: list[float]
+) -> None:
+    avg = sum(durations) / len(durations)
+    remaining_docs = store.count_documents_without_queue_entries()
+    remaining_batches = (remaining_docs + batch_size - 1) // batch_size
+    eta = avg * remaining_batches
+    print(
+        f"[batch] finished batch {batches_run} in {_format_eta(elapsed)} "
+        f"(avg {_format_eta(avg)}, "
+        f"docs remaining: {remaining_docs}, "
+        f"batches remaining: {remaining_batches}, "
+        f"eta: {_format_eta(eta) if remaining_batches else '0s'})"
+    )
+
+
+# Allow up to this many consecutive iterations that find pending work at
+# loop entry before aborting. The first one is the normal resume path on
+# startup; one more covers transient flakiness in a drain; past that
+# we're almost certainly looping on the same failure.
+_MAX_CONSECUTIVE_PARTIAL_BATCHES = 2
+
+
 def _cmd_batch(args: SimpleNamespace) -> int:
     """Run coding + codebook updates in repeated document-batches until
     no uncoded documents remain. Resumable: on startup any in-progress
@@ -702,8 +919,7 @@ def _cmd_batch(args: SimpleNamespace) -> int:
     import time
 
     store.connect(args.db)
-    coders = store.list_coders()
-    if not coders:
+    if not store.list_coders():
         print(
             "[batch] no coders registered; run 'ta add-coder <identity>' first",
             file=sys.stderr,
@@ -717,241 +933,58 @@ def _cmd_batch(args: SimpleNamespace) -> int:
     durations: list[float] = []
     batches_run = 0
     consecutive_partial = 0
-    # Allow up to this many consecutive iterations that find pending work
-    # at loop entry before aborting. The first one is the normal resume
-    # path on startup; one more covers transient flakiness in a drain;
-    # past that we're almost certainly looping on the same failure.
-    max_consecutive_partial = 2
 
     while True:
         if max_batches is not None and batches_run >= max_batches:
             print(f"[batch] reached --max-batches={max_batches}, stopping")
             break
 
-        # Resume detection covers every stage of the prior batch so we
-        # never enqueue new documents on top of unfinished work:
-        #   - coding pending or in-flight  → drain_code
-        #   - aggregation pending          → drain_aggregate
-        #   - review pending               → drain_review
-        #   - reviewer decisions written   → finalize_codebook
-        # If we're in any of these states, finish the prior batch first
-        # (no new docs enqueued); otherwise close out any stray finalize
-        # before counting this as a fresh batch.
-        coding_unfinished = store.coding.has_unfinished_assignments()
-        aggregation_pending = store.aggregation.pending_aggregation_count()
-        review_pending = store.review.pending_review_count()
-        has_pending = (
-            coding_unfinished
-            or aggregation_pending > 0
-            or review_pending > 0
-        )
-        # Allow a couple of consecutive resume-iterations (first-run
-        # resume + one transient retry); past that we're spinning on the
-        # same failure (a deterministic crash, a segment that isn't being
-        # marked failed) and should abort instead of looping forever.
-        if has_pending:
+        pending = _pending_stage_counts()
+        if pending.any_pending:
             consecutive_partial += 1
-            if consecutive_partial > max_consecutive_partial:
+            if consecutive_partial > _MAX_CONSECUTIVE_PARTIAL_BATCHES:
                 print(
                     f"[batch] aborting: {consecutive_partial} consecutive "
                     f"iterations found pending work at start "
-                    f"(coding_unfinished={coding_unfinished}, "
-                    f"aggregation_pending={aggregation_pending}, "
-                    f"review_pending={review_pending}). "
-                    f"Inspect the queue / logs and re-run once the "
-                    f"blocking issue is fixed.",
+                    f"({pending.describe()}). Inspect the queue / logs "
+                    f"and re-run once the blocking issue is fixed.",
                     file=sys.stderr,
                 )
                 return 1
-        else:
-            consecutive_partial = 0
-        resuming = has_pending
-        if resuming:
             print(
                 f"[batch] resuming prior batch (attempt "
-                f"{consecutive_partial}/{max_consecutive_partial}: "
-                f"coding_unfinished={coding_unfinished}, "
-                f"aggregation_pending={aggregation_pending}, "
-                f"review_pending={review_pending})"
+                f"{consecutive_partial}/{_MAX_CONSECUTIVE_PARTIAL_BATCHES}: "
+                f"{pending.describe()})"
             )
         else:
-            # No pending work, but a previous run may have crashed between
-            # the last review and the codebook revision. finalize_codebook
-            # is idempotent (returns None when membership is unchanged).
-            try:
-                v = workers.finalize_codebook()
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[batch] startup finalize crashed: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                v = None
+            consecutive_partial = 0
+            # A previous run may have crashed between the last review and
+            # the codebook revision. finalize_codebook is idempotent
+            # (None when membership is unchanged).
+            v = _finalize_codebook_step("[batch] startup-finalize:")
             if v is not None:
                 print(
-                    f"[batch] finalized leftover codebook v{v} from prior batch"
+                    f"[batch] finalized leftover codebook v{v} "
+                    f"from prior batch"
                 )
-
-            docs = store.list_documents_without_queue_entries(batch_size)
-            if not docs:
+            if _enqueue_new_batch(batch_size) == 0:
                 print("[batch] no more uncoded documents — done")
                 break
-            total_enqueued = 0
-            for d in docs:
-                total_enqueued += store.coding.enqueue_document(d.document_id)
-            print(
-                f"[batch] enqueued batch of {len(docs)} document(s), "
-                f"{total_enqueued} assignment(s) "
-                f"({[d.filename for d in docs[:3]]}{'...' if len(docs) > 3 else ''})"
-            )
 
-        remaining_docs = store.count_documents_without_queue_entries()
-        total_batches_est = batches_run + 1 + (remaining_docs + batch_size - 1) // batch_size
-        avg = sum(durations) / len(durations) if durations else 0.0
-        eta_total = avg * (total_batches_est - batches_run - 1) if avg else 0.0
-        print(
-            f"[batch] starting batch {batches_run + 1}/~{total_batches_est} "
-            f"(remaining docs after this batch: {remaining_docs}, "
-            f"avg/batch: {_format_eta(avg) if avg else 'n/a'}, "
-            f"eta remaining: {_format_eta(eta_total) if avg else 'n/a'})"
-        )
-
+        _print_batch_start(batches_run, batch_size, durations)
         t_batch = time.monotonic()
 
-        # ── coding ───────────────────────────────────────────────────────
-        todo = store.coding.pending_count()
-        bar_total = todo
-        print(f"[batch.code] todo={todo} workers={n_workers}")
-        if todo > 0:
-            with _make_progress("[batch.code]") as prog:
-                task = prog.add_task("", total=bar_total)
-
-                def on_code(res: dict, c: dict) -> None:
-                    if not res["ok"]:
-                        print(
-                            f"[batch.code] segment={res['segment_id']} "
-                            f"coder={res['coder_id']} FAILED: {res['error']}",
-                            file=sys.stderr,
-                        )
-                    prog.advance(task)
-
-                async def _run() -> dict:
-                    from concurrent.futures import ThreadPoolExecutor
-                    loop = asyncio.get_running_loop()
-                    loop.set_default_executor(
-                        ThreadPoolExecutor(max_workers=max(8, n_workers * 3))
-                    )
-                    return await workers.drain_code_async(
-                        workers=n_workers,
-                        use_mock_embeddings=args.mock_embeddings,
-                        on_event=on_code,
-                    )
-
-                try:
-                    counters = asyncio.run(_run())
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[batch.code] drain crashed: {type(exc).__name__}: {exc}; "
-                        "continuing with aggregate/review",
-                        file=sys.stderr,
-                    )
-                    counters = {"done": 0, "failed": 0}
-            print(
-                f"[batch.code] done: {counters['done']} ok, "
-                f"{counters['failed']} failed"
-            )
-
-        # ── aggregate ────────────────────────────────────────────────────
-        todo = store.aggregation.pending_aggregation_count()
-        bar_total = todo
-        print(f"[batch.aggregate] todo={todo}")
-        if todo > 0:
-            with _make_progress("[batch.aggregate]") as prog:
-                task = prog.add_task("", total=bar_total)
-
-                def on_agg(res: dict, c: dict) -> None:
-                    if not res.get("ok"):
-                        print(
-                            f"[batch.aggregate] segment={res['segment_id']} "
-                            f"FAILED: {res.get('error')}",
-                            file=sys.stderr,
-                        )
-                    prog.advance(task)
-
-                try:
-                    counters = workers.drain_aggregate(
-                        use_mock_embeddings=args.mock_embeddings,
-                        on_event=on_agg,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[batch.aggregate] drain crashed: "
-                        f"{type(exc).__name__}: {exc}; continuing with review",
-                        file=sys.stderr,
-                    )
-                    counters = {"done": 0, "failed": 0}
-            print(
-                f"[batch.aggregate] done: {counters['done']} ok, "
-                f"{counters['failed']} failed"
-            )
-
-        # ── review ───────────────────────────────────────────────────────
-        todo = store.review.pending_review_count()
-        bar_total = todo
-        print(f"[batch.review] todo={todo}")
-        if todo > 0:
-            with _make_progress("[batch.review]") as prog:
-                task = prog.add_task("", total=bar_total)
-
-                def on_rev(res: dict, c: dict) -> None:
-                    prog.advance(task)
-
-                try:
-                    counters = workers.drain_review(
-                        use_mock_embeddings=args.mock_embeddings,
-                        on_event=on_rev,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[batch.review] drain crashed: "
-                        f"{type(exc).__name__}: {exc}; continuing to finalize",
-                        file=sys.stderr,
-                    )
-                    counters = {"done": 0, "failed": 0}
-            print(
-                f"[batch.review] done: {counters['done']} ok, "
-                f"{counters['failed']} failed"
-            )
-
-        # ── finalize codebook ────────────────────────────────────────────
-        try:
-            new_version = workers.finalize_codebook()
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[batch.update-codebook] finalize crashed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            new_version = None
-        if new_version is None:
-            print("[batch.update-codebook] codebook unchanged")
-        else:
-            print(f"[batch.update-codebook] created codebook v{new_version}")
+        _drain_code_stage(n_workers, args.mock_embeddings)
+        _drain_aggregate_stage(args.mock_embeddings)
+        _drain_review_stage(args.mock_embeddings)
+        _finalize_codebook_step("[batch.update-codebook]")
 
         elapsed = time.monotonic() - t_batch
         durations.append(elapsed)
         batches_run += 1
-        avg = sum(durations) / len(durations)
-        remaining_docs = store.count_documents_without_queue_entries()
-        remaining_batches = (remaining_docs + batch_size - 1) // batch_size
-        eta = avg * remaining_batches
-        print(
-            f"[batch] finished batch {batches_run} in {_format_eta(elapsed)} "
-            f"(avg {_format_eta(avg)}, "
-            f"docs remaining: {remaining_docs}, "
-            f"batches remaining: {remaining_batches}, "
-            f"eta: {_format_eta(eta) if remaining_batches else '0s'})"
-        )
+        _print_batch_done(batches_run, elapsed, batch_size, durations)
+
+    return 0
 
     return 0
 
