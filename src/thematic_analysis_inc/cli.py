@@ -716,6 +716,7 @@ def _cmd_batch(args: SimpleNamespace) -> int:
 
     durations: list[float] = []
     batches_run = 0
+    first_iteration = True
 
     while True:
         if max_batches is not None and batches_run >= max_batches:
@@ -734,11 +735,30 @@ def _cmd_batch(args: SimpleNamespace) -> int:
         coding_unfinished = store.coding.has_unfinished_assignments()
         aggregation_pending = store.aggregation.pending_aggregation_count()
         review_pending = store.review.pending_review_count()
-        resuming = (
+        has_pending = (
             coding_unfinished
             or aggregation_pending > 0
             or review_pending > 0
         )
+        # Only the very first iteration is allowed to resume a prior
+        # partial batch. After that, every batch we run must drain itself
+        # to completion; if we still see pending work at the top of the
+        # loop, the previous iteration's drains failed to make progress
+        # (e.g. the same segment crashes deterministically and isn't being
+        # marked failed). Abort so we don't spin forever.
+        if has_pending and not first_iteration:
+            print(
+                f"[batch] aborting: prior batch did not drain to completion "
+                f"(coding_unfinished={coding_unfinished}, "
+                f"aggregation_pending={aggregation_pending}, "
+                f"review_pending={review_pending}). "
+                f"Inspect the queue / logs and re-run once the blocking "
+                f"issue is fixed.",
+                file=sys.stderr,
+            )
+            return 1
+        resuming = has_pending
+        first_iteration = False
         if resuming:
             print(
                 f"[batch] resuming prior batch "
