@@ -716,7 +716,12 @@ def _cmd_batch(args: SimpleNamespace) -> int:
 
     durations: list[float] = []
     batches_run = 0
-    first_iteration = True
+    consecutive_partial = 0
+    # Allow up to this many consecutive iterations that find pending work
+    # at loop entry before aborting. The first one is the normal resume
+    # path on startup; one more covers transient flakiness in a drain;
+    # past that we're almost certainly looping on the same failure.
+    max_consecutive_partial = 2
 
     while True:
         if max_batches is not None and batches_run >= max_batches:
@@ -740,29 +745,32 @@ def _cmd_batch(args: SimpleNamespace) -> int:
             or aggregation_pending > 0
             or review_pending > 0
         )
-        # Only the very first iteration is allowed to resume a prior
-        # partial batch. After that, every batch we run must drain itself
-        # to completion; if we still see pending work at the top of the
-        # loop, the previous iteration's drains failed to make progress
-        # (e.g. the same segment crashes deterministically and isn't being
-        # marked failed). Abort so we don't spin forever.
-        if has_pending and not first_iteration:
-            print(
-                f"[batch] aborting: prior batch did not drain to completion "
-                f"(coding_unfinished={coding_unfinished}, "
-                f"aggregation_pending={aggregation_pending}, "
-                f"review_pending={review_pending}). "
-                f"Inspect the queue / logs and re-run once the blocking "
-                f"issue is fixed.",
-                file=sys.stderr,
-            )
-            return 1
+        # Allow a couple of consecutive resume-iterations (first-run
+        # resume + one transient retry); past that we're spinning on the
+        # same failure (a deterministic crash, a segment that isn't being
+        # marked failed) and should abort instead of looping forever.
+        if has_pending:
+            consecutive_partial += 1
+            if consecutive_partial > max_consecutive_partial:
+                print(
+                    f"[batch] aborting: {consecutive_partial} consecutive "
+                    f"iterations found pending work at start "
+                    f"(coding_unfinished={coding_unfinished}, "
+                    f"aggregation_pending={aggregation_pending}, "
+                    f"review_pending={review_pending}). "
+                    f"Inspect the queue / logs and re-run once the "
+                    f"blocking issue is fixed.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            consecutive_partial = 0
         resuming = has_pending
-        first_iteration = False
         if resuming:
             print(
-                f"[batch] resuming prior batch "
-                f"(coding_unfinished={coding_unfinished}, "
+                f"[batch] resuming prior batch (attempt "
+                f"{consecutive_partial}/{max_consecutive_partial}: "
+                f"coding_unfinished={coding_unfinished}, "
                 f"aggregation_pending={aggregation_pending}, "
                 f"review_pending={review_pending})"
             )
