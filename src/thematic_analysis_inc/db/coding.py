@@ -141,19 +141,6 @@ def pending_count(coder: Coder | None = None) -> int:
         return int(s.exec(stmt).one())
 
 
-def has_unfinished_assignments() -> bool:
-    """True iff any CodingQueueEntry is still pending or in-flight
-    (``finished_at`` is NULL). Used by the batch runner to detect a
-    partially-completed previous batch on restart."""
-    with session() as s:
-        n = s.exec(
-            select(func.count())
-            .select_from(CodingQueueEntry)
-            .where(CodingQueueEntry.finished_at.is_(None))  # type: ignore[union-attr]
-        ).one()
-        return int(n) > 0
-
-
 def assignment_has_codes(assignment: CodingQueueEntry) -> bool:
     """True iff Code rows already exist for this assignment's
     (segment_id, coder_id, codebook_used_id)."""
