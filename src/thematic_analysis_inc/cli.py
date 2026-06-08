@@ -795,14 +795,40 @@ def _drain_code_stage(n_workers: int, mock_embeddings: bool) -> None:
                 file=sys.stderr,
             )
 
-    _run_stage(
-        "[batch.code]",
-        store.coding.pending_count(),
-        _run,
-        extras=f"workers={n_workers}",
-        on_event=_on_event,
-        crash_continuation="continuing with aggregate/review",
-    )
+    # ``drain_code_async`` exits as soon as any worker's
+    # ``claim_next_assignment`` returns ``None`` — which happens not only
+    # when the queue is empty but also when every remaining pending row
+    # is on a segment currently in-flight under another worker's claim
+    # (per-segment serialization in ``coding.claim_next_assignment``).
+    # That early exit can strand a few queue rows whose segments were
+    # busy at the moment the first worker idled out. Re-run the drain
+    # until ``pending_count`` is zero or we make no progress.
+    max_sweeps = 5
+    for sweep in range(1, max_sweeps + 1):
+        todo = store.coding.pending_count()
+        if todo == 0:
+            return
+        extras = f"workers={n_workers}"
+        if sweep > 1:
+            extras += f" sweep={sweep}/{max_sweeps}"
+        _run_stage(
+            "[batch.code]",
+            todo,
+            _run,
+            extras=extras,
+            on_event=_on_event,
+            crash_continuation="continuing with aggregate/review",
+        )
+        if store.coding.pending_count() >= todo:
+            # Drain made no progress this sweep — anything left is stuck
+            # (deterministic crash, stale in-flight claim, …). Give up and
+            # let the outer resume-budget catch it.
+            print(
+                f"[batch.code] {store.coding.pending_count()} row(s) still "
+                f"pending after sweep {sweep} with no progress; giving up",
+                file=sys.stderr,
+            )
+            return
 
 
 def _drain_aggregate_stage(mock_embeddings: bool) -> None:
