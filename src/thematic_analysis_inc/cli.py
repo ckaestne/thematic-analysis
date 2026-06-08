@@ -696,29 +696,33 @@ def _format_eta(seconds: float) -> str:
 
 
 class _PendingCounts(SimpleNamespace):
-    coding_unfinished: bool
+    coding_pending: int
     aggregation_pending: int
     review_pending: int
 
     @property
     def any_pending(self) -> bool:
         return bool(
-            self.coding_unfinished
+            self.coding_pending
             or self.aggregation_pending
             or self.review_pending
         )
 
     def describe(self) -> str:
         return (
-            f"coding_unfinished={self.coding_unfinished}, "
+            f"coding_pending={self.coding_pending}, "
             f"aggregation_pending={self.aggregation_pending}, "
             f"review_pending={self.review_pending}"
         )
 
 
 def _pending_stage_counts() -> _PendingCounts:
+    # Mirror what the drain workers can actually pick up: ``pending_count``
+    # excludes claimed-but-not-finished rows (stale claims from a crashed
+    # previous run cannot be re-claimed by ``claim_next_assignment``, so
+    # they aren't resumable work — only true "queued" rows are).
     return _PendingCounts(
-        coding_unfinished=store.coding.has_unfinished_assignments(),
+        coding_pending=store.coding.pending_count(),
         aggregation_pending=store.aggregation.pending_aggregation_count(),
         review_pending=store.review.pending_review_count(),
     )
