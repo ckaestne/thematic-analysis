@@ -889,7 +889,8 @@ def _print_batch_start(
         f"[batch] starting batch {batches_run + 1}/~{total_est} "
         f"(remaining docs after this batch: {remaining_docs}, "
         f"avg/batch: {_format_eta(avg) if avg else 'n/a'}, "
-        f"eta remaining: {_format_eta(eta) if avg else 'n/a'})"
+        f"estimated time for remaining batches: "
+        f"{_format_eta(eta) if avg else 'n/a'})"
     )
 
 
@@ -905,7 +906,8 @@ def _print_batch_done(
         f"(avg {_format_eta(avg)}, "
         f"docs remaining: {remaining_docs}, "
         f"batches remaining: {remaining_batches}, "
-        f"eta: {_format_eta(eta) if remaining_batches else '0s'})"
+        f"estimated time for remaining batches: "
+        f"{_format_eta(eta) if remaining_batches else '0s'})"
     )
 
 
