@@ -248,33 +248,64 @@ async def drain_code_async(
     agent_factory: AgentFactory | None = None,
     on_event: Callable[[dict, dict], None] | None = None,
 ) -> dict:
-    """Drain the coding queue across all coders."""
+    """Drain the coding queue across all coders.
+
+    ``claim_next_assignment`` enforces per-segment serialization, so it
+    can return ``None`` for a worker even while there is still pending
+    work — every remaining row's segment is currently in-flight under
+    another worker's claim. To avoid stranding those rows, an idle
+    worker parks on a condition until another worker either completes a
+    task (state changed: retry the claim) or also idles. The drain
+    finishes only when *all* workers are simultaneously idle: at that
+    moment no claim is in flight, so a ``None`` from ``claim`` truly
+    means the queue is drained.
+    """
+    n = max(1, workers)
     counters = {"done": 0, "failed": 0}
-    stop = False
+    stop_event = asyncio.Event()
+    cond = asyncio.Condition()
+    idle = 0
 
     async def loop() -> None:
-        nonlocal stop
-        while True:
-            if stop:
-                return
+        nonlocal idle
+        while not stop_event.is_set():
             if limit is not None and counters["done"] + counters["failed"] >= limit:
-                stop = True
+                stop_event.set()
+                async with cond:
+                    cond.notify_all()
                 return
             res = await code_one_async(
                 use_mock_embeddings=use_mock_embeddings,
                 agent_factory=agent_factory,
             )
             if res is None:
-                stop = True
-                return
+                async with cond:
+                    idle += 1
+                    if idle == n:
+                        # Every worker is simultaneously idle → no claim
+                        # can be in flight, so the queue really is empty.
+                        stop_event.set()
+                        cond.notify_all()
+                    else:
+                        # Wait for another worker to either finish a task
+                        # (frees up a segment) or also go idle (which
+                        # will set stop_event).
+                        await cond.wait()
+                    idle -= 1
+                continue
             if res["ok"]:
                 counters["done"] += 1
             else:
                 counters["failed"] += 1
             if on_event is not None:
                 on_event(res, counters)
+            # Completing a task may have freed a segment for a parked
+            # worker; wake them so they can re-attempt the claim.
+            if idle:
+                async with cond:
+                    cond.notify_all()
 
-    await asyncio.gather(*[loop() for _ in range(max(1, workers))])
+    await asyncio.gather(*[loop() for _ in range(n)])
     return counters
 
 
