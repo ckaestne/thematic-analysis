@@ -722,16 +722,52 @@ def _cmd_batch(args: SimpleNamespace) -> int:
             print(f"[batch] reached --max-batches={max_batches}, stopping")
             break
 
-        resuming = store.coding.has_unfinished_assignments()
+        # Resume detection covers every stage of the prior batch so we
+        # never enqueue new documents on top of unfinished work:
+        #   - coding pending or in-flight  → drain_code
+        #   - aggregation pending          → drain_aggregate
+        #   - review pending               → drain_review
+        #   - reviewer decisions written   → finalize_codebook
+        # If we're in any of these states, finish the prior batch first
+        # (no new docs enqueued); otherwise close out any stray finalize
+        # before counting this as a fresh batch.
+        coding_unfinished = store.coding.has_unfinished_assignments()
+        aggregation_pending = store.aggregation.pending_aggregation_count()
+        review_pending = store.review.pending_review_count()
+        resuming = (
+            coding_unfinished
+            or aggregation_pending > 0
+            or review_pending > 0
+        )
         if resuming:
-            doc_ids: list[int] = []
-            print("[batch] resuming in-progress queue from previous run")
+            print(
+                f"[batch] resuming prior batch "
+                f"(coding_unfinished={coding_unfinished}, "
+                f"aggregation_pending={aggregation_pending}, "
+                f"review_pending={review_pending})"
+            )
         else:
+            # No pending work, but a previous run may have crashed between
+            # the last review and the codebook revision. finalize_codebook
+            # is idempotent (returns None when membership is unchanged).
+            try:
+                v = workers.finalize_codebook()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[batch] startup finalize crashed: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                v = None
+            if v is not None:
+                print(
+                    f"[batch] finalized leftover codebook v{v} from prior batch"
+                )
+
             docs = store.list_documents_without_queue_entries(batch_size)
             if not docs:
                 print("[batch] no more uncoded documents — done")
                 break
-            doc_ids = [d.document_id for d in docs]
             total_enqueued = 0
             for d in docs:
                 total_enqueued += store.coding.enqueue_document(d.document_id)
