@@ -6,7 +6,13 @@ from sqlalchemy import func, or_
 from sqlmodel import select
 
 from thematic_analysis_inc.db.connection import session
-from thematic_analysis_inc.db.models import Code, Document, Quote, Segment
+from thematic_analysis_inc.db.models import (
+    Code,
+    CodingQueueEntry,
+    Document,
+    Quote,
+    Segment,
+)
 
 
 def add_document(filename: str) -> Document:
@@ -72,6 +78,48 @@ def enqueue_segments(
             s.refresh(seg)
             s.expunge(seg)
         return out
+
+
+def _documents_without_queue_entries_stmt():
+    """Subquery: document_ids that have at least one queue entry."""
+    enqueued = (
+        select(Segment.document_id)
+        .join(
+            CodingQueueEntry,
+            CodingQueueEntry.segment_id == Segment.segment_id,
+        )
+        .distinct()
+    )
+    return select(Document).where(
+        Document.document_id.not_in(enqueued)  # type: ignore[attr-defined]
+    )
+
+
+def count_documents_without_queue_entries() -> int:
+    """Number of documents that have no CodingQueueEntry on any segment."""
+    with session() as s:
+        stmt = _documents_without_queue_entries_stmt().with_only_columns(
+            func.count(Document.document_id)  # type: ignore[arg-type]
+        )
+        return int(s.exec(stmt).one())
+
+
+def list_documents_without_queue_entries(
+    limit: int, *, random_order: bool = True
+) -> list[Document]:
+    """Up to ``limit`` documents that have no CodingQueueEntry yet.
+
+    Used by ``ta batch`` to pick the next batch of uncoded documents.
+    """
+    with session() as s:
+        stmt = _documents_without_queue_entries_stmt()
+        if random_order:
+            stmt = stmt.order_by(func.random())
+        else:
+            stmt = stmt.order_by(Document.document_id)  # type: ignore[arg-type]
+        rows = list(s.exec(stmt.limit(limit)).all())
+        s.expunge_all()
+        return rows
 
 
 def count_segments() -> int:

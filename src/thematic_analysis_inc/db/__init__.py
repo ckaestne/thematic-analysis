@@ -49,6 +49,7 @@ from thematic_analysis_inc.db.connection import (
 from thematic_analysis_inc.db.documents import (
     add_document,
     add_quote,
+    count_documents_without_queue_entries,
     count_segments,
     enqueue_segments,
     find_document_by_filename,
@@ -56,6 +57,7 @@ from thematic_analysis_inc.db.documents import (
     get_segment_with_codes,
     link_code_quote,
     list_documents,
+    list_documents_without_queue_entries,
     list_segments,
 )
 from thematic_analysis_inc.db.models import (
@@ -162,6 +164,8 @@ __all__ = [
     "add_document",
     "find_document_by_filename",
     "list_documents",
+    "list_documents_without_queue_entries",
+    "count_documents_without_queue_entries",
     "count_segments",
     "enqueue_segments",
     "get_segment",
