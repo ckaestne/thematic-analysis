@@ -20,6 +20,7 @@ import {
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, type ThemeSummary } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { QuoteLink } from "../components/QuoteLink";
 import { useConfirmDelete } from "../components/ConfirmDelete";
 
@@ -97,7 +98,7 @@ export function ThemeDetailPage() {
   });
 
   if (detail.error) return <ErrorAlert error={detail.error} />;
-  if (!detail.data) return <Text c="dimmed">Loading…</Text>;
+  if (!detail.data) return <LoadingIndicator />;
   const d = detail.data;
 
   const codeQuotes: Array<{
@@ -264,9 +265,9 @@ export function ThemeDetailPage() {
             All quotes from mapped codes ({totalCodeQuotes})
           </Title>
           {codeQueries.some((q) => q.isLoading) && (
-            <Text size="xs" c="dimmed" mb="xs">
-              Loading…
-            </Text>
+            <div style={{ marginBottom: 8 }}>
+              <LoadingIndicator label="Loading quotes…" />
+            </div>
           )}
           <Stack gap="md">
             {codeQuotes.map((c) => (

@@ -22,6 +22,7 @@ import {
   type CodebookVersionDetail,
 } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 
 const QUOTES_VISIBLE = 3;
 
@@ -247,6 +248,10 @@ export function CodebookPage() {
 
       {detail.error ? (
         <ErrorAlert error={detail.error} />
+      ) : versions.isLoading ||
+        detail.isLoading ||
+        (selectedVersion && !detail.data) ? (
+        <LoadingIndicator label="Loading codebook…" />
       ) : !detail.data ? (
         <Text c="dimmed">Select a version.</Text>
       ) : (

@@ -28,6 +28,7 @@ import { api, type Document } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { useConfirmDelete } from "../components/ConfirmDelete";
 import { EnqueueButton } from "../components/EnqueueButton";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "gray",
@@ -306,7 +307,9 @@ export function Documents() {
           <Table.Tbody>
             {isLoading && (
               <Table.Tr>
-                <Table.Td colSpan={6 + coderIds.length}>Loading…</Table.Td>
+                <Table.Td colSpan={6 + coderIds.length}>
+                  <LoadingIndicator label="Loading documents…" />
+                </Table.Td>
               </Table.Tr>
             )}
             {sortedItems.map((d) => (

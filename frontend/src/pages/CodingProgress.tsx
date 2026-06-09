@@ -19,6 +19,7 @@ import {
   type RecentCode,
 } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { StatCard } from "../components/StatCard";
 import { StatusBar } from "../components/StatusBar";
 import { BackgroundRunnerCard } from "../components/BackgroundRunnerCard";
@@ -140,7 +141,7 @@ export function CodingProgressPage() {
   });
 
   if (status.error) return <ErrorAlert error={status.error} />;
-  if (!status.data) return <Text c="dimmed">Loading…</Text>;
+  if (!status.data) return <LoadingIndicator />;
 
   const s = status.data.stage1;
 
@@ -295,7 +296,7 @@ export function CodingProgressPage() {
             <CodeText>finalize-codebook</CodeText>.
           </Text>
           {preview.error && <ErrorAlert error={preview.error} />}
-          {preview.isLoading && <Text c="dimmed">Loading…</Text>}
+          {preview.isLoading && <LoadingIndicator />}
           {preview.data && !preview.data.has_changes && (
             <Text size="sm" c="dimmed">
               No reviewed code changes pending. The next codebook would be
@@ -321,7 +322,7 @@ export function CodingProgressPage() {
             </Text>
           </Group>
           {recent.error && <ErrorAlert error={recent.error} />}
-          {recent.isLoading && <Text c="dimmed">Loading…</Text>}
+          {recent.isLoading && <LoadingIndicator />}
           {recent.data && recent.data.length === 0 && (
             <Text c="dimmed" size="sm">
               No codes yet.

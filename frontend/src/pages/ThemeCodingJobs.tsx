@@ -14,6 +14,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, type ThemeCodingJobRunStatus } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 
 const STATUS_LABEL: Record<ThemeCodingJobRunStatus, string> = {
   not_run: "not run",
@@ -88,7 +89,7 @@ export function ThemeCodingJobsPage() {
       {runPending.error && <ErrorAlert error={runPending.error} />}
 
       {jobs.isLoading ? (
-        <Text c="dimmed">Loading…</Text>
+        <LoadingIndicator label="Loading jobs…" />
       ) : !jobs.data || jobs.data.length === 0 ? (
         <Card padding="md" withBorder>
           <Text c="dimmed" ta="center" py="md">

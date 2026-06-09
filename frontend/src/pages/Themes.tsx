@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { api, type ThemeFull } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { ThemeCard } from "../components/ThemeCard";
 import { useConfirmDelete } from "../components/ConfirmDelete";
 
@@ -172,7 +173,7 @@ export function ThemesPage() {
       </Collapse>
 
       {themes.isLoading ? (
-        <Text c="dimmed">Loading…</Text>
+        <LoadingIndicator label="Loading themes…" />
       ) : !sortedThemes || sortedThemes.length === 0 ? (
         <Card padding="md" withBorder>
           <Text c="dimmed" ta="center" py="md">
