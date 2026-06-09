@@ -12,6 +12,7 @@ import { useEffect } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { SegmentCodingCard } from "../components/SegmentCodingCard";
 
 export function DocumentDetail() {
@@ -45,7 +46,7 @@ export function DocumentDetail() {
   }, [focusSegmentId, data]);
 
   if (error) return <ErrorAlert error={error} />;
-  if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
+  if (isLoading || !data) return <LoadingIndicator />;
 
   const invalidateKeys: ReadonlyArray<ReadonlyArray<unknown>> = [
     ["document", documentId],

@@ -20,6 +20,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api, type ThemeCodingJobRunStatus } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { ThemeCard } from "../components/ThemeCard";
 import { useConfirmDelete } from "../components/ConfirmDelete";
 
@@ -81,7 +82,7 @@ export function ThemeCodingJobDetailPage() {
   });
 
   if (job.error) return <ErrorAlert error={job.error} />;
-  if (!job.data) return <Text c="dimmed">Loading…</Text>;
+  if (!job.data) return <LoadingIndicator />;
   const d = job.data;
 
   const active = d.themes.filter((t) => !t.deleted);

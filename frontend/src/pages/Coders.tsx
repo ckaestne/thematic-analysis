@@ -19,6 +19,7 @@ import { notifications } from "@mantine/notifications";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
 import { useConfirmDelete } from "../components/ConfirmDelete";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 
 export function Coders() {
   const qc = useQueryClient();
@@ -130,7 +131,9 @@ export function Coders() {
           <Table.Tbody>
             {isLoading && (
               <Table.Tr>
-                <Table.Td colSpan={4}>Loading…</Table.Td>
+                <Table.Td colSpan={4}>
+                  <LoadingIndicator label="Loading coders…" />
+                </Table.Td>
               </Table.Tr>
             )}
             {data?.map((c) => (

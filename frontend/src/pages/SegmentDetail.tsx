@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { SegmentCodingCard } from "../components/SegmentCodingCard";
 
 export function SegmentDetail() {
@@ -21,7 +22,7 @@ export function SegmentDetail() {
   });
 
   if (error) return <ErrorAlert error={error} />;
-  if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
+  if (isLoading || !data) return <LoadingIndicator />;
 
   return (
     <Stack gap="md">

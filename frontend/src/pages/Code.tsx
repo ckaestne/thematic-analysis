@@ -24,6 +24,7 @@ import {
   type CodeDetail,
 } from "../api";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 
 function coderLabel(coder_id: number | null | undefined, identity?: string | null) {
   if (coder_id === -1) return "reviewer";
@@ -251,9 +252,9 @@ function LineageNode({
       {expandable && (
         <Collapse in={open}>
           {detail.isLoading && (
-            <Text size="xs" c="dimmed" pl="md" pt={4}>
-              Loading…
-            </Text>
+            <div style={{ paddingLeft: 16, paddingTop: 4 }}>
+              <LoadingIndicator />
+            </div>
           )}
           {detail.error && <ErrorAlert error={detail.error} />}
           {detail.data?.derivation_sources.map((s) => (
@@ -304,7 +305,7 @@ function SimilarCodesPanel({ codeId }: { codeId: number }) {
   if (similar.isLoading)
     return (
       <Card padding="md" withBorder>
-        <Text c="dimmed">Loading similar codes…</Text>
+        <LoadingIndicator label="Loading similar codes…" />
       </Card>
     );
   if (similar.error) return <ErrorAlert error={similar.error} />;
@@ -392,7 +393,7 @@ export function CodePage() {
   });
 
   if (detail.error) return <ErrorAlert error={detail.error} />;
-  if (!detail.data) return <Text c="dimmed">Loading…</Text>;
+  if (!detail.data) return <LoadingIndicator />;
   const d = detail.data;
 
   return (

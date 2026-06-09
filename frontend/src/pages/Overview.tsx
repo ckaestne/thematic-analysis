@@ -21,6 +21,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { BackgroundRunnerCard } from "../components/BackgroundRunnerCard";
 import { ErrorAlert } from "../components/ErrorAlert";
+import { LoadingIndicator } from "../components/LoadingIndicator";
 import { StatCard } from "../components/StatCard";
 import { StatusBar } from "../components/StatusBar";
 
@@ -37,7 +38,7 @@ export function Overview() {
   });
 
   if (error) return <ErrorAlert error={error} />;
-  if (isLoading || !data) return <Text c="dimmed">Loading…</Text>;
+  if (isLoading || !data) return <LoadingIndicator />;
 
   const { stage1 } = data;
   const desc = data.research_context_description.trim();
