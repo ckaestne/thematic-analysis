@@ -46,12 +46,12 @@ def _conn() -> sqlite3.Connection:
 
 
 def _ensure_connected() -> None:
-    """Open the engine + sqlite layer for the current request. The sqlite
-    connection is closed; the engine stays cached."""
+    """Assert the engine has been set up. ``create_app`` calls
+    ``init_db`` once at startup so the schema and pragmas are already
+    applied; this is just a guard for endpoints that ran before the
+    factory wired ``_DB_PATH``."""
     if _DB_PATH is None:
         raise RuntimeError("DB path not configured")
-    c = store.connect(_DB_PATH)
-    c.close()
 
 
 class ResearchContextIn(BaseModel):
