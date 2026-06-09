@@ -153,6 +153,25 @@ def _migrate_sqlmodel_tables(engine: Engine) -> None:
                 "ADD COLUMN theme_coder_prompt TEXT"
             )
 
+        # Indexes added after the initial schema was shipped — `create_all`
+        # will create these for fresh databases, but existing ones need a
+        # nudge. `CREATE INDEX IF NOT EXISTS` is cheap and idempotent.
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS idx_code_segment_coder "
+            "ON code (segment_id, coder_id)",
+            "CREATE INDEX IF NOT EXISTS idx_codebook_code_code "
+            "ON codebook_code (code_id)",
+            "CREATE INDEX IF NOT EXISTS idx_codes_supporting_quotes_quote "
+            "ON codes_supporting_quotes (quote_id)",
+            "CREATE INDEX IF NOT EXISTS idx_theme_code_code "
+            "ON theme_code (code_id)",
+            "CREATE INDEX IF NOT EXISTS idx_theme_supporting_quote_quote "
+            "ON theme_supporting_quote (quote_id)",
+            "CREATE INDEX IF NOT EXISTS idx_themes_derived_source "
+            "ON themes_derived (source_theme_id)",
+        ):
+            conn.exec_driver_sql(ddl)
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open an autocommit sqlite3 connection AND set up the SQLAlchemy

@@ -277,7 +277,12 @@ class Code(SQLModel, table=True):
     embedding: Optional[bytes] = Field(default=None)
 
     segment: Segment = Relationship(back_populates="codes")
-    coder: Coder = Relationship()
+    # Eager-join coder: there are only a handful (typically 3–5) of
+    # them and every code-listing UI needs the coder's identity, so the
+    # default lazy load fires `SELECT coder WHERE coder_id = ?` for
+    # each unique coder per response. A joined load adds 3 columns to
+    # the row and avoids the extra round-trip entirely.
+    coder: Coder = Relationship(sa_relationship_kwargs={"lazy": "joined"})
     codebook_used: Codebook = Relationship()
 
     supporting_quotes: list["Quote"] = Relationship(
@@ -295,6 +300,15 @@ class Code(SQLModel, table=True):
             "foreign_keys": "CodesDerived.new_code_id",
             "cascade": "all, delete-orphan",
         },
+    )
+
+    # The per-segment status query (db/status.py) filters codes by
+    # (segment_id, coder_id) together inside a correlated subquery
+    # evaluated for every segment. Individual indexes on each column
+    # only let SQLite pick one; a composite index turns the inner
+    # lookup into an index-only seek.
+    __table_args__ = (
+        Index("idx_code_segment_coder", "segment_id", "coder_id"),
     )
 
 
@@ -515,6 +529,13 @@ class CodebookCode(SQLModel, table=True):
         foreign_key="code.code_id", ondelete="CASCADE", primary_key=True
     )
 
+    # The composite PK indexes the (codebook_version, code_id) pair so
+    # forward lookups ("codes in revision N") are fast. The reverse
+    # lookup ("which revisions contain code X") needs its own index.
+    __table_args__ = (
+        Index("idx_codebook_code_code", "code_id"),
+    )
+
 
 class CodesSupportingQuotes(SQLModel, table=True):
     """n:m link: which Quotes support which Codes."""
@@ -526,6 +547,12 @@ class CodesSupportingQuotes(SQLModel, table=True):
     )
     quote_id: int = Field(
         foreign_key="quote.quote_id", ondelete="CASCADE", primary_key=True
+    )
+
+    # Reverse lookup "which codes cite this quote" — the composite PK
+    # only indexes the (code_id, quote_id) direction.
+    __table_args__ = (
+        Index("idx_codes_supporting_quotes_quote", "quote_id"),
     )
 
 
@@ -588,6 +615,11 @@ class ThemeCode(SQLModel, table=True):
         foreign_key="code.code_id", primary_key=True
     )
 
+    # Reverse lookup "which themes contain this code".
+    __table_args__ = (
+        Index("idx_theme_code_code", "code_id"),
+    )
+
 
 class ThemeSupportingQuote(SQLModel, table=True):
     """n:m link: representative quotes the agent picked for a theme.
@@ -607,6 +639,11 @@ class ThemeSupportingQuote(SQLModel, table=True):
         foreign_key="quote.quote_id", primary_key=True
     )
 
+    # Reverse lookup "which themes cite this quote".
+    __table_args__ = (
+        Index("idx_theme_supporting_quote_quote", "quote_id"),
+    )
+
 
 class ThemesDerived(SQLModel, table=True):
     """Provenance edge: `new_theme` was derived from `source_theme`.
@@ -624,6 +661,13 @@ class ThemesDerived(SQLModel, table=True):
         foreign_key="theme.theme_id", primary_key=True
     )
     rationale: Optional[str] = None
+
+    # The "active themes" view filters with
+    # ``theme_id NOT IN (SELECT source_theme_id FROM themes_derived)``,
+    # which is a full scan without an index here.
+    __table_args__ = (
+        Index("idx_themes_derived_source", "source_theme_id"),
+    )
 
 
 # ---------------------------------------------------------------------------
